@@ -1,0 +1,72 @@
+{
+  "manifestVersion": 2,
+  "id": "biaoqingbao-app",
+  "name": "表情包",
+  "version": "0.1.39",
+  "entry": "index.js",
+  "description": "让伙伴在回复中根据语境自然使用表情包，越用越懂你。",
+  "capabilities": [
+    "app/tools.expose-to-model",
+    "app/hooks.agent-pre-step",
+    "app/hooks.messages-post-assistant",
+    "app/process.spawn",
+    "app/models.read",
+    "app/models.infer",
+    "app/agents.read",
+    "app/sessions.read",
+    "app/sessions.manage",
+    "app/session.start-turn"
+  ],
+  "contributes": {
+    "cards": [
+      {
+        "id": "panel",
+        "title": "表情包",
+        "route": "/panel.html",
+        "face": {
+          "image": "assets/cover.png"
+        },
+        "pageIcon": "assets/nav-icon.png",
+        "realization": "page",
+        "siteNavEntry": true,
+        "cardForm": "flush",
+        "titlebar": "solid"
+      },
+      {
+        "id": "paper-plane-message",
+        "title": "对话内表情包",
+        "description": "聊天流里那张图片卡的载体，用户丢的图和伙伴配的图共用它，由记录里的归属决定长相。",
+        "route": "/paper-plane-message.html",
+        "face": {
+          "image": "assets/cover.png"
+        },
+        "cardForm": "flush",
+        "titleMode": "hide"
+      }
+    ],
+    "messageRenderers": [
+      {
+        "customType": "paper-plane-image",
+        "cardId": "paper-plane-message"
+      },
+      {
+        "customType": "partner-sticker",
+        "cardId": "paper-plane-message"
+      }
+    ]
+  },
+  "icon": "assets/icon.png",
+  "network": {
+    "allowedHosts": [
+      "api.siliconflow.cn",
+      "api.typesafe.ai",
+      "api.github.com"
+    ],
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "defaultTimeoutMs": 30000
+  },
+  "minAppVersion": "0.1059.0"
+}

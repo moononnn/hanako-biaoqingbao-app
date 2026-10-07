@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 跑自动测试
+        run: node --test tests/*.test.mjs
+
+      - name: 清单能解析、关键字段齐全
+        run: |
+          node -e "
+            const m = JSON.parse(require('fs').readFileSync('manifest.json', 'utf8'));
+            for (const key of ['id', 'name', 'version', 'entry']) {
+              if (!m[key]) throw new Error('manifest.json 缺 ' + key);
+            }
+            if (m.manifestVersion !== 2) throw new Error('manifestVersion 必须是 2');
+            console.log('manifest ok:', m.id, m.version);
+          "
+
+      - name: 卡片声明的页面文件都在
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+            const cards = m?.contributes?.cards || [];
+            for (const card of cards) {
+              if (!card.route) throw new Error('卡片缺 route: ' + card.id);
+              const file = path.join('ui', card.route.replace(/^\//, ''));
+              if (!fs.existsSync(file)) throw new Error('卡片页面不存在: ' + file);
+            }
+            console.log(cards.length + ' 张卡的页面都在');
+          "
+
+# 说明：
+# - 桌面悬浮球的测试（tests/test_ball_*.py）需要本机 Python + PyQt6，CI 里不跑，在本地发布前手动执行。
+# - 应用的静态校验器（validate-app.mjs）随 Hana 安装包分发，CI 环境里没有，因此在本地发布前手动跑。

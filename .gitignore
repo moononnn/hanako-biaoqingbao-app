@@ -1,0 +1,18 @@
+# 运行时与开发期产物，不进仓库
+data/
+stickers/
+_backups/
+dist/
+node_modules/
+*.log
+*.bak
+*.zip
+*.pyc
+__pycache__/
+.pytest_cache/
+
+# 本机调试残留（悬浮球窗口坐标缓存等）
+x.json
+
+# 内部开发记录（含本机现场与私人称呼），不公开
+PROJECT_LOG.md

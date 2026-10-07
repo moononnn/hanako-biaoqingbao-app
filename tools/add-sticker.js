@@ -1,0 +1,80 @@
+import { copyFile, readFile } from 'node:fs/promises';
+import { genId, atomicWriteJson, enqueueToolWrite, META_FILE, STICKERS_DIR } from '../lib/shared.js';
+import { safeStickerPath } from '../lib/ball-core.js';
+
+const metaPath = META_FILE;
+const stickersDir = STICKERS_DIR;
+
+const ALLOWED_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
+
+function reply(obj) {
+  return { content: [{ type: 'text', text: JSON.stringify(obj) }] };
+}
+
+export const name = "add_sticker";
+export const description = "把一张新图收进图库。sourcePath 传本机绝对路径，插件会复制图片到库目录并记录元数据。emotion / scene / keywords 尽量填，图库靠它们检索，空着的图以后很难被选中；description 写一句话说明这张图的感觉。什么时候用：用户明确让你把某张图收进库（「这张留着以后用」「加进图库」），或者你找到一张值得留的图并且用户认可。什么时候别用：用户只是发张图和你聊天、没说要收藏，不要自动入库。入库以后要改标签走 update_sticker_tags，不要删了重加。";
+export const parameters = {
+  type: "object",
+  properties: {
+    sourcePath: { type: "string", description: "图片文件的本地绝对路径" },
+    emotion: { type: "string", description: "情绪标签，多个用逗号分隔，如 '开心,感动,可爱'" },
+    scene: { type: "string", description: "场景标签，多个用逗号分隔，如 '早安,恭喜,打气'" },
+    keywords: { type: "string", description: "关键词，多个用逗号分隔" },
+    description: { type: "string", description: "一句话描述这张表情包的感觉" }
+  },
+  required: ["sourcePath"]
+};
+
+export async function execute(input, ctx) {
+  const { sourcePath, emotion = '', scene = '', keywords = '', description = '' } = input || {};
+
+  if (!sourcePath) return reply({ ok: false, error: '请提供图片路径' });
+
+  const normalizedPath = sourcePath.replace(/\\/g, '/');
+  const parts = normalizedPath.split('/');
+  const originalFile = parts[parts.length - 1];
+  const ext = originalFile.split('.').pop().toLowerCase();
+
+  if (!ALLOWED_EXTS.includes(ext)) {
+    return reply({ ok: false, error: `不支持的文件格式: .${ext}，支持: ${ALLOWED_EXTS.join(', ')}` });
+  }
+
+  // v0.25.2 - 分配 id → 复制 → 写 meta 整体进串行队列：多会话并发调用时不会分配到同一个 id
+  return await enqueueToolWrite(async () => {
+    let stickers = [];
+    try {
+      const raw = await readFile(metaPath, 'utf-8');
+      stickers = JSON.parse(raw);
+    } catch { /* 新库 */ }
+
+    const id = genId();
+    const fileName = `${id}.${ext}`;
+    const destPath = safeStickerPath(stickersDir, fileName);
+    if (!destPath) return reply({ ok: false, error: '图库目录路径不安全，无法写入图片' });
+
+    try {
+      await copyFile(sourcePath, destPath);
+    } catch (e) {
+      return reply({ ok: false, error: `复制文件失败: ${e.message}` });
+    }
+
+    const entry = {
+      id,
+      file: fileName,
+      description: description || originalFile.replace(`.${ext}`, ''),
+      tags: {
+        emotion: emotion ? emotion.split(',').map(s => s.trim()).filter(Boolean) : [],
+        scene: scene ? scene.split(',').map(s => s.trim()).filter(Boolean) : [],
+        keywords: keywords ? keywords.split(',').map(s => s.trim()).filter(Boolean) : []
+      },
+      added_at: new Date().toISOString()
+    };
+
+    stickers.push(entry);
+    // v0.19.5 - 原子写，避免崩溃留下半截图库文件
+    atomicWriteJson(metaPath, stickers);
+
+    ctx?.log?.info?.(`[biaoqingbao] add_sticker 入库: ${id} (${fileName})`);
+    return reply({ ok: true, data: entry, message: `已添加表情包 ${id}` });
+  });
+}

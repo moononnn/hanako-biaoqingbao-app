@@ -1,0 +1,6288 @@
+﻿// 表情包页面 - 前端交互 v0.15.0
+// 三视图架构：首页 / 表情包库 / 偏好设置
+// 薄荷绿主色 + 樱花粉辅色
+(function () {
+  'use strict';
+
+  // ═══════════════════════════════════
+  //  认证工具
+  // ═══════════════════════════════════
+  function getAuthParams() {
+    var params = new URLSearchParams(window.location.search);
+    return {
+      // App 版：宿主下发的凭证参数名是 appSurfaceSession（插件版是 pluginSurfaceSession），
+      // 两个都认，方便同一份脚本在两边都能跑。
+      surface: params.get('appSurfaceSession') || params.get('pluginSurfaceSession') || '',
+      // 旧版直连页面使用 server token，继续走 query 兼容。
+      token: params.get('token') || '',
+    };
+  }
+
+  function withAuth(url) {
+    var auth = getAuthParams();
+    var key = '';
+    var value = '';
+    if (auth.token) {
+      key = 'token';
+      value = auth.token;
+    } else if (auth.surface) {
+      // App 版用 appSurfaceSession（图片等子资源走 query 时也用这个名字）
+      key = 'appSurfaceSession';
+      value = auth.surface;
+    }
+    if (!key) return url;
+    var sep = url.indexOf('?') >= 0 ? '&' : '?';
+    return url + sep + key + '=' + encodeURIComponent(value);
+  }
+
+  function baseUrl() {
+    // App 版：页面地址形如 /api/apps/<appId>/ui/panel.html，
+    // 后端路由就是同级的 /api/apps/<appId>/routes（插件版是当时按路径推出来的）
+    var m = window.location.pathname.match(/^\/api\/apps\/([^/]+)\/ui\//);
+    if (m) return '/api/apps/' + m[1] + '/routes';
+    return '/api/apps/biaoqingbao-app/routes';
+  }
+
+  var API = baseUrl();
+
+  // v0.25.0 - 统一 fetch 封装：所有请求默认带超时，避免慢请求挂死 UI（按钮永久禁用/loading 永转）
+  // 超时优先级：opts.timeout 显式指定 > 按 url 推断的类别超时 > 默认 15s
+  // 已有 signal 的调用（上传 60s / ZIP 120s / 检查更新 12s 等）保持原样不动
+  function apiFetch(url, opts) {
+    opts = opts || {};
+    var noAbort = opts.noAbort === true;
+    var timeout = opts.timeout;
+    if (!timeout) {
+      if (/\/api\/(batch-auto-tag|auto-tag|auto-tag-id|sticker\/chat)/.test(url)) timeout = 90000; // 识图/聊天（模型可能思考很久）
+      else if (/\/api\/(embedding-test|generate-embeddings)/.test(url)) timeout = 60000;          // embedding 生成
+      else if (/\/api\/batch-task/.test(url)) timeout = 10000;                                      // 批量任务轮询
+      else timeout = 15000;                                                                          // 普通 API
+    }
+    var init = {};
+    for (var k in opts) if (k !== 'timeout' && k !== 'noAbort') init[k] = opts[k];
+    var auth = getAuthParams();
+    if (auth.surface && !auth.token) {
+      var headers = new Headers(init.headers || {});
+      // App 走 X-Hana-App-Surface-Session，插件走 X-Hana-Plugin-Surface-Session；两个都带上。
+      headers.set('X-Hana-App-Surface-Session', auth.surface);
+      headers.set('X-Hana-Plugin-Surface-Session', auth.surface);
+      init.headers = headers;
+    }
+    if (!noAbort && !init.signal) {
+      // v0.34.7 - AbortSignal.timeout() 是较新的 Web API，宿主 iframe 内核（老版 Chromium/Electron）
+      //   不支持时构造 signal 会抛异常 → fetch 直接进 catch → 误报「网络开小差」。
+      //   改成 setTimeout + AbortController 兼容写法，老内核也认。
+      // v0.34.10 - 个别宿主连 AbortController signal 也不完整，确认接口可显式跳过 signal。
+      try {
+        var ctrl = new AbortController();
+        var timer = setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, timeout);
+        init.signal = ctrl.signal;
+        init.signal.__clearTimer = timer;
+      } catch (e) {
+        // AbortController 也不支持（极老内核）：放弃超时，至少请求能发出去
+      }
+    }
+    // 请求结束（无论成败）都清掉超时定时器，避免泄漏
+    return fetch(url, init).then(function (r) {
+      if (init.signal && init.signal.__clearTimer) clearTimeout(init.signal.__clearTimer);
+      return r;
+    }, function (e) {
+      if (init.signal && init.signal.__clearTimer) clearTimeout(init.signal.__clearTimer);
+      throw e;
+    });
+  }
+
+  function waitMs(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+  function timedPromise(promise, timeoutMs) {
+    var timer = null;
+    var timeout = new Promise(function (_, reject) {
+      timer = setTimeout(function () {
+        var error = new Error('请求超时');
+        error.name = 'TimeoutError';
+        reject(error);
+      }, timeoutMs);
+    });
+    return Promise.race([promise, timeout]).then(function (value) {
+      clearTimeout(timer);
+      return value;
+    }, function (error) {
+      clearTimeout(timer);
+      throw error;
+    });
+  }
+  function sameStringList(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (String(a[i] == null ? '' : a[i]).trim() !== String(b[i] == null ? '' : b[i]).trim()) return false;
+    }
+    return true;
+  }
+  function stickerMatchesSuggestion(sticker, suggestion) {
+    if (!sticker || !suggestion) return false;
+    var tags = sticker.tags || {};
+    var checked = false;
+    if (suggestion.description !== undefined) {
+      checked = true;
+      if (String(sticker.description || '').trim() !== String(suggestion.description || '').trim()) return false;
+    }
+    if (suggestion.semantic_description !== undefined) {
+      checked = true;
+      if (String(sticker.semantic_description || '').trim() !== String(suggestion.semantic_description || '').trim()) return false;
+    }
+    var fields = ['emotion', 'scene', 'keywords'];
+    for (var i = 0; i < fields.length; i++) {
+      var field = fields[i];
+      if (suggestion[field] !== undefined) {
+        checked = true;
+        if (!sameStringList(tags[field] || [], suggestion[field])) return false;
+      }
+    }
+    return checked;
+  }
+  // 确认请求可能已经写入成功，只是页面没有收到响应；回查落盘结果再决定是否报错。
+  async function recoverChatChange(stickerId, suggestion) {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        var resp = await timedPromise(apiFetch(withAuth(API + '/api/list?id=' + encodeURIComponent(stickerId)), { noAbort: true }), 2500);
+        var data = await timedPromise(resp.json(), 2500);
+        var list = data && data.ok && Array.isArray(data.data) ? data.data : [];
+        var sticker = list.find(function (item) { return item && item.id === stickerId; });
+        if (stickerMatchesSuggestion(sticker, suggestion)) return true;
+      } catch (e) {}
+      if (attempt < 2) await waitMs(180 + attempt * 240);
+    }
+    return false;
+  }
+
+  // ═══════════════════════════════════
+  //  DOM 工具
+  // ═══════════════════════════════════
+  function $(id) { return document.getElementById(id); }
+  function escHtml(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function formatTaggedAt(iso) {
+    if (!iso) return '未识图';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '未识图';
+    var mm = String(d.getMonth() + 1).padStart(2, '0');
+    var dd = String(d.getDate()).padStart(2, '0');
+    var hh = String(d.getHours()).padStart(2, '0');
+    var mi = String(d.getMinutes()).padStart(2, '0');
+    return mm + '-' + dd + ' ' + hh + ':' + mi;
+  }
+
+  function showLoading(text) {
+    $('loading-text').textContent = text || '处理中...';
+    $('loading-overlay').hidden = false;
+  }
+  function hideLoading() {
+    $('loading-overlay').hidden = true;
+  }
+
+  function toast(msg, isErr) {
+    var el = document.createElement('div');
+    el.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:8px 20px;border-radius:20px;font-size:13px;z-index:300;box-shadow:0 4px 12px rgba(0,0,0,.15);pointer-events:none;transition:opacity .3s';
+    el.style.background = isErr ? '#c45a4e' : 'var(--primary)';
+    el.style.color = '#fff';
+    el.textContent = msg;
+    document.body.appendChild(el);
+    requestAnimationFrame(function () { el.style.opacity = '1'; });
+    setTimeout(function () { el.style.opacity = '0'; setTimeout(function () { el.remove(); }, 300); }, 2500);
+  }
+
+  // ═══════════════════════════════════
+  //  视图切换
+  // ═══════════════════════════════════
+  function showView(name) {
+    document.querySelectorAll('.view').forEach(function (v) { v.classList.add('hidden'); });
+    var view = $('view-' + name);
+    if (view) view.classList.remove('hidden');
+    if (name === 'preferences') { syncSizeMode(); syncFitToggle(); syncFbToggle(); }
+    window.scrollTo(0, 0);
+  }
+
+  // v0.24.0 - 图库页：小图自适应拨动开关
+  // v0.33.77 - 升级为图片尺寸档位选择器（auto/small/medium/large）
+  function syncSizeMode() {
+    var s = $('size-mode-select');
+    if (!s) return;
+    var cfg = window.__DISPLAY_CONFIG__ || {};
+    var mode = ['auto', 'small', 'medium', 'large'].includes(cfg.sizeMode) ? cfg.sizeMode : 'auto';
+    s.value = mode;
+  }
+  // v0.28.0 - 偏好设置页：配图卡片反馈按钮显示开关
+  function syncFbToggle() {
+    var t = $('sticker-fb-toggle');
+    if (!t) return;
+    var cfg = window.__DISPLAY_CONFIG__ || {};
+    var on = cfg.showFeedbackButtons !== false;
+    t.classList.toggle('on', on);
+    t.setAttribute('aria-checked', on ? 'true' : 'false');
+  }
+  async function toggleFbButtons() {
+    var t = $('sticker-fb-toggle');
+    if (!t) return;
+    var next = !t.classList.contains('on');
+    t.classList.toggle('on', next);
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/display-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ showFeedbackButtons: next }),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        window.__DISPLAY_CONFIG__ = data.data;
+        t.setAttribute('aria-checked', next ? 'true' : 'false');
+        toast(next ? '反馈按钮已开启：卡片下方会显示喜欢/不喜欢' : '反馈按钮已关闭：卡片只显示表情包图片');
+      } else {
+        t.classList.toggle('on', !next);
+        toast('保存失败：' + (data.error || '出错了'), true);
+      }
+    } catch (e) {
+      t.classList.toggle('on', !next);
+      toast('保存失败，网络开小差了', true);
+    }
+  }
+  // v0.24.0 - 小图自适应拨动开关（v0.33.78 恢复到偏好页，与档位选择器配合）
+  function syncFitToggle() {
+    var t = $('sticker-fit-toggle');
+    if (!t) return;
+    var cfg = window.__DISPLAY_CONFIG__ || {};
+    var on = cfg.smallImageFit !== false;
+    t.classList.toggle('on', on);
+    t.setAttribute('aria-checked', on ? 'true' : 'false');
+  }
+  async function toggleStickerFit() {
+    var t = $('sticker-fit-toggle');
+    if (!t) return;
+    var next = !t.classList.contains('on');
+    t.classList.toggle('on', next);
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/display-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ smallImageFit: next }),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        window.__DISPLAY_CONFIG__ = data.data;
+        t.setAttribute('aria-checked', next ? 'true' : 'false');
+        toast(next ? '小图自适应已开启：小于档位的图按原尺寸显示，不放大防糊' : '小图自适应已关闭：所有图一律按档位尺寸显示');
+      } else {
+        t.classList.toggle('on', !next);
+        toast('保存失败: ' + (data.error || '出错了'), true);
+      }
+    } catch (e) {
+      t.classList.toggle('on', !next);
+      toast('保存出错: ' + e.message, true);
+    }
+  }
+  async function changeSizeMode() {
+    var s = $('size-mode-select');
+    if (!s) return;
+    var mode = s.value;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/display-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sizeMode: mode }),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        window.__DISPLAY_CONFIG__ = data.data;
+        var labels = { auto: '自动：小图原尺寸、大图填满', small: '小图：固定小尺寸显示', medium: '中图：固定中尺寸显示', large: '大图：固定大尺寸显示' };
+        toast('图片尺寸已切换：' + (labels[mode] || mode));
+      } else {
+        syncSizeMode();
+        toast('保存失败: ' + (data.error || '出错了'), true);
+      }
+    } catch (e) {
+      syncSizeMode();
+      toast('保存出错: ' + e.message, true);
+    }
+  }
+
+  // ═══════════════════════════════════
+  //  数据加载
+  // ═══════════════════════════════════
+  var allStickers = [];
+  var selectedIds = new Set();
+  var batchMode = false;
+  var groupData = { version: 1, groups: [], agents: {}, ungroupedCount: 0, lastNameMigration: null };
+  var editingRecognitionGroupId = '';
+  var groupMembershipStickerIds = [];
+
+  function getUiGroupIds(sticker) {
+    var known = new Set((groupData.groups || []).map(function (group) { return group.id; }));
+    var raw = sticker && (sticker.groupIds || sticker.group_ids);
+    if (!Array.isArray(raw)) return [];
+    var seen = new Set();
+    return raw.map(function (id) { return String(id == null ? '' : id).trim(); }).filter(function (id) {
+      if (!id || !known.has(id) || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  }
+
+  function groupNameById(groupId) {
+    for (var i = 0; i < (groupData.groups || []).length; i++) {
+      if (groupData.groups[i].id === groupId) return groupData.groups[i].name;
+    }
+    return groupId;
+  }
+
+  function renderGroupFilter() {
+    var select = $('filter-group');
+    if (!select) return;
+    var current = select.value;
+    var html = '<option value="">全部分组</option><option value="__ungrouped__">未分组（' + (groupData.ungroupedCount || 0) + '）</option>';
+    (groupData.groups || []).forEach(function (group) {
+      html += '<option value="' + escHtml(group.id) + '">' + escHtml(group.name) + '（' + (group.stickerCount || 0) + '）</option>';
+    });
+    select.innerHTML = html;
+    var values = Array.prototype.map.call(select.options, function (option) { return option.value; });
+    select.value = values.indexOf(current) >= 0 ? current : '';
+  }
+
+  async function loadGroups() {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/groups'));
+      var result = await resp.json();
+      if (!resp.ok || !result.ok || !result.data) throw new Error((result && result.error) || '读取分组失败');
+      // 指纹只记录服务端分组快照。
+      lastGroupFingerprint = groupFingerprint(result.data);
+      groupData = result.data;
+      if (!Array.isArray(groupData.groups)) groupData.groups = [];
+      if (!groupData.agents || typeof groupData.agents !== 'object') groupData.agents = {};
+      if (!Object.prototype.hasOwnProperty.call(groupData, 'lastNameMigration')) groupData.lastNameMigration = null;
+      renderGroupFilter();
+      renderExportGroupPicker();
+      renderGroupManagerList();
+      if (freqAgentsData.length > 0) renderAgentFreqList();
+      if (activeGroupDetailId) renderGroupDetail();
+      applyFilter();
+      return groupData;
+    } catch (error) {
+      // 分组是增强功能；读取失败时保留旧数据，不让图库整体变成错误页。
+      console.warn('[biaoqingbao] load groups failed:', error);
+      return null;
+    }
+  }
+
+  function groupMatchesSticker(sticker, groupId) {
+    var ids = getUiGroupIds(sticker);
+    return groupId === '__ungrouped__' ? ids.length === 0 : ids.indexOf(groupId) >= 0;
+  }
+
+  function renderGroupManagerList() {
+    var list = $('group-manager-list');
+    if (!list) return;
+    var undoBar = $('group-migration-undo');
+    var undoText = $('group-migration-undo-text');
+    var lastMigration = groupData.lastNameMigration;
+    if (undoBar && undoText) {
+      if (lastMigration && lastMigration.id) {
+        undoText.textContent = '上次把「' + lastMigration.fromName + '」精确迁移为「' + lastMigration.toName + '」：' + lastMigration.count + ' 张图片仍可撤销。';
+        undoBar.hidden = false;
+      } else {
+        undoText.textContent = '';
+        undoBar.hidden = true;
+      }
+    }
+    if (!groupData.groups || groupData.groups.length === 0) {
+      list.innerHTML = '<div class="form-hint">还没有分组。在上面写个名字就能建第一个，图片再到图库卡片或多选工具栏里归类。</div>';
+      return;
+    }
+    var html = '';
+    groupData.groups.forEach(function (group) {
+      html += '<div class="group-manager-row" role="button" tabindex="0" data-group-open="' + escHtml(group.id) + '" title="点开管理这个分组">'
+        + '<span class="group-manager-name">' + escHtml(group.name) + '</span>'
+        + (group.namingEnabled === true ? '<span class="group-manager-naming">AI 已记住</span>' : '')
+        + '<span class="group-manager-count">' + (group.stickerCount || 0) + ' 张</span>'
+        + '<span class="group-manager-arrow">›</span>'
+        + '</div>';
+    });
+    list.innerHTML = html;
+  }
+
+  // ── 分组详情（同一弹窗的第二层）──────────────────────
+  var activeGroupDetailId = '';
+
+  function currentDetailGroup() {
+    return (groupData.groups || []).find(function (item) { return item.id === activeGroupDetailId; }) || null;
+  }
+
+  function showGroupPane(name) {
+    var listPane = $('group-manager-pane');
+    var detailPane = $('group-detail-pane');
+    if (listPane) listPane.hidden = name !== 'list';
+    if (detailPane) detailPane.hidden = name !== 'detail';
+  }
+
+  function openGroupDetail(groupId) {
+    var group = (groupData.groups || []).find(function (item) { return item.id === groupId; });
+    if (!group) return;
+    activeGroupDetailId = group.id;
+    renderGroupDetail();
+    showGroupPane('detail');
+  }
+
+  function closeGroupDetail() {
+    activeGroupDetailId = '';
+    var status = $('group-naming-status');
+    if (status) status.textContent = '';
+    showGroupPane('list');
+  }
+
+  function renderGroupDetail() {
+    var group = currentDetailGroup();
+    if (!group) return;
+    var title = $('group-detail-title');
+    var countEl = $('group-detail-count');
+    var toggle = $('group-naming-toggle');
+    var grid = $('group-detail-grid');
+    var empty = $('group-detail-empty');
+    if (title) title.textContent = group.name;
+    var members = allStickers.filter(function (sticker) {
+      return getUiGroupIds(sticker).indexOf(group.id) >= 0;
+    });
+    if (countEl) countEl.textContent = members.length + ' 张图片';
+    if (toggle) {
+      toggle.checked = group.namingEnabled === true;
+      toggle.disabled = false;
+    }
+    if (grid) {
+      var html = '';
+      members.slice(0, 80).forEach(function (sticker) {
+        html += '<div class="gd-item" title="' + escHtml(sticker.description || '') + '">'
+          + '<img src="' + withAuth(API + '/api/image?id=' + encodeURIComponent(sticker.id)) + '" alt="' + escHtml(sticker.description || '') + '" loading="lazy">'
+          + '<button type="button" class="gd-remove" data-remove-sticker="' + escHtml(sticker.id) + '" title="从分组移出" aria-label="从分组移出">✕</button>'
+          + '<div class="gd-desc">' + escHtml(sticker.description || '（未命名）') + '</div>'
+          + '</div>';
+      });
+      grid.innerHTML = html;
+      grid.hidden = members.length === 0;
+    }
+    if (empty) empty.hidden = members.length > 0;
+  }
+
+  async function setGroupNaming(enabled) {
+    var group = currentDetailGroup();
+    if (!group) return;
+    var toggle = $('group-naming-toggle');
+    var status = $('group-naming-status');
+    if (toggle) toggle.disabled = true;
+    if (status) status.textContent = enabled ? '正在让 AI 记住这个名字…' : '正在还原…';
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/groups'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set-naming', groupId: group.id, enabled: enabled === true }),
+      });
+      var result = await resp.json();
+      if (!resp.ok || !result.ok) throw new Error(result.error || '冠名设置失败');
+      await refreshStickersAndGroups();
+      renderGroupDetail();
+      if (status) status.textContent = result.message || '';
+      toast(result.message || '已更新');
+    } catch (error) {
+      if (toggle) toggle.checked = enabled !== true;
+      if (status) status.textContent = '';
+      toast('设置失败：' + error.message, true);
+    } finally {
+      if (toggle) toggle.disabled = false;
+    }
+  }
+
+  async function renameGroupFromDetail() {
+    var group = currentDetailGroup();
+    if (!group) return;
+    var name = window.prompt('新的分组名称', group.name);
+    if (name === null) return;
+    var next = name.trim();
+    if (!next || next === group.name) return;
+    await mutateGroup('rename', group.id, next, false);
+    renderGroupDetail();
+  }
+
+  function deleteGroupFromDetail() {
+    var group = currentDetailGroup();
+    if (!group) return;
+    var extra = group.namingEnabled === true ? '\n它已经让 AI 记住了名字，删除后图片描述会还原。' : '';
+    customConfirm('确定删除分组「' + group.name + '」吗？\n图片不会被删除，但会从这个分组移出；对应伙伴配置里的这个分组也会清掉。' + extra, function () {
+      mutateGroup('delete', group.id).then(closeGroupDetail);
+    });
+  }
+
+  async function removeStickerFromDetail(stickerId) {
+    var group = currentDetailGroup();
+    if (!group || !stickerId) return;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/groups/membership'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stickerIds: [stickerId], addGroupIds: [], removeGroupIds: [group.id] }),
+      });
+      var result = await resp.json();
+      if (!resp.ok || !result.ok) throw new Error(result.error || '移出失败');
+      await refreshStickersAndGroups();
+      renderGroupDetail();
+      toast(result.message || '已移出分组');
+    } catch (error) {
+      toast('移出失败：' + error.message, true);
+    }
+  }
+
+  function bindGroupDetailActions() {
+    var back = $('group-detail-back');
+    if (back && back.dataset.bound !== '1') {
+      back.dataset.bound = '1';
+      back.addEventListener('click', closeGroupDetail);
+    }
+    var toggle = $('group-naming-toggle');
+    if (toggle && toggle.dataset.bound !== '1') {
+      toggle.dataset.bound = '1';
+      toggle.addEventListener('change', function () { setGroupNaming(toggle.checked); });
+    }
+    var renameBtn = $('group-detail-rename-btn');
+    if (renameBtn && renameBtn.dataset.bound !== '1') {
+      renameBtn.dataset.bound = '1';
+      renameBtn.addEventListener('click', renameGroupFromDetail);
+    }
+    var deleteBtn = $('group-detail-delete-btn');
+    if (deleteBtn && deleteBtn.dataset.bound !== '1') {
+      deleteBtn.dataset.bound = '1';
+      deleteBtn.addEventListener('click', deleteGroupFromDetail);
+    }
+    var grid = $('group-detail-grid');
+    if (grid && grid.dataset.bound !== '1') {
+      grid.dataset.bound = '1';
+      grid.addEventListener('click', function (event) {
+        var btn = event.target.closest('[data-remove-sticker]');
+        if (!btn) return;
+        removeStickerFromDetail(btn.getAttribute('data-remove-sticker'));
+      });
+    }
+  }
+
+  function openGroupManager() {
+    activeGroupDetailId = '';
+    showGroupPane('list');
+    openModal('group-manager-modal');
+    renderGroupManagerList();
+    loadGroups();
+  }
+
+  async function createGroupFromModal() {
+    var input = $('new-group-name');
+    var button = $('create-group-btn');
+    var name = input ? input.value.trim() : '';
+    if (!name) { toast('先写一个分组名称', true); if (input) input.focus(); return; }
+    if (button) { button.disabled = true; button.textContent = '创建中…'; }
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/groups'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create', name: name }),
+      });
+      var result = await resp.json();
+      if (!resp.ok || !result.ok) throw new Error(result.error || '创建分组失败');
+      if (input) input.value = '';
+      await loadGroups();
+      toast('分组已创建');
+    } catch (error) {
+      toast('创建分组失败：' + error.message, true);
+    } finally {
+      if (button) { button.disabled = false; button.textContent = '新建分组'; }
+    }
+  }
+
+  async function mutateGroup(action, groupId, name, migrateNames) {
+    try {
+      var body = { action: action, groupId: groupId, name: name };
+      if (action === 'rename') body.migrateNames = migrateNames === true;
+      var resp = await apiFetch(withAuth(API + '/api/groups'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      var result = await resp.json();
+      if (!resp.ok || !result.ok) throw new Error(result.error || '分组操作失败');
+      await refreshStickersAndGroups();
+      toast(result.message || '分组已更新');
+    } catch (error) {
+      toast('分组操作失败：' + error.message, true);
+    }
+  }
+
+  async function saveGroupRecognition() {
+    var groupId = editingRecognitionGroupId;
+    var button = $('save-group-recognition-btn');
+    var enabled = $('edit-group-recognition-enabled');
+    var aliases = $('edit-group-recognition-aliases');
+    if (!groupId) return;
+    if (button) { button.disabled = true; button.textContent = '保存中…'; }
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/groups'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update-recognition',
+          groupId: groupId,
+          recognitionAliases: aliases ? aliases.value : '',
+          recognitionEnabled: !enabled || enabled.checked,
+        }),
+      });
+      var result = await resp.json();
+      if (!resp.ok || !result.ok) throw new Error(result.error || '保存识图设置失败');
+      closeModal('group-recognition-modal');
+      await refreshStickersAndGroups();
+      toast('识图设置已保存');
+    } catch (error) {
+      toast('保存识图设置失败：' + error.message, true);
+    } finally {
+      if (button) { button.disabled = false; button.textContent = '保存设置'; }
+    }
+  }
+
+  function openGroupRecognitionEditor(group) {
+    editingRecognitionGroupId = group && group.id ? group.id : '';
+    if (!editingRecognitionGroupId) return;
+    var title = $('group-recognition-title');
+    var aliases = $('edit-group-recognition-aliases');
+    var enabled = $('edit-group-recognition-enabled');
+    if (title) title.textContent = '识图设置 · ' + group.name;
+    if (aliases) aliases.value = (Array.isArray(group.recognitionAliases) ? group.recognitionAliases : []).join('、');
+    if (enabled) enabled.checked = group.recognitionEnabled !== false;
+    openModal('group-recognition-modal');
+  }
+
+  async function undoGroupNameMigration() {
+    var migration = groupData.lastNameMigration;
+    if (!migration || !migration.id) return;
+    customConfirm('撤销这次精确匹配的批量改名？\n只会恢复仍保持新名称的图片；你后来手动改过的图片会安全跳过。', async function () {
+      var button = $('undo-group-migration');
+      if (button) { button.disabled = true; button.textContent = '撤销中…'; }
+      try {
+        var resp = await apiFetch(withAuth(API + '/api/groups'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'undo-name-migration', migrationId: migration.id }),
+        });
+        var result = await resp.json();
+        if (!resp.ok || !result.ok) throw new Error(result.error || '撤销失败');
+        await refreshStickersAndGroups();
+        toast(result.message || '批量改名已撤销');
+      } catch (error) {
+        toast('撤销批量改名失败：' + error.message, true);
+      } finally {
+        if (button) { button.disabled = false; button.textContent = '撤销这次迁移'; }
+      }
+    });
+  }
+
+  function bindGroupManagerActions() {
+    var createButton = $('create-group-btn');
+    if (createButton && createButton.dataset.bound !== '1') {
+      createButton.dataset.bound = '1';
+      createButton.addEventListener('click', createGroupFromModal);
+    }
+    var input = $('new-group-name');
+    if (input && input.dataset.bound !== '1') {
+      input.dataset.bound = '1';
+      input.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter') { event.preventDefault(); createGroupFromModal(); }
+      });
+    }
+    var list = $('group-manager-list');
+    if (list && list.dataset.bound !== '1') {
+      list.dataset.bound = '1';
+      list.addEventListener('click', function (event) {
+        var row = event.target.closest('[data-group-open]');
+        if (row) openGroupDetail(row.getAttribute('data-group-open'));
+      });
+      list.addEventListener('keydown', function (event) {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        var row = event.target.closest('[data-group-open]');
+        if (!row) return;
+        event.preventDefault();
+        openGroupDetail(row.getAttribute('data-group-open'));
+      });
+    }
+    bindGroupDetailActions();
+  }
+
+  // 弹窗只做「加入分组」：勾选＝要加入哪些组，不承担移出语义。
+  // 移出图片到分组详情里做，避免“取消勾选就是移出”这种隐含动作。
+  function renderMembershipList(newGroupId, keptChecked) {
+    var list = $('group-membership-list');
+    if (!list) return;
+    var checked = new Set(keptChecked || []);
+    if (newGroupId) checked.add(newGroupId);
+    var saveButton = $('save-group-membership-btn');
+    if (!groupData.groups || groupData.groups.length === 0) {
+      list.innerHTML = '<div class="form-hint">还没有分组。在上面写个名字，就能建好并把这批图片加进去。</div>';
+      if (saveButton) saveButton.disabled = true;
+      return;
+    }
+    var html = '';
+    groupData.groups.forEach(function (group) {
+      var isChecked = checked.has(group.id);
+      html += '<label class="group-picker-row"><input type="checkbox" data-membership-group-id="' + escHtml(group.id) + '"'
+        + (isChecked ? ' checked' : '') + '>'
+        + '<span>' + escHtml(group.name) + '</span><small>' + (group.stickerCount || 0) + ' 张</small></label>';
+    });
+    list.innerHTML = html;
+    if (saveButton) saveButton.disabled = false;
+  }
+
+  function readMembershipCheckedIds() {
+    var ids = [];
+    document.querySelectorAll('#group-membership-list input[data-membership-group-id]:checked').forEach(function (box) {
+      ids.push(box.getAttribute('data-membership-group-id'));
+    });
+    return ids;
+  }
+
+  function openGroupMembershipModal(stickerIds) {
+    groupMembershipStickerIds = Array.from(new Set((stickerIds || []).filter(Boolean)));
+    if (groupMembershipStickerIds.length === 0) { toast('请先勾选表情包', true); return; }
+    var title = $('group-membership-title');
+    var hint = $('group-membership-hint');
+    if (title) title.textContent = '加入分组';
+    if (hint) hint.textContent = '已选 ' + groupMembershipStickerIds.length + ' 张。勾上要加入的分组，保存后就把这批图片放进去；它们原来属于别的分组也不受影响。';
+    var newNameInput = $('membership-new-group-name');
+    if (newNameInput) newNameInput.value = '';
+    renderMembershipList();
+    openModal('group-membership-modal');
+  }
+
+  async function createGroupFromMembership() {
+    var input = $('membership-new-group-name');
+    var button = $('create-membership-group-btn');
+    var name = input ? input.value.trim() : '';
+    if (!name) { toast('先写一个新分组名称', true); if (input) input.focus(); return; }
+    if (groupMembershipStickerIds.length === 0) { toast('请先勾选表情包', true); return; }
+    if (button) { button.disabled = true; button.textContent = '创建中…'; }
+    try {
+      var createResp = await apiFetch(withAuth(API + '/api/groups'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create', name: name }),
+      });
+      var created = await createResp.json();
+      if (!createResp.ok || !created.ok || !created.group) throw new Error(created.error || '创建分组失败');
+      // 留在弹窗里，把新分组勾上，并保留用户之前已经勾好的选择。
+      var keptChecked = readMembershipCheckedIds();
+      if (input) input.value = '';
+      await loadGroups();
+      renderMembershipList(created.group.id, keptChecked);
+      toast('已新建分组「' + created.group.name + '」，保存后一起加入');
+    } catch (error) {
+      toast('新建分组失败：' + error.message, true);
+    } finally {
+      if (button) { button.disabled = false; button.textContent = '新建并加入'; }
+    }
+  }
+
+  async function saveGroupMembership() {
+    if (groupMembershipStickerIds.length === 0) return;
+    var addGroupIds = readMembershipCheckedIds();
+    if (addGroupIds.length === 0) { toast('先勾选要加入的分组', true); return; }
+    var button = $('save-group-membership-btn');
+    if (button) { button.disabled = true; button.textContent = '保存中…'; }
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/groups/membership'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stickerIds: groupMembershipStickerIds, addGroupIds: addGroupIds, removeGroupIds: [] }),
+      });
+      var result = await resp.json();
+      if (!resp.ok || !result.ok) throw new Error(result.error || '加入分组失败');
+      closeModal('group-membership-modal');
+      await refreshStickersAndGroups();
+      toast(result.message || '已加入分组');
+    } catch (error) {
+      toast('加入分组失败：' + error.message, true);
+    } finally {
+      if (button) { button.disabled = false; button.textContent = '保存'; }
+    }
+  }
+
+  // v0.33.37/v0.34.22 - 悬浮球等其他入口入库后页面自动刷新：轻量轮询列表和分组指纹，变了才重载
+  var lastListFingerprint = '';
+  var lastGroupFingerprint = '';
+  function listFingerprint(list) {
+    if (!list || !list.length) return '0';
+    var last = list[list.length - 1];
+    return list.length + '|' + last.id + '|' + (last.added_at || '');
+  }
+  function groupFingerprint(data) {
+    var groups = (data && Array.isArray(data.groups) ? data.groups : []).map(function (group) {
+      return [group.id, group.name, group.stickerCount || 0, group.recognitionEnabled !== false, Array.isArray(group.recognitionAliases) ? group.recognitionAliases : []];
+    });
+    var rawAgents = data && data.agents && typeof data.agents === 'object' ? data.agents : {};
+    var agents = {};
+    Object.keys(rawAgents).sort().forEach(function (id) {
+      var config = rawAgents[id] || {};
+      agents[id] = {
+        configured: config.configured === true,
+        groupIds: Array.isArray(config.groupIds) ? config.groupIds : [],
+        groupWeights: groupWeightPairs(config.groupWeights),
+        includeUngrouped: config.includeUngrouped !== false,
+      };
+    });
+    return JSON.stringify({ groups: groups, ungroupedCount: data && data.ungroupedCount || 0, lastNameMigration: data && data.lastNameMigration ? data.lastNameMigration : null, agents: agents });
+  }
+
+  async function loadStickers() {
+    var emotion = $('filter-emotion').value;
+    var search = $('filter-search').value.trim().toLowerCase();
+    try {
+      var url = withAuth(API + '/api/list');
+      if (emotion) url += (url.indexOf('?') >= 0 ? '&' : '?') + 'emotion=' + encodeURIComponent(emotion);
+      var resp = await apiFetch(url);
+      if (!resp.ok) {
+        showError('加载列表失败 HTTP ' + resp.status);
+        return;
+      }
+      var data = await resp.json();
+      if (data.ok) {
+        allStickers = data.data || [];
+        lastListFingerprint = listFingerprint(allStickers);
+        updateHomeCount();
+        applyFilter();
+        loadSemanticIndexStatus();
+      } else {
+        showError('加载失败: ' + (data.error || ''));
+      }
+    } catch (e) {
+      showError('网络错误: ' + e.message);
+    }
+  }
+
+  async function refreshStickersAndGroups() {
+    await loadStickers();
+    await loadGroups();
+  }
+
+  function updateHomeCount() {
+    var count = allStickers.length;
+    var homeCount = $('home-count');
+    if (homeCount) homeCount.textContent = count + ' 张';
+    updateHomeStats();
+    renderHomeStrip();
+    ['embedding-index-btn', 'batch-tasks-badge', 'btnToggleMulti'].forEach(function (id) {
+      var button = $(id);
+      if (button) button.disabled = count === 0;
+    });
+  }
+
+  // v0.34.18 - 首页统计：总张数 / 已打标签数
+  function updateHomeStats() {
+    var stats = $('home-stats');
+    if (!stats) return;
+    var total = allStickers.length;
+    if (!total) {
+      stats.innerHTML = '<span>还没有表情包</span>';
+      return;
+    }
+    var tagged = allStickers.filter(function (s) {
+      if (!s.tags) return false;
+      return (s.tags.emotion || []).length + (s.tags.scene || []).length + (s.tags.keywords || []).length > 0;
+    }).length;
+    var tagText = tagged === total ? '全部完成标签' : '已打标签 ' + tagged + ' / ' + total;
+    stats.innerHTML = '<span><span class="dot"></span>共 ' + total + ' 张</span>'
+      + '<span><span class="dot"></span>' + tagText + '</span>';
+  }
+
+  // v0.34.18 - 首页「最近入库」缩略带：取最近入库的 6 张真图，空库时给引导
+  function renderHomeStrip() {
+    var strip = $('home-strip');
+    if (!strip) return;
+    if (!allStickers.length) {
+      strip.innerHTML = '<button type="button" class="strip-empty" id="home-strip-empty">还没有表情包，点这里添加第一张</button>';
+      var emptyBtn = $('home-strip-empty');
+      if (emptyBtn) {
+        emptyBtn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          openModal('upload-modal');
+        });
+      }
+      return;
+    }
+    var recent = allStickers.slice().sort(function (a, b) {
+      return new Date(b.added_at || 0) - new Date(a.added_at || 0);
+    }).slice(0, 32);
+    var html = '';
+    for (var i = 0; i < recent.length; i++) {
+      var s = recent[i];
+      var url = withAuth(API + '/api/image?id=' + encodeURIComponent(s.id));
+      html += '<figure><img src="' + escHtml(url) + '" alt="' + escHtml(s.description || '表情包') + '" loading="lazy"></figure>';
+    }
+    strip.innerHTML = html;
+  }
+
+  function applyFilter() {
+    var search = $('filter-search').value.trim().toLowerCase();
+    var groupId = $('filter-group') ? $('filter-group').value : '';
+    var filtered = allStickers.filter(function (s) {
+      if (groupId && !groupMatchesSticker(s, groupId)) return false;
+      if (!search) return true;
+      var desc = (s.description || '').toLowerCase();
+      var tags = s.tags || {};
+      var kws = (tags.keywords || []).join(' ').toLowerCase();
+      var ems = (tags.emotion || []).join(' ').toLowerCase();
+      var scs = (tags.scene || []).join(' ').toLowerCase();
+      var groups = getUiGroupIds(s).map(function (id) {
+        var group = (groupData.groups || []).find(function (item) { return item.id === id; });
+        return group ? [group.name].concat(Array.isArray(group.recognitionAliases) ? group.recognitionAliases : []) : [id];
+      }).reduce(function (all, terms) { return all.concat(terms); }, []).join(' ').toLowerCase();
+      return desc.includes(search) || kws.includes(search) || ems.includes(search) || scs.includes(search) || groups.includes(search);
+    });
+    renderGrid(filtered);
+  }
+
+  function renderGrid(stickers) {
+    var grid = $('sticker-grid');
+    var countEl = $('sticker-count');
+    grid.innerHTML = '';
+    if (!stickers || stickers.length === 0) {
+      if (allStickers.length === 0) {
+        grid.innerHTML = '<div class="empty-state">图库还是空的。先添加几张常用表情包，让助手慢慢认识你的表达方式。<br><button class="btn btn-primary" id="empty-upload-btn" style="margin-top:12px">添加表情包</button></div>';
+        var emptyUploadBtn = $('empty-upload-btn');
+        if (emptyUploadBtn) emptyUploadBtn.onclick = function () { openModal('upload-modal'); };
+      } else {
+        grid.innerHTML = '<div class="empty-state">没有找到符合当前筛选条件的表情包</div>';
+      }
+      if (countEl) countEl.textContent = '0 张';
+      return;
+    }
+    if (countEl) countEl.textContent = stickers.length + ' 张';
+
+    for (var i = 0; i < stickers.length; i++) {
+      (function (s) {
+        var card = document.createElement('div');
+        card.className = 'sticker-card' + (selectedIds.has(s.id) ? ' selected' : '');
+        card.setAttribute('data-id', s.id);
+        var imgUrl = withAuth(API + '/api/image?id=' + encodeURIComponent(s.id));
+        var ballPinned = ballPinnedIds.has(String(s.id));
+        var tags = s.tags || {};
+        var emTags = '';
+        var scTags = '';
+        var groupTags = '';
+        for (var j = 0; j < (tags.emotion || []).length; j++) {
+          emTags += '<span class="tag">' + escHtml(tags.emotion[j]) + '</span>';
+        }
+        for (var k = 0; k < (tags.scene || []).length; k++) {
+          scTags += '<span class="tag scene">' + escHtml(tags.scene[k]) + '</span>';
+        }
+        var stickerGroupIds = getUiGroupIds(s);
+        for (var g = 0; g < stickerGroupIds.length; g++) {
+          groupTags += '<span class="tag group">' + escHtml(groupNameById(stickerGroupIds[g])) + '</span>';
+        }
+        card.innerHTML =
+          '<div class="sticker-check" data-act="toggle-select">✓</div>'
+          + '<img src="' + imgUrl + '" alt="' + escHtml(s.description) + '" loading="lazy">'
+          + '<div class="card-info">'
+          + '<div class="card-desc" title="' + escHtml(s.description) + '">' + escHtml(s.description) + '</div>'
+          + '<div class="card-tags">' + emTags + scTags + groupTags + '</div>'
+          + '<div class="card-tagged-at">' + formatTaggedAt(s.tagged_at) + '</div>'
+          + '<div class="card-actions">'
+          + '<button class="edit-btn" data-id="' + escHtml(s.id) + '">编辑</button>'
+          + '<button class="retag-btn" data-id="' + escHtml(s.id) + '">识图</button>'
+          + '<button class="group-btn" data-id="' + escHtml(s.id) + '">分组</button>'
+          + '<button class="ball-pin-btn' + (ballPinned ? ' active' : '') + '" data-id="' + escHtml(s.id) + '" aria-pressed="' + (ballPinned ? 'true' : 'false') + '">' + (ballPinned ? '已加入悬浮球' : '加入悬浮球') + '</button>'
+          + '<button class="delete-btn" data-id="' + escHtml(s.id) + '">删除</button>'
+          + '</div></div>';
+        card.querySelector('.edit-btn').onclick = function (e) { e.stopPropagation(); openEditor(s); };
+        card.querySelector('.retag-btn').onclick = function (e) { e.stopPropagation(); retagSticker(s); };
+        card.querySelector('.group-btn').onclick = function (e) { e.stopPropagation(); openGroupMembershipModal([s.id]); };
+        card.querySelector('.ball-pin-btn').onclick = function (e) { e.stopPropagation(); toggleBallPinButton(e.currentTarget); };
+        card.querySelector('.delete-btn').onclick = function (e) { e.stopPropagation(); deleteSticker(s.id); };
+        card.querySelector('.sticker-check').onclick = function (e) { e.stopPropagation(); toggleSelect(s.id); };
+        card.addEventListener('click', function () {
+          if (document.body.classList.contains('batch-mode')) toggleSelect(s.id);
+        });
+        grid.appendChild(card);
+      })(stickers[i]);
+    }
+    updateBatchCount();
+  }
+
+  function showError(msg) {
+    $('sticker-grid').innerHTML = '<div class="empty-state" style="color:var(--danger)">' + escHtml(msg) + '</div>';
+    var c = $('sticker-count');
+    if (c) c.textContent = '错误';
+  }
+
+  // ═══════════════════════════════════
+  //  AI 识图
+  // ═══════════════════════════════════
+  async function enqueueTagTask(stickerIds, options) {
+    options = options || {};
+    var ids = Array.from(new Set(stickerIds || [])).filter(Boolean);
+    if (ids.length === 0) { toast('没有需要识图的图片', true); return null; }
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-auto-tag'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sticker_ids: ids, concurrency: Math.min(ids.length, 5) }),
+      });
+      var data = await resp.json();
+      if (!data.ok) { toast('创建任务失败: ' + (data.error || ''), true); return null; }
+      toast(options.message || ('已创建识图任务，共 ' + ids.length + ' 张'));
+      await checkBatchTasks();
+      if (options.openDetail) openBatchTaskDetail(data.data.taskId);
+      return data.data.taskId;
+    } catch (e) {
+      toast('创建任务失败: ' + e.message, true);
+      return null;
+    }
+  }
+
+  // v0.25.1 - 编辑器里的「AI 重新识图」改为同步：识别结果直接填进编辑表单，用户确认后保存。
+  async function handleAutoTagEditor() {
+    var id = $('edit-id').value;
+    if (!allStickers.some(function (s) { return s.id === id; })) return;
+    var btn = $('editor-autotag-btn');
+    btn.disabled = true;
+    btn.textContent = '识别中...';
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/auto-tag-id'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: id, preview: true }),
+        signal: AbortSignal.timeout(90000),
+      });
+      var data = await resp.json();
+      if (data.ok && data.data) {
+        var sug = data.data;
+        if (sug.description) $('edit-desc').value = sug.description;
+        $('edit-emotion').value = (sug.emotion || []).join(', ');
+        $('edit-scene').value = (sug.scene || []).join(', ');
+        $('edit-keywords').value = (sug.keywords || []).join(', ');
+        toast('识别完成，标签已填进表单（点保存生效）');
+      } else {
+        toast('识图失败: ' + (data.error || ''), true);
+      }
+    } catch (e) {
+      toast('识图出错: ' + e.message, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'AI 重新识图';
+    }
+  }
+
+  // v0.25.1 - 卡片上的「识图」按钮：当场识别、当场应用，不再绕后台任务。
+  async function retagSticker(sticker) {
+    var btn = document.querySelector('.retag-btn[data-id="' + sticker.id + '"]');
+    if (btn) { btn.disabled = true; btn.textContent = '识别中...'; }
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/auto-tag-id'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: sticker.id }),
+        signal: AbortSignal.timeout(90000),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        if (data.data) {
+          if (data.data.description) sticker.description = data.data.description;
+          if (data.data.semantic_description) sticker.semantic_description = data.data.semantic_description;
+          sticker.tags = sticker.tags || {};
+          if (Array.isArray(data.data.emotion)) sticker.tags.emotion = data.data.emotion;
+          if (Array.isArray(data.data.scene)) sticker.tags.scene = data.data.scene;
+          if (Array.isArray(data.data.keywords)) sticker.tags.keywords = data.data.keywords;
+        }
+        sticker.tagged_at = new Date().toISOString();
+        toast('识图完成，标签已应用');
+        applyFilter();
+      } else {
+        toast('识图失败: ' + (data.error || ''), true);
+      }
+    } catch (e) {
+      toast('识图出错: ' + e.message, true);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '识图'; }
+    }
+  }
+
+  // ═══════════════════════════════════
+  //  上传（弹窗）
+  // ═══════════════════════════════════
+  function readFileAsDataUrl(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function (event) { resolve(event.target.result); };
+      reader.onerror = function () { reject(new Error('读取文件失败：' + file.name)); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function showUploadResult(lines) {
+    var result = $('upload-result');
+    if (!result) return;
+    result.textContent = lines.join('\n');
+    result.hidden = false;
+  }
+
+  function clearUploadResult() {
+    var result = $('upload-result');
+    if (!result) return;
+    result.textContent = '';
+    result.hidden = true;
+  }
+
+  // v0.25.1 - 文件夹导入：选整个文件夹，自动筛出里面的表情包图片
+  var folderFiles = [];
+  var UPLOAD_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
+
+  // v0.25.1 - 粘贴导入：Ctrl+V 的图片相当于选中图片（快捷单张，再粘贴会替换）
+  var pastedFiles = [];
+  var lastPasteUrl = null;
+  var pasteZoneReady = false; // 必须先点击粘贴区（步骤引导），再按 Ctrl+V
+
+  function updateUploadPickHint() {
+    var hint = $('upload-file-hint');
+    if (!hint) return;
+    var fi = $('upload-file');
+    var fileCount = (fi && fi.files ? fi.files.length : 0) + pastedFiles.length;
+    var autoTag = $('upload-auto-tag') && $('upload-auto-tag').checked;
+    if (pastedFiles.length > 0) {
+      hint.textContent = '已粘贴 1 张图片' + (autoTag ? '，导入后会自动开始 AI 识图。' : '，点「导入图片」开始。');
+    } else if (fileCount > 0) {
+      hint.textContent = '已选择 ' + fileCount + ' 张图片' + (autoTag ? '，导入后会自动开始 AI 识图。' : '，点「导入图片」开始。');
+    } else {
+      hint.textContent = '支持 PNG、JPG、GIF、WebP 和 BMP，也可以整个文件夹一起选。';
+    }
+  }
+
+  function resetPasteZone() {
+    if (lastPasteUrl) { URL.revokeObjectURL(lastPasteUrl); lastPasteUrl = null; }
+    pastedFiles = [];
+    pasteZoneReady = false;
+    var zone = $('paste-zone');
+    if (!zone) return;
+    zone.classList.remove('active');
+    zone.innerHTML = '<div class="paste-zone-title">点击这里，然后按 Ctrl+V 粘贴</div>'
+      + '<div class="paste-zone-sub">先从聊天软件（QQ 等）复制表情包，点一下这个框，再按 Ctrl+V</div>';
+  }
+
+  // v0.25.2 - 上传主按钮状态：没有可导入的图就禁用，选上就启用
+  function updateUploadBtnState() {
+    var btn = $('upload-btn');
+    if (!btn) return;
+    var fileInput = $('upload-file');
+    var hasAny = folderFiles.length > 0 || pastedFiles.length > 0 || (fileInput && fileInput.files && fileInput.files.length > 0);
+    btn.disabled = !hasAny;
+    btn.title = btn.disabled ? '先选图片/文件夹/粘贴，再点导入' : '';
+    // v0.25.0 - 粘贴了图片就不可能同时导 ZIP：隐藏「导入 ZIP」只留「导入图片」；
+    // 清掉粘贴（选文件/文件夹后选为准、关闭弹窗重置）后自动恢复显示，想导 ZIP 随时可以
+    var zipBtn = $('import-zip-btn');
+    if (zipBtn) zipBtn.hidden = pastedFiles.length > 0;
+  }
+
+  // v0.25.2 - 关闭导入弹窗时完整重置：粘贴、文件、文件夹、ZIP、结果提示全部清空，每次打开从头来
+  function resetUploadForm() {
+    resetPasteZone();
+    pastedFiles = [];
+    folderFiles = [];
+    var f = $('upload-file'); if (f) f.value = '';
+    var fo = $('upload-folder'); if (fo) fo.value = '';
+    var z = $('upload-zip'); if (z) z.value = '';
+    resetFolderPick();
+    var fh = $('upload-file-hint');
+    if (fh) fh.textContent = '支持 PNG、JPG、GIF、WebP 和 BMP，也可以整个文件夹一起选。';
+    var zh = $('upload-zip-hint');
+    if (zh) zh.textContent = '选好后点「导入 ZIP」开始';
+    clearUploadResult();
+    updateUploadBtnState();
+  }
+
+  function collectFolderImages(input) {
+    var files = Array.from(input.files || []);
+    var images = [];
+    var skipped = 0;
+    for (var i = 0; i < files.length; i++) {
+      var name = files[i].name || '';
+      var ext = (name.split('.').pop() || '').toLowerCase();
+      if (UPLOAD_EXTS.indexOf(ext) >= 0) images.push(files[i]);
+      else skipped++;
+    }
+    return { images: images, skipped: skipped };
+  }
+
+  function resetFolderPick() {
+    folderFiles = [];
+    var fi = $('upload-folder');
+    if (fi) fi.value = '';
+    var hint = $('upload-folder-hint');
+    if (hint) { hint.textContent = ''; hint.hidden = true; }
+  }
+
+  // v0.25.1 - 并发上传（一次 5 张，后端有串行写队列保证安全）+「上传后自动识图」+ 文件夹导入 + 粘贴导入
+  // v0.25.0 - 上传与 ZIP 导入互斥：任一进行中另一入口禁用，避免 loading/结果提示互相覆盖
+  var uploadBusy = false;
+  var MAX_UPLOAD_COUNT = 200; // v0.25.0 - 单次导入上限，防几千张 base64 分批 POST 爆浏览器内存
+  async function handleUpload() {
+    if (uploadBusy) { toast('有导入正在进行中，稍等一下', true); return; }
+    uploadBusy = true;
+    var fileInput = $('upload-file');
+    var uploadBtn = $('upload-btn');
+    var zipBtn = $('import-zip-btn');
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (zipBtn) zipBtn.disabled = true;
+    // 来源优先级：文件夹 > 粘贴（单张） > 文件多选，后选为准不混用
+    var files = folderFiles.length > 0
+      ? folderFiles
+      : pastedFiles.length > 0
+        ? pastedFiles
+        : Array.from(fileInput.files || []);
+    if (!files.length) { uploadBusy = false; if (zipBtn) zipBtn.disabled = false; toast('请选择图片或粘贴图片', true); return; }
+    // v0.25.0 - 数量上限：超过截断并提示，防几千张全量 base64 分批 POST 爆浏览器内存
+    if (files.length > MAX_UPLOAD_COUNT) {
+      toast('一次最多导入 ' + MAX_UPLOAD_COUNT + ' 张，已截取前 ' + MAX_UPLOAD_COUNT + ' 张（建议分次或打包 ZIP）', true);
+      files = files.slice(0, MAX_UPLOAD_COUNT);
+    }
+
+    var fields = { emotion: '', scene: '', keywords: '', description: '' };
+    var success = 0;
+    var failed = [];
+    var newIds = [];
+    var duplicates = []; // v0.34.35 - 图库里已有同样内容的图，跳过不再入库
+    var autoTagEl = $('upload-auto-tag');
+    var autoTag = autoTagEl ? autoTagEl.checked : false;
+    clearUploadResult();
+    showLoading('正在上传 0/' + files.length + '...');
+
+    var CONCURRENCY = 5;
+    var done = 0;
+    try {
+      async function uploadOne(file) {
+        try {
+          var base64 = await readFileAsDataUrl(file);
+          var resp = await apiFetch(withAuth(API + '/api'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(Object.assign({
+              action: 'upload',
+              imageBase64: base64,
+              fileName: file.name,
+            }, fields)),
+            signal: AbortSignal.timeout(60000),
+          });
+          var data = await resp.json();
+          if (!data.ok) throw new Error(data.error || '未知错误');
+          // v0.34.35 - 重复图：不算失败，也不进 newIds（否则会被重复识图烧 token）
+          if (data.duplicate) {
+            var existing = data.data && data.data.existingId ? '（图库里已有 ' + data.data.existingId + '）' : '';
+            duplicates.push(file.name + existing);
+          } else {
+            if (data.data && data.data.id) newIds.push(data.data.id);
+            success++;
+          }
+        } catch (error) {
+          failed.push(file.name + '：' + error.message);
+        } finally {
+          done++;
+          showLoading('正在上传 ' + done + '/' + files.length + '...');
+        }
+      }
+      for (var i = 0; i < files.length; i += CONCURRENCY) {
+        var batch = files.slice(i, i + CONCURRENCY);
+        await Promise.all(batch.map(uploadOne));
+      }
+
+      fileInput.value = '';
+      pastedFiles = [];
+      $('upload-file-hint').textContent = '支持 PNG、JPG、GIF、WebP 和 BMP，也可以整个文件夹一起选。';
+      resetFolderPick();
+      resetPasteZone();
+      if (success > 0) await refreshStickersAndGroups();
+      var hasDetail = duplicates.length > 0 || failed.length > 0;
+      if (hasDetail) {
+        var lines = ['导入完成：新增 ' + success + ' 张'
+          + (duplicates.length ? '，重复跳过 ' + duplicates.length + ' 张' : '')
+          + (failed.length ? '，失败 ' + failed.length + ' 张' : '') + '。'];
+        if (duplicates.length) {
+          lines.push('');
+          lines.push('重复跳过（图库里已经有同样内容的图，没重复入库，也不会再走识图）：');
+          lines = lines.concat(duplicates);
+        }
+        if (failed.length) {
+          lines.push('');
+          lines.push('失败详情：');
+          lines = lines.concat(failed);
+        }
+        showUploadResult(lines);
+        toast('导入完成：新增 ' + success + ' 张'
+          + (duplicates.length ? '，跳过 ' + duplicates.length + ' 张重复' : '')
+          + (failed.length ? '，' + failed.length + ' 张失败' : ''), failed.length > 0);
+      } else {
+        toast('成功导入 ' + success + ' 张图片');
+      }
+      // v0.34.35 - 有重复/失败详情时不自动关弹窗，否则用户看不到到底是哪几张
+      if (success > 0 && !hasDetail) closeModal('upload-modal');
+
+      // 上传后自动识图：新图直接进识图任务，弹进度窗
+      if (autoTag && newIds.length > 0) {
+        if (!hasDetail) closeModal('upload-modal');
+        await enqueueTagTask(newIds, { message: '已创建识图任务，共 ' + newIds.length + ' 张', openDetail: true });
+      }
+    } finally {
+      hideLoading();
+      uploadBusy = false;
+      var zipBtn2 = $('import-zip-btn');
+      if (zipBtn2) zipBtn2.disabled = false;
+      updateUploadBtnState();
+    }
+  }
+
+  async function handleImportZip() {
+    if (uploadBusy) { toast('有导入正在进行中，稍等一下', true); return; }
+    uploadBusy = true;
+    var input = $('upload-zip');
+    var file = input.files && input.files[0];
+    if (!file) { uploadBusy = false; toast('请选择 ZIP 文件', true); return; }
+    if (file.size > 50 * 1024 * 1024) { uploadBusy = false; toast('ZIP 文件不能超过 50MB', true); return; }
+
+    clearUploadResult();
+    showLoading('正在读取 ZIP...');
+    var zipBtn = $('import-zip-btn');
+    if (zipBtn) zipBtn.disabled = true;
+    var uploadBtn2 = $('upload-btn');
+    if (uploadBtn2) uploadBtn2.disabled = true;
+    try {
+      var zipBase64 = await readFileAsDataUrl(file);
+      showLoading('正在导入 ZIP...');
+      var resp = await apiFetch(withAuth(API + '/api'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'import_zip', zipBase64: zipBase64, fileName: file.name }),
+        signal: AbortSignal.timeout(120000),
+      });
+      var data = await resp.json();
+      if (!data.ok) throw new Error(data.error || 'ZIP 导入失败');
+      input.value = '';
+      var zipHint = $('upload-zip-hint');
+      if (zipHint) zipHint.textContent = '选好后点「导入 ZIP」开始';
+      await refreshStickersAndGroups();
+      var importedIds = (data.data && data.data.importedIds) || [];
+      var needsTagIds = data.data && Array.isArray(data.data.needsTagIds) ? data.data.needsTagIds : importedIds;
+      var skippedItems = data.data && data.data.skippedItems ? data.data.skippedItems : [];
+      var zipHasDetail = skippedItems.length > 0;
+      if (skippedItems.length) {
+        // v0.34.35 - 把「内容重复」和真异常分开说，重复的不算问题，也不用担心白烧识图
+        var dupItems = skippedItems.filter(function (item) { return /重复/.test(item.reason || ''); });
+        var otherItems = skippedItems.filter(function (item) { return !/重复/.test(item.reason || ''); });
+        var lines = [data.message || 'ZIP 导入完成'];
+        if (dupItems.length) {
+          lines.push('');
+          lines.push('重复跳过 ' + dupItems.length + ' 张（图库里已经有同样内容的图，没重复入库，也不会再走识图）：');
+          lines = lines.concat(dupItems.slice(0, 20).map(function (item) { return item.file; }));
+          if (dupItems.length > 20) lines.push('……等共 ' + dupItems.length + ' 张');
+        }
+        if (otherItems.length) {
+          lines.push('');
+          lines.push('其他跳过 ' + otherItems.length + ' 个：');
+          lines = lines.concat(otherItems.slice(0, 20).map(function (item) { return item.file + '：' + item.reason; }));
+          if (otherItems.length > 20) lines.push('……等共 ' + otherItems.length + ' 个');
+        }
+        showUploadResult(lines);
+        toast('ZIP 已导入：跳过 ' + dupItems.length + ' 张重复'
+          + (otherItems.length ? '、' + otherItems.length + ' 个异常' : '') + '，详情已留在弹窗里');
+      } else {
+        toast(data.message || 'ZIP 导入完成');
+        closeModal('upload-modal');
+      }
+      // v0.25.1 - 勾选「上传后自动识图」时，ZIP 导入的新图也自动进识图任务
+      var autoTagEl = $('upload-auto-tag');
+      if (autoTagEl && autoTagEl.checked && needsTagIds.length > 0) {
+        if (!zipHasDetail) closeModal('upload-modal');
+        await enqueueTagTask(needsTagIds, { message: '已创建识图任务，共 ' + needsTagIds.length + ' 张', openDetail: true });
+      }
+    } catch (error) {
+      toast('ZIP 导入失败：' + error.message, true);
+    } finally {
+      hideLoading();
+      uploadBusy = false;
+      if (zipBtn) zipBtn.disabled = false;
+      updateUploadBtnState();
+    }
+  }
+
+  // v0.33.77 - 数据与迁移页专用导入：不改变普通图库 ZIP 入口，直接展示全量恢复摘要。
+  function setMigrationStatus(text, isError) {
+    var el = $('data-migration-status');
+    if (!el) return;
+    el.textContent = text || '';
+    el.classList.toggle('is-error', !!isError);
+  }
+
+  function migrationResultText(data) {
+    var info = data && data.data ? data.data : {};
+    var lines = [data && data.message ? data.message : '一键搬家包导入完成'];
+    if (info.migration) {
+      var report = info.migrationReport || {};
+      var restored = report.restored || {};
+      var restoredParts = [];
+      Object.keys(restored).forEach(function (key) {
+        if (restored[key]) restoredParts.push(key + ' ' + restored[key]);
+      });
+      if (restoredParts.length) lines.push('已恢复：' + restoredParts.join('、'));
+      if (info.teachingVectorsQueued) lines.push('教学向量：已按当前模型后台重建 ' + info.teachingVectorsQueued + ' 条');
+      if (report.missingStickerReferences) lines.push('未接上的图片关联：' + report.missingStickerReferences + ' 条（对应图片缺失，已安全跳过）');
+      if (report.unmatchedAgents && report.unmatchedAgents.length) {
+        lines.push('未匹配助手：' + report.unmatchedAgents.slice(0, 5).map(function (item) {
+          return (item.name || item.source || '未知') + '（' + (item.reason || '未找到') + '）';
+        }).join('、') + (report.unmatchedAgents.length > 5 ? ' 等' : ''));
+      }
+    } else if (info.imported) {
+      lines.push('这是普通图库 ZIP，只恢复图片和图库元数据；完整设置请使用一键搬家包。');
+    }
+    return lines.join('\n');
+  }
+
+  async function handleMigrationImportZip(file) {
+    if (uploadBusy) { toast('有导入正在进行中，稍等一下', true); return; }
+    if (!file) return;
+    if (file.size > 50 * 1024 * 1024) {
+      setMigrationStatus('ZIP 文件不能超过 50MB', true);
+      toast('ZIP 文件不能超过 50MB', true);
+      return;
+    }
+    uploadBusy = true;
+    var button = $('data-migration-import-btn');
+    if (button) { button.disabled = true; button.textContent = '导入中…'; }
+    setMigrationStatus('正在检查并导入 ZIP，请稍等…');
+    showLoading('正在导入一键搬家包…');
+    try {
+      var zipBase64 = await readFileAsDataUrl(file);
+      var resp = await apiFetch(withAuth(API + '/api'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'import_zip', zipBase64: zipBase64, fileName: file.name, migrationMode: true }),
+        signal: AbortSignal.timeout(120000),
+      });
+      var data = await resp.json();
+      if (!data.ok) throw new Error(data.error || '一键搬家包导入失败');
+      await refreshStickersAndGroups();
+      setMigrationStatus(migrationResultText(data), false);
+      toast(data.message || '一键搬家包导入完成');
+    } catch (error) {
+      setMigrationStatus('导入失败：' + (error.message || '未知错误'), true);
+      toast('一键搬家包导入失败：' + error.message, true);
+    } finally {
+      hideLoading();
+      uploadBusy = false;
+      var input = $('data-migration-import-file');
+      if (input) input.value = '';
+      if (button) { button.disabled = false; button.textContent = '导入一键搬家包'; }
+    }
+  }
+
+  function chooseMigrationZip(file) {
+    if (!file) return;
+    customConfirm('导入一键搬家包会合并同图，并覆盖对应助手的偏好/方言/频率等迁移设置。\nAPI Key 和模型配置不会被导入。确定继续吗？', function () {
+      handleMigrationImportZip(file);
+    });
+  }
+
+  // v0.33.77 - 图库迁移：导出完整搬家包；目录可原生选择
+  // v0.34.17 - 导出内容按组勾选：图库常驻，可只选偏好/风格/方言/界面；全不勾 = 只导图库（v1 轻量包）
+  // v0.34.20 - 导出范围可按自定义分组取并集，同图去重；分组数据默认跟随导出。
+  var exportBusy = false;
+  var EXPORT_GROUPS = [
+    { id: 'preference', label: '偏好培养' },
+    { id: 'style', label: '学我说话' },
+    { id: 'dialect', label: '方言配置' },
+    { id: 'interface', label: '界面与悬浮球' },
+    { id: 'groups', label: '图库分组' },
+  ];
+  function getExportConfig() {
+    return window.__EXPORT_CONFIG__ || {};
+  }
+
+  function getCheckedExportGroups() {
+    return EXPORT_GROUPS.map(function (group) {
+      var box = $(group.id === 'interface' ? 'export-group-interface' : 'export-group-' + group.id);
+      return box && box.checked ? group.id : null;
+    }).filter(Boolean);
+  }
+
+  function allExportGroupsChecked() {
+    return EXPORT_GROUPS.every(function (group) {
+      var box = $(group.id === 'interface' ? 'export-group-interface' : 'export-group-' + group.id);
+      return box && box.checked;
+    });
+  }
+
+  function renderExportGroupPicker() {
+    var picker = $('export-group-picker');
+    if (!picker) return;
+    var previous = Object.create(null);
+    picker.querySelectorAll('input[data-export-range-group]').forEach(function (box) {
+      previous[box.getAttribute('data-export-range-group')] = box.checked;
+    });
+    var ungrouped = picker.querySelector('input[data-export-range-ungrouped]');
+    var includeUngrouped = ungrouped ? ungrouped.checked : true;
+    if (!groupData.groups || groupData.groups.length === 0) {
+      picker.innerHTML = '<span class="form-hint">还没有自定义分组；可以只导出「未分组」图片。</span>'
+        + '<label><input type="checkbox" data-export-range-ungrouped' + (includeUngrouped ? ' checked' : '') + '>未分组（' + (groupData.ungroupedCount || 0) + '）</label>';
+      return;
+    }
+    var html = '<label><input type="checkbox" data-export-range-ungrouped' + (includeUngrouped ? ' checked' : '') + '>未分组（' + (groupData.ungroupedCount || 0) + '）</label>';
+    (groupData.groups || []).forEach(function (group) {
+      var checked = previous[group.id] !== false;
+      html += '<label><input type="checkbox" data-export-range-group="' + escHtml(group.id) + '"' + (checked ? ' checked' : '') + '>' + escHtml(group.name) + '（' + (group.stickerCount || 0) + '）</label>';
+    });
+    picker.innerHTML = html;
+  }
+
+  function isGroupExportScope() {
+    var radio = $('export-scope-groups');
+    return Boolean(radio && radio.checked);
+  }
+
+  function getExportGroupFilter() {
+    if (!isGroupExportScope()) return null;
+    var groupIds = [];
+    document.querySelectorAll('#export-group-picker input[data-export-range-group]:checked').forEach(function (box) {
+      groupIds.push(box.getAttribute('data-export-range-group'));
+    });
+    var ungroupedBox = $('export-group-picker') && $('export-group-picker').querySelector('input[data-export-range-ungrouped]');
+    return { mode: 'groups', groupIds: groupIds, includeUngrouped: Boolean(ungroupedBox && ungroupedBox.checked) };
+  }
+
+  function updateExportScope() {
+    var picker = $('export-group-picker');
+    if (picker) picker.hidden = !isGroupExportScope();
+    updateExportSummary();
+  }
+
+  function setExportSummary(text, isGalleryOnly) {
+    var summary = $('export-summary');
+    if (!summary) return;
+    summary.textContent = text;
+    if (isGalleryOnly) summary.classList.add('is-gallery-only');
+    else summary.classList.remove('is-gallery-only');
+  }
+
+  function updateExportSummary() {
+    var groups = getCheckedExportGroups();
+    var scopeText = '';
+    if (isGroupExportScope()) {
+      var range = getExportGroupFilter();
+      var rangeCount = (range ? range.groupIds.length : 0) + (range && range.includeUngrouped ? 1 : 0);
+      scopeText = rangeCount > 0
+        ? '图库范围：按所选分组导出（' + rangeCount + ' 个入口，图片自动去重）。'
+        : '图库范围：还没有选分组或「未分组」，开始导出前请至少选一个。';
+    } else {
+      scopeText = '图库范围：全部图片。';
+    }
+    if (groups.length === 0) {
+      setExportSummary('只导出表情包图库（图片 + 名称/描述/标签），不带培养数据与设置。' + scopeText, true);
+    } else if (groups.length === EXPORT_GROUPS.length) {
+      setExportSummary('完整搬家包：图库、分组、培养数据与设置都会带出。' + scopeText, false);
+    } else {
+      var names = EXPORT_GROUPS.filter(function (group) { return groups.indexOf(group.id) !== -1; })
+        .map(function (group) { return group.label; }).join('、');
+      setExportSummary('图库 + 已勾选的：' + names + '。' + scopeText, false);
+    }
+    var allBox = $('export-check-all');
+    if (allBox) {
+      allBox.checked = allExportGroupsChecked();
+      allBox.indeterminate = groups.length > 0 && groups.length < EXPORT_GROUPS.length;
+    }
+  }
+
+  function openExportModal() {
+    var input = $('export-dir');
+    var cfg = getExportConfig();
+    if (input && !input.value.trim()) input.value = cfg.lastExportDir || cfg.defaultExportDir || '';
+    renderExportGroupPicker();
+    updateExportScope();
+    openModal('export-modal');
+    if (input) { input.focus(); input.select(); }
+  }
+
+  var exportPickerBusy = false;
+  async function pickExportFolder() {
+    if (uploadBusy || exportBusy || exportPickerBusy) {
+      toast('有导入或导出正在进行中，稍等一下', true);
+      return;
+    }
+    var input = $('export-dir');
+    var button = $('export-pick-folder');
+    exportPickerBusy = true;
+    if (button) { button.disabled = true; button.textContent = '选择中…'; }
+    toast('请在弹出的窗口里选择导出文件夹…');
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/export/pick-folder'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initial: input ? input.value.trim() : '' }),
+        timeout: 305000,
+      });
+      var data = await resp.json();
+      if (!data.ok) {
+        if (data.error === '没有选择文件夹') {
+          toast('已取消选择文件夹');
+          return;
+        }
+        throw new Error(data.error || '选择文件夹失败');
+      }
+      var directory = data.data && data.data.directory;
+      if (!directory) throw new Error('没有拿到所选文件夹');
+      if (input) { input.value = directory; input.focus(); }
+      updateExportSummary();
+      toast('已选择导出文件夹');
+    } catch (error) {
+      toast('选择文件夹失败：' + error.message, true);
+    } finally {
+      exportPickerBusy = false;
+      if (button) { button.disabled = false; button.textContent = '选择文件夹…'; }
+    }
+  }
+
+  async function handleExportZip() {
+    if (uploadBusy || exportBusy) { toast('有导入或导出正在进行中，稍等一下', true); return; }
+    var input = $('export-dir');
+    var directory = input ? input.value.trim() : '';
+    if (!directory) { toast('先填写要保存到的文件夹路径', true); if (input) input.focus(); return; }
+    var groupFilter = getExportGroupFilter();
+    if (groupFilter && groupFilter.groupIds.length === 0 && !groupFilter.includeUngrouped) {
+      toast('按分组导出时，至少选一个分组或「未分组」', true);
+      return;
+    }
+
+    exportBusy = true;
+    var button = $('export-zip-btn');
+    if (button) { button.disabled = true; button.textContent = '正在打包…'; }
+    showLoading('正在打包当前图库…');
+    try {
+      var resp = await apiFetch(withAuth(API + '/api'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'export_zip', outputDir: directory, dataGroups: getCheckedExportGroups(), groupFilter: groupFilter }),
+        signal: AbortSignal.timeout(120000),
+      });
+      var data = await resp.json();
+      if (!data.ok) throw new Error(data.error || 'ZIP 导出失败');
+
+      var info = data.data || {};
+      var cfg = getExportConfig();
+      cfg.lastExportDir = info.directory || directory;
+      window.__EXPORT_CONFIG__ = cfg;
+      var summary = $('export-summary');
+      var skippedItems = Array.isArray(info.skippedItems) ? info.skippedItems : [];
+      if (summary) {
+        var base = getCheckedExportGroups().length === 0 ? '只导出了表情包图库' : (data.message || ('已导出 ' + (info.exported || 0) + ' 张表情包'));
+        if (info.groupFiltered && getCheckedExportGroups().length === 0) base += '（按所选分组，已自动去重）';
+        summary.textContent = base
+          + (info.fileName ? '\n文件名：' + info.fileName : '');
+        if (skippedItems.length) {
+          summary.textContent += '\n' + skippedItems.slice(0, 5).map(function (item) {
+            return item.file + '：' + item.reason;
+          }).join('\n');
+        }
+        summary.classList.remove('is-gallery-only');
+      }
+      var exportToast = (data.message || 'ZIP 导出完成') + (info.fileName ? '：' + info.fileName : '');
+      toast(exportToast, skippedItems.length > 0);
+      if (!skippedItems.length) {
+        setTimeout(function () { closeModal('export-modal'); }, 350);
+      }
+    } catch (error) {
+      toast('ZIP 导出失败：' + error.message, true);
+    } finally {
+      hideLoading();
+      exportBusy = false;
+      if (button) { button.disabled = false; button.textContent = '开始导出'; }
+    }
+  }
+
+  // ═══════════════════════════════════
+  //  弹窗工具
+  // ═══════════════════════════════════
+  function openModal(id) {
+    var modal = $(id);
+    if (modal) { modal.hidden = false; modal.style.display = 'flex'; }
+  }
+
+  function closeModal(id) {
+    var modal = $(id);
+    if (modal) { modal.hidden = true; modal.style.display = ''; }
+    // v0.25.2 - 关闭导入弹窗时完整重置：粘贴、文件、文件夹、ZIP、结果提示全部清空，每次打开从头来
+    if (id === 'upload-modal') resetUploadForm();
+  }
+
+  // ═══════════════════════════════════
+  //  编辑弹窗
+  // ═══════════════════════════════════
+  function openEditor(sticker) {
+    $('edit-id').value = sticker.id;
+    $('edit-desc').value = sticker.description || '';
+    $('edit-emotion').value = (sticker.tags.emotion || []).join(', ');
+    $('edit-scene').value = (sticker.tags.scene || []).join(', ');
+    $('edit-keywords').value = (sticker.tags.keywords || []).join(', ');
+    openModal('editor-modal');
+  }
+
+  function closeEditor() { closeModal('editor-modal'); }
+
+  async function saveEdit() {
+    var id = $('edit-id').value;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update',
+          id: id,
+          description: $('edit-desc').value,
+          emotion: $('edit-emotion').value,
+          scene: $('edit-scene').value,
+          keywords: $('edit-keywords').value,
+        }),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        closeEditor();
+        toast('已保存');
+        await loadStickers();
+        await refreshPreferences();
+      } else {
+        toast('保存失败: ' + (data.error || ''), true);
+      }
+    } catch (err) {
+      toast('保存出错: ' + err.message, true);
+    }
+  }
+
+  // ═══════════════════════════════════
+  //  删除
+  // ═══════════════════════════════════
+  async function deleteSticker(id) {
+    customConfirm('确定要删除这个表情包吗？此操作不可撤销。', async function () {
+      try {
+        var resp = await apiFetch(withAuth(API + '/api'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'delete', id: id }),
+        });
+        var data = await resp.json();
+        if (data.ok) {
+          toast('已删除');
+          await refreshStickersAndGroups();
+        } else {
+          toast('删除失败: ' + (data.error || ''), true);
+        }
+      } catch (err) {
+        toast('删除出错: ' + err.message, true);
+      }
+    });
+  }
+
+  // ═══════════════════════════════════
+  //  自定义确认弹窗
+  // ═══════════════════════════════════
+  function customConfirm(message, onConfirm) {
+    var overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.style.zIndex = '100000';
+    overlay.style.display = 'flex';
+    overlay.innerHTML = ''
+      + '<div class="modal-box" style="max-width:360px;position:relative">'
+      + '<h2 style="margin-top:0;font-size:16px">确认操作</h2>'
+      + '<div style="font-size:13px;color:var(--text-muted);margin:14px 0;line-height:1.6;white-space:pre-wrap">' + escHtml(message) + '</div>'
+      + '<div class="modal-actions" style="display:flex;gap:8px;justify-content:flex-end">'
+      + '<button class="btn btn-secondary" id="cc-cancel">取消</button>'
+      + '<button class="btn btn-primary" id="cc-ok" style="width:auto">确定</button>'
+      + '</div></div>';
+    document.body.appendChild(overlay);
+    var okBtn = overlay.querySelector('#cc-ok');
+    var cancelBtn = overlay.querySelector('#cc-cancel');
+    function close() { overlay.remove(); }
+    cancelBtn.onclick = close;
+    okBtn.onclick = function () { close(); onConfirm(); };
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+    okBtn.focus();
+  }
+
+  // ═══════════════════════════════════
+  //  检查更新（v0.19.5 分享版）
+  // ═══════════════════════════════════
+  function checkUpdate() {
+    var btn = $('btn-check-update');
+    var original = btn ? btn.textContent : '';
+    if (btn) { btn.textContent = '检查中…'; btn.disabled = true; }
+    var done = function () {
+      if (btn) { btn.textContent = original; btn.disabled = false; }
+    };
+    apiFetch(withAuth(API + '/api/check-update'), { signal: AbortSignal.timeout(12000) })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data || data.success === false) {
+          showUpdateResult({
+            title: '❌ 检查失败',
+            body: '<div style="font-size:13px;color:var(--text-muted);margin:10px 0;line-height:1.7">' + escHtml(data ? (data.error || '未知错误') : '无响应') + '</div>',
+            repoUrl: (data && data.repoUrl) || 'https://github.com/moononnn/hanako-biaoqingbao',
+            okText: '知道了',
+          });
+          return;
+        }
+        if (!data.hasUpdate) {
+          // v0.19.5 - API 不可用（apiDown）时弹窗展示仓库地址，让用户自己去看；真无更新才轻提示
+          if (data.apiDown) {
+            showUpdateResult({
+              title: '⚠️ 暂时检查不了',
+              body: '<div style="font-size:13px;color:var(--text-muted);margin:10px 0;line-height:1.7">' + escHtml(data.message || 'GitHub API 暂时不可用') + '，可以先去仓库看看有没有新版本。</div>',
+              repoUrl: data.repoUrl || 'https://github.com/moononnn/hanako-biaoqingbao',
+              okText: '知道了',
+            });
+            return;
+          }
+          toast(data.message || '已是最新版本 ✨');
+          return;
+        }
+        // 有更新：更新卡片
+        var bodyHtml = '<div style="font-size:13px;color:var(--text);margin:10px 0;line-height:1.7">' + escHtml(data.message) + '</div>';
+        if (data.releaseBody) {
+          var release = escHtml(data.releaseBody)
+            .replace(/^###?\s+(.+)$/gm, '<strong>$1</strong>')
+            .replace(/^[-*]\s+(.+)$/gm, '· $1')
+            .replace(/\n{2,}/g, '<br><br>')
+            .replace(/\n/g, '<br>');
+          bodyHtml += '<div style="font-size:12px;color:var(--text-muted);max-height:180px;overflow-y:auto;border:1px solid var(--border-light);border-radius:8px;padding:10px;line-height:1.7">' + release + '</div>';
+        }
+        showUpdateResult({
+          title: '🎉 发现新版本',
+          body: bodyHtml,
+          actions: '<a href="' + data.downloadUrl + '" target="_blank" class="btn" style="text-decoration:none;background:var(--primary);color:#fff;border-color:var(--primary)">⬇ 下载更新</a>'
+            + '<a href="' + data.updateUrl + '" target="_blank" class="btn" style="text-decoration:none">查看详情 →</a>',
+          repoUrl: data.repoUrl,
+          okText: '稍后再说',
+        });
+      })
+      .catch(function (e) {
+        showUpdateResult({
+          title: '❌ 网络错误',
+          body: '<div style="font-size:13px;color:var(--text-muted);margin:10px 0;line-height:1.7">' + escHtml(e.message || '请求失败') + '</div>',
+          repoUrl: 'https://github.com/moononnn/hanako-biaoqingbao',
+          okText: '知道了',
+        });
+      })
+      .finally(done);
+  }
+
+  // 更新结果弹窗（失败/有更新共用）
+  function showUpdateResult(opts) {
+    var overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.style.zIndex = '100000';
+    overlay.style.display = 'flex';
+    var repoUrl = opts.repoUrl || 'https://github.com/moononnn/hanako-biaoqingbao';
+    var html = '<div class="modal-box" style="max-width:460px;position:relative">'
+      + '<h2 style="margin-top:0;font-size:16px">' + opts.title + '</h2>'
+      + opts.body;
+    if (opts.actions) {
+      html += '<div style="display:flex;gap:8px;margin-top:12px">' + opts.actions + '</div>';
+    }
+    html += '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);font-size:11px;color:var(--text-muted);word-break:break-all">也可复制链接手动下载：<br>'
+      + '<a href="' + repoUrl + '" target="_blank" style="color:var(--primary);word-break:break-all">' + repoUrl + '</a></div>'
+      + '<button class="btn" data-update-close style="margin-top:12px;width:100%">' + (opts.okText || '知道了') + '</button>'
+      + '</div>';
+    overlay.innerHTML = html;
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay || e.target.hasAttribute('data-update-close')) {
+        overlay.remove();
+      }
+    });
+    document.body.appendChild(overlay);
+  }
+
+  // ═══════════════════════════════════
+  //  模型配置（设置弹窗内）
+  // ═══════════════════════════════════
+  var visionModels = window.__VISION_MODELS__ || [];
+  var visionConfig = window.__VISION_CONFIG__ || {};
+  var textModels = window.__TEXT_MODELS__ || [];
+  var textConfig = window.__TEXT_CONFIG__ || { enabled: false, source: 'hana' };
+  var jevConfig = window.__JEV_CONFIG__ || { enabled: false, baseUrl: 'https://api.typesafe.ai', model: 'jev-latest', apiKey: '' };
+
+  function hasConfiguredModel(cfg) {
+    if (!cfg) return false;
+    if (cfg.source === 'custom') return Boolean(cfg.customBaseUrl && cfg.customApiKey && cfg.customModel);
+    return Boolean(cfg.providerId && cfg.modelId);
+  }
+
+  function setGuideState(id, label, ready) {
+    var el = $(id);
+    if (!el) return;
+    el.textContent = label + (ready ? ' · 已配置' : ' · 待配置');
+    el.classList.toggle('ready', ready);
+    el.classList.toggle('pending', !ready);
+  }
+
+  function updateModelGuide() {
+    var embeddingConfig = window.__EMBEDDING_CONFIG__ || {};
+    var visionReady = hasConfiguredModel(visionConfig);
+    var textReady = textConfig.enabled !== false && hasConfiguredModel(textConfig);
+    var embeddingReady = hasConfiguredModel(embeddingConfig);
+    setGuideState('guide-vision', '识图', visionReady);
+    if (textConfig.enabled === false) {
+      var textEl = $('guide-text');
+      if (textEl) {
+        textEl.textContent = '内容 · 已关闭';
+        textEl.classList.remove('ready');
+        textEl.classList.add('pending');
+      }
+    } else {
+      setGuideState('guide-text', '内容', textReady);
+    }
+    setGuideState('guide-embedding', '向量', embeddingReady);
+  }
+
+  function openSettings() {
+    // 填充识图模型
+    var vCfg = visionConfig;
+    // v0.34.37 - 批量识图自动应用开关（即时保存，打开设置时刷一次真实状态）
+    loadBatchAutoApplyState();
+    $('vision-source').value = vCfg.source || 'hana';
+    var vProv = $('vision-provider');
+    vProv.innerHTML = '<option value="">选择 Provider...</option>';
+    for (var i = 0; i < visionModels.length; i++) {
+      var p = visionModels[i];
+      var sel = p.providerId === vCfg.providerId ? ' selected' : '';
+      vProv.innerHTML += '<option value="' + escHtml(p.providerId) + '"' + sel + '>' + escHtml(p.providerName) + '</option>';
+    }
+    updateVisionModelDropdown(vCfg.providerId, vCfg.modelId);
+    $('vision-custom-url').value = vCfg.customBaseUrl || '';
+    $('vision-custom-key').value = vCfg.customApiKey ? '********' : '';
+    $('vision-custom-model').value = vCfg.customModel || '';
+    toggleVisionBlocks();
+
+    // 填充分析模型
+    var tCfg = textConfig;
+    $('text-enabled').checked = tCfg.enabled !== false;
+    $('text-source').value = tCfg.source || 'hana';
+    var tProv = $('text-provider');
+    tProv.innerHTML = '<option value="">选择 Provider...</option>';
+    for (var j = 0; j < textModels.length; j++) {
+      var tp = textModels[j];
+      var tsel = tp.providerId === tCfg.providerId ? ' selected' : '';
+      tProv.innerHTML += '<option value="' + escHtml(tp.providerId) + '"' + tsel + '>' + escHtml(tp.providerName) + '</option>';
+    }
+    updateTextModelDropdown(tCfg.providerId, tCfg.modelId);
+    $('text-custom-url').value = tCfg.customBaseUrl || '';
+    $('text-custom-key').value = tCfg.customApiKey ? '********' : '';
+    $('text-custom-model').value = tCfg.customModel || '';
+    $('text-test-result').textContent = '';
+    toggleTextBlocks();
+
+    // v0.34.49 - Jev 专用决策 API
+    $('jev-enabled').checked = jevConfig.enabled === true;
+    $('jev-shadow-enabled').checked = jevConfig.shadowEnabled === true;
+    $('jev-shadow-limit').value = jevConfig.shadowMaxCalls || 100;
+    $('jev-base-url').value = jevConfig.baseUrl || 'https://api.typesafe.ai';
+    $('jev-api-key').value = jevConfig.keyStored ? '********' : '';
+    $('jev-api-key').dataset.clear = 'false';
+    $('jev-model').value = jevConfig.model || 'jev-latest';
+    $('jev-test-result').textContent = '';
+
+    // v0.16.0 - 加载 Embedding 配置
+    loadEmbeddingConfig();
+
+    openModal('settings-modal');
+  }
+
+  var ballStatus = null;
+  var ballPinnedIds = new Set();
+
+  async function loadBallState() {
+    var statusEl = $('ball-status-top');
+    if (!statusEl) return;
+    statusEl.textContent = '读取中…';
+    try {
+      var results = await Promise.all([
+        apiFetch(withAuth(API + '/api/ball/status'), { signal: AbortSignal.timeout(20000) }).then(function (r) { return r.json(); }),
+        apiFetch(withAuth(API + '/api/ball/config'), { signal: AbortSignal.timeout(5000) }).then(function (r) { return r.json(); }),
+      ]);
+      ballStatus = results[0];
+      var config = results[1] && results[1].data ? results[1].data : { pinnedIds: [] };
+      ballPinnedIds = new Set(config.pinnedIds || []);
+      renderBallStatus(ballStatus);
+      updateBallPinButtons();
+    } catch (e) {
+      statusEl.textContent = '状态读取失败';
+      var toggle = $('ball-toggle-top');
+      if (toggle) toggle.title = '悬浮球状态读取失败：' + (e.message || '请稍后再试');
+    }
+  }
+
+  function renderBallStatus(data) {
+    var statusEl = $('ball-status-top');
+    var toggle = $('ball-toggle-top');
+    if (!statusEl || !toggle) return;
+    var running = !!(data && data.running);
+    var switchEl = toggle.querySelector('.ball-toggle-switch');
+    toggle.classList.toggle('on', running);
+    toggle.setAttribute('aria-pressed', running ? 'true' : 'false');
+    if (switchEl) switchEl.classList.toggle('on', running);
+    if (running) {
+      statusEl.textContent = data.connected ? '已开启' : '连接中…';
+      toggle.title = '关闭桌面纸飞机悬浮球；右键可关闭';
+    } else {
+      statusEl.textContent = data && (data.error || data.dependencyError) ? (data.error || data.dependencyError) : '未开启';
+      toggle.title = '开启桌面纸飞机悬浮球；右键可关闭';
+    }
+  }
+
+  function updateBallPinButtons() {
+    document.querySelectorAll('.ball-pin-btn[data-id]').forEach(function (button) {
+      var id = button.getAttribute('data-id');
+      var pinned = ballPinnedIds.has(id);
+      button.textContent = pinned ? '已加入悬浮球' : '加入悬浮球';
+      button.classList.toggle('active', pinned);
+      button.setAttribute('aria-pressed', pinned ? 'true' : 'false');
+    });
+  }
+
+  async function toggleBall() {
+    var button = $('ball-toggle-top');
+    var statusEl = $('ball-status-top');
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    if (statusEl) statusEl.textContent = '处理中…';
+    try {
+      var current = await apiFetch(withAuth(API + '/api/ball/status'), { signal: AbortSignal.timeout(20000) }).then(function (r) { return r.json(); });
+      var action = current && current.running ? 'stop' : 'start';
+      var resp = await apiFetch(withAuth(API + '/api/ball/' + action), {
+        method: 'POST',
+        signal: AbortSignal.timeout(action === 'start' ? 30000 : 10000),
+      });
+      var result = await resp.json();
+      if (!result.ok) throw new Error(result.error || '操作失败');
+      toast(action === 'start' ? '悬浮球已启动' : '悬浮球已停止');
+      await loadBallState();
+    } catch (e) {
+      toast('悬浮球操作失败：' + (e.message || '未知错误'), true);
+      await loadBallState();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function setBallPin(id, pinned, control) {
+    if (!id || (control && control.disabled)) return;
+    if (control) control.disabled = true;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/ball/pin'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stickerId: id, pinned: pinned }),
+      });
+      var data = await resp.json();
+      if (!data.ok) throw new Error(data.error || '保存失败');
+      if (Array.isArray(data.pinnedIds)) ballPinnedIds = new Set(data.pinnedIds);
+      else if (pinned) ballPinnedIds.add(id);
+      else ballPinnedIds.delete(id);
+      updateBallPinButtons();
+      toast(pinned ? '已加入悬浮球' : '已从悬浮球移除');
+    } catch (e) {
+      updateBallPinButtons();
+      toast('保存失败：' + (e.message || '未知错误'), true);
+    } finally {
+      if (control) control.disabled = false;
+    }
+  }
+
+  function toggleBallPinButton(button) {
+    var id = button && button.getAttribute('data-id');
+    if (id) setBallPin(id, !ballPinnedIds.has(id), button);
+  }
+
+  // ─── 打开插件页面自动启动悬浮球（半自动：手动关过则本次不再弹）───
+  async function autoBootBall() {
+    var st;
+    try {
+      st = await apiFetch(withAuth(API + '/api/ball/autoboot'), { signal: AbortSignal.timeout(10000) }).then(function (r) { return r.json(); });
+    } catch { return; }
+    if (!st || !st.ok) return;
+    if (st.running) return; // 已经在跑不重复启动
+    if (st.dismissed) return; // 上次手动关过：本次打开页面不弹
+    if (!st.pyQtOk) {
+      toast('悬浮球需要 Python + PyQt6，当前环境还不能加载它', true);
+      return;
+    }
+    toast('正在启动纸飞机…');
+    try {
+      var start = await apiFetch(withAuth(API + '/api/ball/start'), {
+        method: 'POST',
+        signal: AbortSignal.timeout(30000),
+      }).then(function (r) { return r.json(); });
+      if (start && start.ok) {
+        toast('纸飞机起飞啦 ✈');
+        await loadBallState();
+      } else {
+        toast((start && start.error) || '悬浮球启动失败', true);
+        await loadBallState();
+      }
+    } catch (e) {
+      toast('悬浮球启动失败', true);
+      await loadBallState();
+    }
+  }
+
+  function updateVisionModelDropdown(providerId, selectedModel) {
+    var modelSel = $('vision-model');
+    modelSel.innerHTML = '<option value="">选择模型...</option>';
+    if (!providerId) return;
+    for (var i = 0; i < visionModels.length; i++) {
+      if (visionModels[i].providerId === providerId) {
+        var models = visionModels[i].models || [];
+        for (var j = 0; j < models.length; j++) {
+          var sel = models[j].id === selectedModel ? ' selected' : '';
+          modelSel.innerHTML += '<option value="' + escHtml(models[j].id) + '"' + sel + '>' + escHtml(models[j].name) + '</option>';
+        }
+      }
+    }
+  }
+
+  function bindBatchAutoApplyToggle() {
+    var el = $('batch-auto-apply');
+    if (!el || el.__bound) return;
+    el.__bound = true;
+    el.addEventListener('change', async function () {
+      var next = el.checked;
+      el.disabled = true;
+      try {
+        var resp = await apiFetch(withAuth(API + '/api/batch-config'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ autoApply: next }),
+        });
+        var data = await resp.json();
+        if (data.ok) toast(data.message || '已保存');
+        else { el.checked = !next; toast('保存失败：' + (data.error || ''), true); }
+      } catch (e) {
+        el.checked = !next;
+        toast('保存出错：' + e.message, true);
+      } finally {
+        el.disabled = false;
+      }
+    });
+  }
+
+  async function loadBatchAutoApplyState() {
+    var el = $('batch-auto-apply');
+    if (!el) return;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-config'), { cache: 'no-store' });
+      var data = await resp.json();
+      if (data.ok && data.data) el.checked = data.data.autoApply !== false;
+    } catch (e) {
+      console.warn('[batch] load auto-apply state error:', e.message);
+    }
+  }
+
+  function toggleVisionBlocks() {
+    var source = $('vision-source').value;
+    $('vision-hana-block').style.display = source === 'hana' ? '' : 'none';
+    $('vision-custom-block').style.display = source === 'custom' ? '' : 'none';
+  }
+
+  function updateTextModelDropdown(providerId, selectedModel) {
+    var modelSel = $('text-model');
+    modelSel.innerHTML = '<option value="">选择模型...</option>';
+    if (!providerId) return;
+    for (var i = 0; i < textModels.length; i++) {
+      if (textModels[i].providerId === providerId) {
+        var models = textModels[i].models || [];
+        for (var j = 0; j < models.length; j++) {
+          var sel = models[j].id === selectedModel ? ' selected' : '';
+          modelSel.innerHTML += '<option value="' + escHtml(models[j].id) + '"' + sel + '>' + escHtml(models[j].name) + '</option>';
+        }
+      }
+    }
+  }
+
+  function toggleTextBlocks() {
+    var source = $('text-source').value;
+    $('text-hana-block').style.display = source === 'hana' ? '' : 'none';
+    $('text-custom-block').style.display = source === 'custom' ? '' : 'none';
+  }
+
+  function buildTextConfigFromForm() {
+    var source = $('text-source').value;
+    return {
+      enabled: $('text-enabled').checked,
+      source: source,
+      providerId: source === 'hana' ? $('text-provider').value : '',
+      modelId: source === 'hana' ? $('text-model').value : '',
+      customBaseUrl: source === 'custom' ? $('text-custom-url').value : '',
+      customApiKey: $('text-custom-key').value,
+      customModel: source === 'custom' ? $('text-custom-model').value : '',
+    };
+  }
+
+  function buildJevConfigFromForm() {
+    return {
+      enabled: $('jev-enabled').checked,
+      shadowEnabled: $('jev-shadow-enabled').checked,
+      shadowMaxCalls: Number($('jev-shadow-limit').value) || 100,
+      baseUrl: $('jev-base-url').value,
+      apiKey: $('jev-api-key').value,
+      model: $('jev-model').value,
+      clearKey: $('jev-api-key').dataset.clear === 'true',
+    };
+  }
+
+  // v0.18.0 - Embedding 向量检索（与识图/内容模型对称）
+  function toggleEmbeddingBlocks() {
+    var source = $('embedding-source').value;
+    $('embedding-hana-block').style.display = source === 'hana' ? '' : 'none';
+    $('embedding-custom-block').style.display = source === 'custom' ? '' : 'none';
+  }
+
+  // 根据后端返回的可用模型列表填充 provider/model 下拉框
+  // v0.18.3 - 与 vision/text 完全对齐：用 selected 标记已保存的 provider
+  function populateEmbeddingSelectors(savedProviderId) {
+    var providerSel = $('embedding-provider');
+    var modelSel = $('embedding-model');
+    var emptyDiv = $('embedding-hana-empty');
+    if (!providerSel || !modelSel) return;
+
+    var list = (window.__EMBEDDING_MODELS__ || []);
+    if (!list.length) {
+      emptyDiv.style.display = '';
+      providerSel.style.display = 'none';
+      modelSel.style.display = 'none';
+      return;
+    }
+    emptyDiv.style.display = 'none';
+    providerSel.style.display = '';
+    modelSel.style.display = '';
+
+    providerSel.innerHTML = '<option value="">选择 Provider...</option>';
+    for (var i = 0; i < list.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = list[i].providerId;
+      opt.textContent = list[i].providerName + ' (' + list[i].models.length + ')';
+      // v0.18.3 - 与 savedProviderId 匹配时标记 selected
+      if (savedProviderId && list[i].providerId === savedProviderId) opt.selected = true;
+      providerSel.appendChild(opt);
+    }
+    providerSel.onchange = function () {
+      modelSel.innerHTML = '<option value="">选择模型...</option>';
+      var pid = providerSel.value;
+      for (var j = 0; j < list.length; j++) {
+        if (list[j].providerId === pid) {
+          for (var k = 0; k < list[j].models.length; k++) {
+            var mo = document.createElement('option');
+            mo.value = list[j].models[k].id;
+            mo.textContent = list[j].models[k].name;
+            modelSel.appendChild(mo);
+          }
+          break;
+        }
+      }
+    };
+  }
+
+  async function loadEmbeddingConfig() {
+    var cfg = window.__EMBEDDING_CONFIG__ || {};
+    var savedProviderId = cfg.providerId || '';
+    var savedModelId = cfg.modelId || '';
+
+    // v0.18.3 - 防御：providerId 缺失但 modelId 有，从 modelId 反查 providerId
+    if (!savedProviderId && savedModelId) {
+      var list0 = window.__EMBEDDING_MODELS__ || [];
+      for (var pi = 0; pi < list0.length; pi++) {
+        for (var mj = 0; mj < list0[pi].models.length; mj++) {
+          if (list0[pi].models[mj].id === savedModelId) {
+            savedProviderId = list0[pi].providerId;
+            console.info('[embed cfg] 从 modelId 反查 providerId:', savedProviderId);
+            break;
+          }
+        }
+        if (savedProviderId) break;
+      }
+    }
+
+    populateEmbeddingSelectors(savedProviderId);
+    try {
+      $('embedding-source').value = cfg.source || 'hana';
+      // hana 模型回填：有 providerId 就回填（即使是反查出来的）
+      if (cfg.source === 'hana' && savedProviderId) {
+        var providerSel = $('embedding-provider');
+        if (providerSel) {
+          providerSel.value = savedProviderId;
+          providerSel.onchange();
+          $('embedding-model').value = savedModelId || '';
+        }
+      }
+      $('embedding-custom-url').value = cfg.customBaseUrl || '';
+      $('embedding-custom-key').value = cfg.customApiKey ? '********' : '';
+      $('embedding-custom-model').value = cfg.customModel || '';
+      $('embedding-custom-dimensions').value = cfg.customDimensions || '';
+      // v0.33.29 - 悬浮球识图入库自动向量开关
+      var autoVec = $('embedding-auto-vector');
+      if (autoVec) autoVec.checked = cfg.autoVectorOnSave !== false;
+    } catch (e) { console.warn('[embed cfg] load err:', e); }
+    toggleEmbeddingBlocks();
+  }
+
+  async function loadSemanticIndexStatus() {
+    var btn = $('embedding-index-btn');
+    if (!btn) return;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/vector-status'));
+      var data = await resp.json();
+      if (!data.ok) return;
+      var d = data.data || {};
+      btn.classList.toggle('is-pending', d.pending > 0);
+      if (!d.configured) {
+        btn.textContent = '图库语义索引';
+        btn.title = '还没有配置语义索引模型，点击查看提示';
+      } else if (d.pending > 0) {
+        btn.textContent = '图库语义索引 (' + d.pending + ')';
+        btn.title = '有 ' + d.pending + ' 张图片等待加入语义索引';
+      } else {
+        btn.textContent = '图库语义索引';
+        btn.title = '图库中的图片都已建立语义索引';
+      }
+    } catch (e) {
+      console.warn('[semantic index] status error:', e);
+    }
+  }
+
+  async function generateSemanticIndex() {
+    var btn = $('embedding-index-btn');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = '索引中...';
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/generate-embeddings'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ onlyMissing: true }),
+      });
+      var data = await resp.json();
+      if (!data.ok) {
+        var msg = data.error || '语义索引失败';
+        if (msg.indexOf('未配置') >= 0) msg += '，请先去设置里配置';
+        toast(msg, true);
+      } else {
+        var d = data.data || {};
+        toast(d.processed > 0 ? '语义索引完成：' + d.processed + ' 张' : '没有需要处理的图片');
+      }
+    } catch (e) {
+      toast('语义索引出错：' + e.message, true);
+    } finally {
+      btn.disabled = false;
+      await loadSemanticIndexStatus();
+    }
+  }
+
+  function buildEmbeddingConfigFromForm() {
+    var source = $('embedding-source').value;
+    if (source === 'hana') {
+      var providerId = $('embedding-provider').value || '';
+      var modelId = $('embedding-model').value || '';
+      // 防御：如果选了模型但没选 provider（UI 偶发 bug），从模型反查 provider
+      if (modelId && !providerId) {
+        var list = window.__EMBEDDING_MODELS__ || [];
+        for (var i = 0; i < list.length; i++) {
+          for (var j = 0; j < list[i].models.length; j++) {
+            if (list[i].models[j].id === modelId) {
+              providerId = list[i].providerId;
+              break;
+            }
+          }
+          if (providerId) break;
+        }
+        if (providerId) console.info('[embed save] 从 modelId 反查 providerId:', providerId);
+      }
+      return {
+        source: 'hana',
+        providerId: providerId,
+        modelId: modelId,
+        dimensions: window.__EMBEDDING_TEST_DIM__ || 1024,
+        customBaseUrl: '',
+        customApiKey: '',
+        customModel: '',
+        customDimensions: 1024,
+        autoVectorOnSave: $('embedding-auto-vector') ? $('embedding-auto-vector').checked : false,
+      };
+    }
+    return {
+      source: 'custom',
+      providerId: '',
+      modelId: '',
+      dimensions: 1024,
+      customBaseUrl: $('embedding-custom-url').value || '',
+      customApiKey: $('embedding-custom-key').value || '',
+      customModel: $('embedding-custom-model').value || '',
+      customDimensions: parseInt($('embedding-custom-dimensions').value, 10) || 1024,
+      autoVectorOnSave: $('embedding-auto-vector') ? $('embedding-auto-vector').checked : false,
+    };
+  }
+
+  async function saveEmbeddingConfig() {
+    var cfg = buildEmbeddingConfigFromForm();
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/embedding-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg),
+      });
+      var data = await resp.json();
+      if (!data.ok) console.warn('[embed save] server error:', data.error);
+      if (data.ok) window.__EMBEDDING_CONFIG__ = cfg;
+      return data.ok;
+    } catch (e) {
+      console.warn('[embed save] network error:', e);
+      return false;
+    }
+  }
+
+  // v0.18.4 - embedding 连通测试（复用 vision/text 的「测试连通」模式）
+  async function testEmbeddingConfig() {
+    var statusEl = $('embedding-test-result');
+    var btn = $('embedding-test-btn');
+    statusEl.textContent = '测试中...';
+    statusEl.style.color = 'var(--text-muted)';
+    btn.disabled = true;
+    var cfg = buildEmbeddingConfigFromForm();
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/embedding-test'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        var d = data.data;
+        statusEl.textContent = '✅ ' + d.model + ' · ' + d.dimensions + ' 维';
+        statusEl.style.color = 'var(--success)';
+        window.__EMBEDDING_TEST_DIM__ = d.dimensions;
+        if (cfg.source === 'custom' && d.dimensions && !cfg.customDimensions) {
+          $('embedding-custom-dimensions').value = d.dimensions;
+        }
+      } else {
+        statusEl.textContent = '❌ ' + (data.error || '连接失败');
+        statusEl.style.color = 'var(--danger)';
+      }
+    } catch (e) {
+      statusEl.textContent = '❌ ' + e.message;
+      statusEl.style.color = 'var(--danger)';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function saveAllSettings() {
+    // 保存识图模型
+    var vSource = $('vision-source').value;
+    var vCfg = {
+      source: vSource,
+      providerId: vSource === 'hana' ? $('vision-provider').value : '',
+      modelId: vSource === 'hana' ? $('vision-model').value : '',
+      customBaseUrl: vSource === 'custom' ? $('vision-custom-url').value : '',
+      customApiKey: $('vision-custom-key').value,
+      customModel: vSource === 'custom' ? $('vision-custom-model').value : '',
+    };
+
+    // 保存分析模型
+    var tCfg = buildTextConfigFromForm();
+    var jCfg = buildJevConfigFromForm();
+
+    try {
+      // 保存识图
+      var resp1 = await apiFetch(withAuth(API + '/api/vision-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(vCfg),
+      });
+      var data1 = await resp1.json();
+
+      // 保存分析
+      var resp2 = await apiFetch(withAuth(API + '/api/text-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(tCfg),
+      });
+      var data2 = await resp2.json();
+
+      // 保存 Jev 配置
+      var resp3 = await apiFetch(withAuth(API + '/api/jev-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(jCfg),
+      });
+      var data3 = await resp3.json();
+
+      // v0.16.0 - 保存 Embedding 配置
+      var embOk = await saveEmbeddingConfig();
+
+      // v0.18.3 - 全部成功才算保存成功，否则报错且不关弹窗
+      if (data1.ok && data2.ok && data3.ok && embOk) {
+        visionConfig = vCfg;
+        if (vCfg.customApiKey === '********') {
+          visionConfig.customApiKey = window.__VISION_CONFIG__?.customApiKey || '';
+        }
+        textConfig = tCfg;
+        if (tCfg.customApiKey === '********') {
+          textConfig.customApiKey = window.__TEXT_CONFIG__?.customApiKey || '';
+        }
+        jevConfig = data3.data || { ...jCfg, apiKey: jCfg.apiKey === '********' ? '********' : jCfg.apiKey };
+        updateModelGuide();
+        closeModal('settings-modal');
+        toast('设置已保存');
+      } else {
+        var failed = [];
+        if (!data1.ok) failed.push('识图');
+        if (!data2.ok) failed.push('分析');
+        if (!data3.ok) failed.push('Jev');
+        if (!embOk) failed.push('向量');
+        toast('保存失败: ' + failed.join(' / ') + '，请看控制台日志', true);
+      }
+    } catch (e) {
+      toast('保存出错: ' + e.message, true);
+    }
+  }
+
+  async function testTextConfig() {
+    var statusEl = $('text-test-result');
+    statusEl.textContent = '测试中...';
+    statusEl.style.color = 'var(--text-muted)';
+    var cfg = buildTextConfigFromForm();
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/text-test'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        statusEl.textContent = '✅ ' + (data.data.reply || '连接成功');
+        statusEl.style.color = 'var(--success)';
+      } else {
+        statusEl.textContent = '❌ ' + (data.error || '连接失败');
+        statusEl.style.color = 'var(--danger)';
+      }
+    } catch (e) {
+      statusEl.textContent = '❌ ' + e.message;
+      statusEl.style.color = 'var(--danger)';
+    }
+  }
+
+  // v0.34.49 - 读取 Jev 旁路实验摘要
+  async function viewJevShadowLog() {
+    var el = $('jev-shadow-summary');
+    el.textContent = '读取中...';
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/jev-shadow-log?limit=20'));
+      var data = await resp.json();
+      if (!data.ok) throw new Error(data.error || '读取失败');
+      var info = data.data || {};
+      var entries = info.entries || [];
+      var latest = entries.find(function (item) { return item.jev || item.error; });
+      if (!latest) {
+        el.textContent = '还没有旁路结果。打开旁路观察后，配图决策现场产生时才会记录。';
+        return;
+      }
+      if (latest.error) {
+        el.textContent = '累计 ' + info.total + ' 条，今日 ' + info.todayCalls + ' 次；最近一次失败：' + latest.error;
+        return;
+      }
+      var j = latest.jev || {};
+      var a = latest.actual || {};
+      var decisionText = { injected: '发了图', rejected: '被频率拦下', no_emotion: '判定无情绪' };
+      var sendScore = j.should_send == null ? '?' : Math.round(j.should_send * 100) + '%';
+      el.textContent = '累计 ' + info.total + ' 条，今日 ' + info.todayCalls + ' 次；最近：Jev 该发概率=' + sendScore
+        + '，现有判定=' + (decisionText[a.decision] || a.decision || '未知')
+        + '，情绪=' + (a.emotion || '未知')
+        + '，场景=' + (a.scene_type || '未知')
+        + '，情绪分析耗时=' + (a.emotion_latency_ms == null ? '?' : a.emotion_latency_ms) + 'ms'
+        + '，Jev 耗时=' + (latest.latency_ms || '?') + 'ms';
+    } catch (e) {
+      el.textContent = '读取旁路结果失败：' + e.message;
+    }
+  }
+
+  // v0.34.49 - Jev API 连通测试；只测表单临时配置，不自动保存
+  async function testJevConfig() {
+    var statusEl = $('jev-test-result');
+    var btn = $('jev-test-btn');
+    statusEl.textContent = '测试中...';
+    statusEl.style.color = 'var(--text-muted)';
+    if (btn) btn.disabled = true;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/jev-test'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildJevConfigFromForm()),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        var d = data.data || {};
+        statusEl.textContent = '✅ ' + (d.model || 'Jev') + ' · 连通成功';
+        statusEl.style.color = 'var(--success)';
+      } else {
+        statusEl.textContent = '❌ ' + (data.error || '连接失败');
+        statusEl.style.color = 'var(--danger)';
+      }
+    } catch (e) {
+      statusEl.textContent = '❌ ' + e.message;
+      statusEl.style.color = 'var(--danger)';
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // v0.15.1 - 识图模型连通测试
+  async function testVisionConfig() {
+    var statusEl = $('vision-test-result');
+    statusEl.textContent = '测试中...';
+    statusEl.style.color = 'var(--text-muted)';
+    var source = $('vision-source').value;
+    var cfg = {
+      source: source,
+      providerId: source === 'hana' ? $('vision-provider').value : '',
+      modelId: source === 'hana' ? $('vision-model').value : '',
+      customBaseUrl: source === 'custom' ? $('vision-custom-url').value : '',
+      customApiKey: $('vision-custom-key').value,
+      customModel: source === 'custom' ? $('vision-custom-model').value : '',
+    };
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/vision-test'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        statusEl.textContent = '✅ ' + (data.data.reply || '连接成功');
+        statusEl.style.color = 'var(--success)';
+      } else {
+        statusEl.textContent = '❌ ' + (data.error || '连接失败');
+        statusEl.style.color = 'var(--danger)';
+      }
+    } catch (e) {
+      statusEl.textContent = '❌ ' + e.message;
+      statusEl.style.color = 'var(--danger)';
+    }
+  }
+
+  // ═══════════════════════════════════
+  //  偏好设置
+  // ═══════════════════════════════════
+  function initPreferencesView() {
+    renderPreferences();
+    renderAgentFitLog();
+  }
+
+  // v0.19.5 - 查这条决策日志对应的反馈状态。匹配口径：
+  // 情绪包含关系（与 collectPrefsForEmotion 一致，日志与映射的情绪词可略有出入）；
+  // 关键词不作为必需条件（反馈时往往没有关键词，空对空也要能命中）。
+  // 返回 { state: 'positive'|'negative', mappingIndex } 或 null
+  function findFeedbackFor(agent, stickerId, emotion, kws) {
+    var users = (window.__PREFERENCES__ || {}).users || {};
+    var user = users[agent];
+    if (!user || !Array.isArray(user.mappings)) return null;
+    for (var i = 0; i < user.mappings.length; i++) {
+      var m = user.mappings[i];
+      var ctx = m.context || {};
+      if (!(ctx.emotion && (emotion.includes(ctx.emotion) || ctx.emotion.includes(emotion)))) continue;
+      if ((m.preferred_ids || []).includes(stickerId)) return { state: 'positive', mappingIndex: i };
+      if ((m.vetoed_ids || []).includes(stickerId)) return { state: 'negative', mappingIndex: i };
+      // v0.25.0 - 不喜欢累计次数也算 negative 态（取消时走 dislikes 移除）
+      if (((m.dislike_counts || {})[stickerId] || 0) > 0) {
+        return { state: 'negative', mappingIndex: i, viaDislike: true };
+      }
+    }
+    return null;
+  }
+
+  // v0.33.63 - 查应景账本：这张图在该助手+情绪下是否被夸过“这次很应景”
+  function findContextFitFor(agent, stickerId, emotion) {
+    var byAgent = (window.__CONTEXT_FEEDBACK__ || {}).byAgent || {};
+    var contexts = byAgent[agent] || byAgent.default;
+    if (!contexts || typeof contexts !== 'object') return null;
+    for (var ctxKey in contexts) {
+      if (!(ctxKey && (emotion.includes(ctxKey) || ctxKey.includes(emotion)))) continue;
+      var entry = contexts[ctxKey][stickerId];
+      if (entry && Number(entry.count) > 0) {
+        return { contextEmotion: ctxKey, count: Number(entry.count) || 0 };
+      }
+    }
+    return null;
+  }
+
+  // v0.34.57 - 伙伴配图自评：开关 + 只读记录（伙伴自己给发出去的图留的一笔）
+  function syncAgentSelfNoteToggle() {
+    var t = $('agent-self-note-toggle');
+    if (!t) return;
+    var cfg = window.__DISPLAY_CONFIG__ || {};
+    var on = cfg.agentSelfNote !== false;
+    t.classList.toggle('on', on);
+    t.setAttribute('aria-checked', on ? 'true' : 'false');
+  }
+  async function toggleAgentSelfNote() {
+    var t = $('agent-self-note-toggle');
+    if (!t) return;
+    var next = !t.classList.contains('on');
+    t.classList.toggle('on', next);
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/display-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentSelfNote: next }),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        window.__DISPLAY_CONFIG__ = data.data;
+        t.setAttribute('aria-checked', next ? 'true' : 'false');
+        toast(next ? '自评已开启：伙伴可以给自己配的图留一笔' : '自评已关闭：不再记录也不再影响选图，已记的保留');
+      } else {
+        t.classList.toggle('on', !next);
+        toast('保存失败：' + (data.error || '出错了'), true);
+      }
+    } catch (e) {
+      t.classList.toggle('on', !next);
+      toast('保存失败，网络开小差了', true);
+    }
+  }
+  async function refreshAgentFitNotes() {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/agent-fit-notes'));
+      var data = await resp.json();
+      if (data.ok) window.__AGENT_FIT_NOTES__ = (data.data && data.data.rows) || [];
+    } catch (e) {}
+  }
+  var AGENT_FIT_LABEL_CACHE = {};
+  function agentFitLabel(agentId) {
+    var id = agentId || 'default';
+    if (AGENT_FIT_LABEL_CACHE[id]) return AGENT_FIT_LABEL_CACHE[id];
+    var name = (window.__AGENT_NAMES__ || {})[id] || id;
+    AGENT_FIT_LABEL_CACHE[id] = name;
+    return name;
+  }
+  function renderAgentFitLog() {
+    var box = $('agent-fit-log');
+    if (!box) return;
+    var rows = Array.isArray(window.__AGENT_FIT_NOTES__) ? window.__AGENT_FIT_NOTES__ : [];
+    if (rows.length === 0) {
+      box.innerHTML = '<div class="section-hint" style="margin-top:6px">还没有伙伴给自己配的图留过一笔。</div>';
+      return;
+    }
+    var html = '<div style="display:flex;flex-direction:column;gap:6px;margin-top:6px">';
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var off = Number(r.off) || 0;
+      var on = Number(r.on) || 0;
+      var tag = off > 0
+        ? '<span style="color:var(--danger);font-weight:600">跑偏 ×' + off + '</span>'
+        : '<span style="color:var(--success);font-weight:600">到位 ×' + on + '</span>';
+      html += '<div style="display:flex;align-items:center;gap:8px">'
+        + '<img class="pref-thumb" src="' + withAuth(API + '/api/image?id=' + encodeURIComponent(r.stickerId)) + '" onerror="this.style.display=\'none\'" alt="">'
+        + '<span style="flex:1;min-width:0;overflow-wrap:anywhere">'
+        + '<b>' + escHtml(agentFitLabel(r.agentId)) + '</b> · 「' + escHtml(r.emotion) + '」 · ' + tag
+        + (r.note ? '<br><span style="color:var(--text-light)">' + escHtml(r.note) + '</span>' : '')
+        + '</span>'
+        + '<button class="pref-x" data-act="remove-agent-fit" data-agent="' + escHtml(r.agentId) + '" data-emotion="' + escHtml(r.emotion) + '" data-sticker="' + escHtml(r.stickerId) + '" title="移除这条自评记录">×</button>'
+        + '</div>';
+    }
+    html += '</div>';
+    box.innerHTML = html;
+  }
+  async function callRemoveAgentFit(body) {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/agent-fit-notes/remove'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        await refreshAgentFitNotes();
+        renderAgentFitLog();
+        toast('已移除这条自评');
+      } else {
+        toast('移除失败: ' + (data.error || ''), true);
+      }
+    } catch (err) {
+      toast('移除出错: ' + err.message, true);
+    }
+  }
+
+  async function renderPreferences() {
+    var prefs = window.__PREFERENCES__ || { version: 1, users: {} };
+    var logs = window.__DECISION_LOG__ || { version: 1, entries: [] };
+    var entries = logs.entries || [];
+
+    if (!allStickers || allStickers.length === 0) {
+      try {
+        var r = await apiFetch(withAuth(API + '/api/list'));
+        var d = await r.json();
+        if (d.ok) allStickers = d.data || [];
+      } catch (e) {}
+    }
+    var validIds = new Set(allStickers.map(function (s) { return s.id; }));
+
+    // v0.34.45 - 茶话会来源单独展示：记录由茶话会写入自己的 dataDir，表情包插件只读。
+    var chahuahuiRows = Array.isArray(window.__CHAHUAHUI_USAGE__) ? window.__CHAHUAHUI_USAGE__ : [];
+    var chahuahuiHtml = '';
+    if (chahuahuiRows.length === 0) {
+      chahuahuiHtml = '<div style="color:var(--text-muted);padding:14px 0">茶话会还没有发过表情包。</div>';
+    } else {
+      chahuahuiHtml = '<div style="display:flex;flex-direction:column;gap:6px">';
+      for (var ci = 0; ci < chahuahuiRows.length; ci++) {
+        var cr = chahuahuiRows[ci] || {};
+        var csticker = allStickers.find(function (s) { return s.id === cr.stickerId; });
+        var ctags = csticker && csticker.tags ? csticker.tags : {};
+        var cemotion = Array.isArray(ctags.emotion) ? ctags.emotion.slice(0, 2).join('、') : '';
+        var cscene = Array.isArray(ctags.scene) ? ctags.scene.slice(0, 1).join('') : '';
+        var ctime = cr.lastSentAt ? String(cr.lastSentAt).slice(0, 16).replace('T', ' ') : '';
+        var cdesc = csticker && csticker.description ? csticker.description : '表情包';
+        chahuahuiHtml += '<div style="display:flex;align-items:center;gap:8px;padding:7px 8px;background:var(--surface-alt);border:1px solid var(--border-light);border-radius:6px;min-width:0">';
+        if (validIds.has(cr.stickerId)) {
+          chahuahuiHtml += '<img class="log-thumb" src="' + withAuth(API + '/api/image?id=' + encodeURIComponent(cr.stickerId)) + '" alt="' + escHtml(cdesc) + '" title="' + escHtml(cdesc) + '">';
+        } else {
+          chahuahuiHtml += '<span class="log-thumb-wrap log-deleted" title="这张图已经从图库删除"><span class="log-thumb-deleted">✕</span></span>';
+        }
+        chahuahuiHtml += '<span style="flex:1;min-width:0;overflow:hidden">';
+        chahuahuiHtml += '<span style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(cdesc) + '</span>';
+        chahuahuiHtml += '<span style="display:block;color:var(--text-muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">';
+        chahuahuiHtml += escHtml([cemotion, cscene].filter(Boolean).join(' · ') || cr.stickerId);
+        chahuahuiHtml += ' · 发过 ' + Number(cr.count || 1) + ' 次 · ' + escHtml(ctime) + '</span></span>';
+        if (validIds.has(cr.stickerId)) {
+          chahuahuiHtml += '<button class="pref-feedback-btn pref-edit-btn" data-act="open-editor" data-sticker="' + escHtml(cr.stickerId) + '" title="直接编辑这张图的标签">编辑标签</button>';
+          chahuahuiHtml += '<button class="pref-feedback-btn pref-chat-btn" data-act="open-chat" data-sticker="' + escHtml(cr.stickerId) + '" title="和小花聊聊这张图哪里不对">和小花聊聊</button>';
+        }
+        chahuahuiHtml += '</div>';
+      }
+      chahuahuiHtml += '</div>';
+    }
+    var chahuahuiLog = $('chahuahui-sticker-log');
+    if (chahuahuiLog) chahuahuiLog.innerHTML = chahuahuiHtml;
+
+    var totalDecisions = entries.length;
+    var feedbacks = entries.filter(function (e) { return e.type === 'user_feedback'; });
+    var statsHtml = ''
+      + '<div class="stat-box"><div class="stat-label">总决策</div>'
+      + '<div class="stat-val">' + totalDecisions + '</div></div>'
+      + '<div class="stat-box"><div class="stat-label">用户反馈</div>'
+      + '<div class="stat-val">' + feedbacks.length + '</div></div>';
+
+    var mappingMeta = [];
+    for (var uid in (prefs.users || {})) {
+      var ms = (prefs.users[uid] && prefs.users[uid].mappings) || [];
+      for (var li = 0; li < ms.length; li++) {
+        mappingMeta.push({ mapping: ms[li], agent: uid, localIndex: li });
+      }
+    }
+    var allMappings = mappingMeta.map(function (x) { return x.mapping; });
+    statsHtml += '<div class="stat-box"><div class="stat-label">偏好规则</div>'
+      + '<div class="stat-val">' + allMappings.length + '</div></div>';
+    statsHtml += '<button class="pref-btn pref-btn-mini" id="pref-cleanup-btn" title="清理已删除表情包的偏好引用" style="align-self:flex-start;margin-left:auto">清理失效</button>';
+    $('pref-stats').innerHTML = statsHtml;
+    var cleanupBtn = $('pref-cleanup-btn');
+    if (cleanupBtn) {
+      cleanupBtn.onclick = function () {
+        customConfirm('扫描所有偏好映射，移除已删除表情包的引用。空映射也会一起删除。', function () { cleanupPreferences(); });
+      };
+    }
+
+    // v0.34.18 - 旧首页偏好卡片副标题已随新布局移除，此处不再更新
+
+    // 先绑定整个偏好视图，避免没有决策日志时提前 return 导致茶话会记录按钮失效。
+    bindPreferenceActions();
+
+    var recent = entries.slice(-20).reverse();
+    if (recent.length === 0) {
+      $('pref-log').innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center">还没有配图记录，聊聊天试试</div>';
+      return;
+    }
+
+    var html = '<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">最近 ' + recent.length + ' 次配图决策</div>';
+    html += '<div style="display:flex;flex-direction:column;gap:6px">';
+    for (var i = 0; i < recent.length; i++) {
+      var e = recent[i];
+      var ts = e.ts ? e.ts.slice(0, 16).replace('T', ' ') : '';
+      var emotion = e.emotion || '';
+      var kws = (e.keywords || []).join(', ');
+      var stickerLabel = e.sticker_id || '';
+      var decLabel = '';
+      var decColor = '';
+      // v0.22.0 - 去掉 ✅⏭📌 符号，只保留用户反馈方向文字
+      if (e.type === 'user_feedback') {
+        decLabel = e.feedback_type === 'positive' ? '喜欢' : '不喜欢';
+        decColor = e.feedback_type === 'positive' ? 'var(--success)' : 'var(--danger)';
+      }
+
+      html += '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;background:var(--surface-alt);border:1px solid var(--border-light);border-radius:4px;font-size:11px;min-width:0">';
+      html += '<span style="color:var(--text-light);font-size:10px;white-space:nowrap" title="' + escHtml(ts) + '">' + escHtml(ts.slice(5)) + '</span>';
+      if (stickerLabel) {
+        if (validIds.has(stickerLabel)) {
+          html += '<span class="log-thumb-wrap" title="' + escHtml(stickerLabel) + '">'
+            + '<img class="log-thumb" src="' + withAuth(API + '/api/image?id=' + encodeURIComponent(stickerLabel)) + '" alt="' + escHtml(stickerLabel) + '">'
+            + '</span>'
+            + '<span class="log-thumb-id">' + escHtml(stickerLabel) + '</span>';
+        } else {
+          html += '<span class="log-thumb-wrap log-deleted" title="' + escHtml(stickerLabel) + '（已删除）">'
+            + '<span class="log-thumb-deleted">✕</span>'
+            + '</span>'
+            + '<span class="log-thumb-id log-thumb-id-missing">' + escHtml(stickerLabel) + ' · 已删除</span>';
+        }
+      }
+      if (emotion) html += '<span class="tag" style="font-size:10px;flex-shrink:0">' + escHtml(emotion) + '</span>';
+      if (kws) html += '<span style="color:var(--text-muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(kws) + '</span>';
+      else html += '<span style="flex:1;min-width:0"></span>';
+      if (decLabel) html += '<span style="color:' + decColor + ';font-size:11px;font-weight:600;flex-shrink:0">' + decLabel + '</span>';
+      if (stickerLabel && e.type !== 'user_feedback') {
+        // v0.19.5 - 根据持久化偏好判断这条的反馈状态，按钮显示选中态；点选中的按钮可取消
+        var fbState = findFeedbackFor(e.agent || '', stickerLabel, emotion, kws);
+        var posActive = fbState && fbState.state === 'positive' ? ' active' : '';
+        var negActive = fbState && fbState.state === 'negative' ? ' active' : '';
+        // v0.33.63 - 应景按钮：单独看应景账本，不被喜欢/不喜欢影响
+        var fitState = findContextFitFor(e.agent || '', stickerLabel, emotion);
+        var fitActive = fitState ? ' active' : '';
+        var posTitle = fbState && fbState.state === 'positive' ? '已标记喜欢，点这里取消' : '喜欢这张，以后多发';
+        var negTitle = fbState && fbState.state === 'negative' ? '已标记不喜欢，点这里取消' : '不喜欢这张，以后少发';
+        var fitTitle = fitState ? '已记过这次很应景，点这里取消' : '这张这次配得很应景';
+        html += '<div class="pref-feedback-group">';
+        // v0.22.0 - 删除入口（图还在时显示），放在反馈按钮最左边
+        html += '<button class="pref-feedback-btn pref-del-btn" data-act="delete-sticker" data-sticker="' + escHtml(stickerLabel) + '" title="删除这张表情包（从库中彻底删除）">删除</button>';
+        // v0.19.5 - 带上决策日志里的 agent，反馈才记到正确的助手名下（否则写入 default 桶永远读不到）
+        html += '<button class="pref-feedback-btn' + posActive + '" data-act="quick-feedback" data-fb="positive" data-sticker="' + escHtml(stickerLabel) + '" data-emotion="' + escHtml(emotion) + '" data-keywords="' + escHtml(kws) + '" data-agent="' + escHtml(e.agent || '') + '" title="' + posTitle + '">喜欢</button>';
+        html += '<button class="pref-feedback-btn' + fitActive + '" data-act="quick-feedback" data-fb="context" data-sticker="' + escHtml(stickerLabel) + '" data-emotion="' + escHtml(emotion) + '" data-keywords="' + escHtml(kws) + '" data-agent="' + escHtml(e.agent || '') + '" title="' + fitTitle + '">应景</button>';
+        html += '<button class="pref-feedback-btn' + negActive + '" data-act="quick-feedback" data-fb="negative" data-sticker="' + escHtml(stickerLabel) + '" data-emotion="' + escHtml(emotion) + '" data-keywords="' + escHtml(kws) + '" data-agent="' + escHtml(e.agent || '') + '" title="' + negTitle + '">不喜欢</button>';
+        html += '<button class="pref-feedback-btn pref-chat-btn" data-act="open-chat" data-sticker="' + escHtml(stickerLabel) + '" title="和小花聊聊这张图哪里不对">和小花聊聊</button>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+
+    if (allMappings.length === 0) {
+      html += '<div style="margin-top:14px;padding:12px 14px;background:var(--primary-light);border:1px dashed var(--primary);border-radius:6px;font-size:12px;color:var(--primary-dark);line-height:1.8">';
+      html += '<strong>还没有偏好规则</strong><br>';
+      html += '产生偏好的两种方式：<br>';
+      html += '① 在聊天里对某张图说"这张我喜欢"或"这图不合适"<br>';
+      html += '② 点上面决策日志里的「喜欢 / 不喜欢」按钮直接反馈<br>';
+      html += '产生偏好后，这里会出现可手动调整的卡片。';
+      html += '</div>';
+    }
+
+    if (allMappings.length > 0) {
+      html += '<div id="pref-toggle" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);margin:14px 0 8px;cursor:pointer;user-select:none">'
+        + '<span id="pref-toggle-arrow" style="display:inline-block;font-size:11px">▸</span>'
+        + '<span>已记住的偏好（' + allMappings.length + ' 条）</span>'
+        + '<span style="font-size:10px;color:var(--text-light)">点开展开</span>'
+        + '</div>';
+      html += '<div id="pref-mapping-list" style="display:none;flex-direction:column;gap:6px">';
+      for (var mi = 0; mi < mappingMeta.length; mi++) {
+        var meta = mappingMeta[mi];
+        var m = meta.mapping;
+        var ctx = m.context || {};
+        var em = ctx.emotion || '';
+        var kw = (ctx.keywords || []).join(', ');
+        var pref = m.preferred_ids || [];
+        var veto = m.vetoed_ids || [];
+        html += '<div class="pref-mapping" data-agent="' + escHtml(meta.agent) + '" data-li="' + meta.localIndex + '">';
+        html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap">';
+        if (em) html += '<span class="tag">' + escHtml(em) + '</span>';
+        if (kw) html += '<span style="color:var(--text-muted);flex:1;min-width:100px;overflow:hidden;text-overflow:ellipsis">' + escHtml(kw) + '</span>';
+        else html += '<span style="flex:1"></span>';
+        html += '</div>';
+        if (pref.length > 0) {
+          html += '<div style="display:flex;align-items:center;gap:4px;margin-top:3px;flex-wrap:wrap">';
+          html += '<span style="color:var(--success);font-size:11px;font-weight:600;flex-shrink:0">喜欢 ' + pref.length + ' 张</span>';
+          for (var pi = 0; pi < pref.length; pi++) {
+            html += '<span class="pref-chip">'
+              + '<img class="pref-thumb" src="' + withAuth(API + '/api/image?id=' + encodeURIComponent(pref[pi])) + '" onerror="this.style.display=\'none\'" alt="">'
+              + '<button class="pref-x" data-act="remove" data-list="preferred" data-sticker="' + escHtml(pref[pi]) + '" title="从偏好中移除">×</button>'
+              + '<button class="pref-del" data-act="delete-sticker" data-sticker="' + escHtml(pref[pi]) + '" title="删除这张表情包（从库中彻底删除）">删</button>'
+              + '</span>';
+          }
+          html += '</div>';
+        }
+        if (veto.length > 0) {
+          html += '<div style="display:flex;align-items:center;gap:4px;margin-top:3px;flex-wrap:wrap">';
+          html += '<span style="color:var(--danger);font-size:11px;font-weight:600;flex-shrink:0">不喜欢 ' + veto.length + ' 张</span>';
+          for (var vi = 0; vi < veto.length; vi++) {
+            html += '<span class="pref-chip pref-chip-veto">'
+              + '<img class="pref-thumb" src="' + withAuth(API + '/api/image?id=' + encodeURIComponent(veto[vi])) + '" onerror="this.style.display=\'none\'" alt="">'
+              + '<button class="pref-x" data-act="remove" data-list="vetoed" data-sticker="' + escHtml(veto[vi]) + '" title="从排除中移除">×</button>'
+              + '<button class="pref-del" data-act="delete-sticker" data-sticker="' + escHtml(veto[vi]) + '" title="删除这张表情包（从库中彻底删除）">删</button>'
+              + '</span>';
+          }
+          html += '</div>';
+        }
+        // v0.25.0 - 累计不喜欢次数的图（不在硬拉黑列表里）单独显示，带 ×N 次数标记
+        var dislikeEntries = Object.entries(m.dislike_counts || {})
+          .filter(function (kv) { return kv[1] > 0 && !veto.includes(kv[0]) && !pref.includes(kv[0]); });
+        if (dislikeEntries.length > 0) {
+          html += '<div style="display:flex;align-items:center;gap:4px;margin-top:3px;flex-wrap:wrap">';
+          html += '<span style="color:var(--danger);font-size:11px;font-weight:600;flex-shrink:0">不喜欢累计 ' + dislikeEntries.length + ' 张</span>';
+          for (var di = 0; di < dislikeEntries.length; di++) {
+            var did = dislikeEntries[di][0];
+            var dcount = dislikeEntries[di][1];
+            html += '<span class="pref-chip pref-chip-veto">'
+              + '<img class="pref-thumb" src="' + withAuth(API + '/api/image?id=' + encodeURIComponent(did)) + '" onerror="this.style.display=\'none\'" alt="">'
+              + '<span style="font-size:10px;color:var(--danger);font-weight:600" title="已累计不喜欢 ' + dcount + ' 次">×' + dcount + '</span>'
+              + '<button class="pref-x" data-act="remove" data-list="dislikes" data-sticker="' + escHtml(did) + '" title="清除不喜欢次数">×</button>'
+              + '<button class="pref-del" data-act="delete-sticker" data-sticker="' + escHtml(did) + '" title="删除这张表情包（从库中彻底删除）">删</button>'
+              + '</span>';
+          }
+          html += '</div>';
+        }
+        // v0.33.63 - “这次很应景”独立账本：跟喜欢/不喜欢不冲突，单独一行显示
+        var fitEntries = [];
+        if (em) {
+          var cfByAgent = (window.__CONTEXT_FEEDBACK__ || {}).byAgent || {};
+          var fitAgentBuckets = cfByAgent[meta.agent] || cfByAgent.default;
+          if (fitAgentBuckets && typeof fitAgentBuckets === 'object') {
+            for (var fitCtx in fitAgentBuckets) {
+              if (!(fitCtx && (em.includes(fitCtx) || fitCtx.includes(em)))) continue;
+              var fitBucket = fitAgentBuckets[fitCtx] || {};
+              for (var fitId in fitBucket) {
+                var fitEntry = fitBucket[fitId];
+                if (fitEntry && Number(fitEntry.count) > 0) {
+                  fitEntries.push({ id: fitId, count: Number(fitEntry.count) || 0, context: fitCtx });
+                }
+              }
+            }
+          }
+        }
+        if (fitEntries.length > 0) {
+          html += '<div style="display:flex;align-items:center;gap:4px;margin-top:3px;flex-wrap:wrap">';
+          html += '<span style="color:var(--success);font-size:11px;font-weight:600;flex-shrink:0">很应景 ' + fitEntries.length + ' 张</span>';
+          for (var fi = 0; fi < fitEntries.length; fi++) {
+            var fe = fitEntries[fi];
+            html += '<span class="pref-chip">'
+              + '<img class="pref-thumb" src="' + withAuth(API + '/api/image?id=' + encodeURIComponent(fe.id)) + '" onerror="this.style.display=\'none\'" alt="">'
+              + '<span style="font-size:10px;color:var(--success);font-weight:600" title="在「' + escHtml(fe.context) + '」场景被夸过 ' + fe.count + ' 次很应景">×' + fe.count + '</span>'
+              + '<button class="pref-x" data-act="remove-context-fit" data-sticker="' + escHtml(fe.id) + '" data-emotion="' + escHtml(fe.context) + '" title="移除这次应景记录">×</button>'
+              + '<button class="pref-del" data-act="delete-sticker" data-sticker="' + escHtml(fe.id) + '" title="删除这张表情包（从库中彻底删除）">删</button>'
+              + '</span>';
+          }
+          html += '</div>';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+
+    $('pref-log').innerHTML = html;
+    bindPreferenceActions();
+    
+  }
+
+  async function callPrefUpdate(body, onFail) {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/preferences/update'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        await refreshPreferences();
+        toast('已更新');
+      } else {
+        if (onFail) onFail();
+        toast('更新失败: ' + (data.error || ''), true);
+      }
+    } catch (err) {
+      if (onFail) onFail();
+      toast('更新出错: ' + err.message, true);
+    }
+  }
+
+  async function refreshPreferences() {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/preferences'));
+      var data = await resp.json();
+      if (data.ok) {
+        window.__PREFERENCES__ = data.data;
+        renderPreferences();
+      }
+    } catch (e) {
+      console.error('刷新偏好失败', e);
+    }
+  }
+
+  function bindPreferenceActions() {
+    var container = $('view-preferences');
+    if (!container || container.__prefBound) return;
+    container.__prefBound = true;
+    container.addEventListener('click', function (e) {
+      var toggleHit = e.target.closest('#pref-toggle');
+      if (toggleHit) {
+        var prefList = $('pref-mapping-list');
+        var arrow = $('pref-toggle-arrow');
+        if (prefList) {
+          var showing = prefList.style.display === 'flex';
+          prefList.style.display = showing ? 'none' : 'flex';
+          if (arrow) arrow.textContent = showing ? '▸' : '▾';
+        }
+        return;
+      }
+      var btn = e.target.closest('button[data-act]');
+      if (!btn) return;
+      var act = btn.getAttribute('data-act');
+      var card = btn.closest('.pref-mapping');
+
+      if (act === 'quick-feedback') {
+        var fb = btn.getAttribute('data-fb');
+        var stickerId = btn.getAttribute('data-sticker');
+        var emotion = btn.getAttribute('data-emotion') || '';
+        var kws = btn.getAttribute('data-keywords') || '';
+        // v0.19.5 - 透传决策日志的 agent，反馈落到正确助手名下（否则写入 default 桶永远读不到）
+        var agent = btn.getAttribute('data-agent') || '';
+        // v0.33.63 - 应景单独一路：不跟喜欢/不喜欢互斥，已记过再点=取消
+        if (fb === 'context') {
+          var fitState = findContextFitFor(agent, stickerId, emotion);
+          var fitBtnCurrent = btn;
+          var fitHadActive = fitBtnCurrent.classList.contains('active');
+          fitBtnCurrent.classList.add('active');
+          fitBtnCurrent.disabled = true;
+          function rollbackFitBtn() {
+            fitBtnCurrent.classList.toggle('active', fitHadActive);
+            fitBtnCurrent.disabled = false;
+          }
+          callQuickFeedback({ sticker_id: stickerId, feedback_type: fitState ? 'context_clear' : 'context', context_emotion: emotion, context_keywords: kws, agent: agent || undefined }, rollbackFitBtn);
+          return;
+        }
+        // v0.19.5 - 已选中的按钮再点 = 取消这条反馈
+        var fbState = findFeedbackFor(agent, stickerId, emotion, kws);
+        // v0.25.2 - 乐观更新：点击瞬间切样式 + 防重复点，请求失败回滚（发布前审查修复）
+        var otherFbBtn = card ? card.querySelector('button[data-act="quick-feedback"][data-fb="' + (fb === 'positive' ? 'negative' : 'positive') + '"]') : null;
+        var fbPosBtn = card ? card.querySelector('button[data-act="quick-feedback"][data-fb="positive"]') : null;
+        var fbNegBtn = card ? card.querySelector('button[data-act="quick-feedback"][data-fb="negative"]') : null;
+        var prevPosActive = fbPosBtn ? fbPosBtn.classList.contains('active') : false;
+        var prevNegActive = fbNegBtn ? fbNegBtn.classList.contains('active') : false;
+        btn.classList.add('active');
+        if (otherFbBtn) otherFbBtn.classList.remove('active');
+        btn.disabled = true;
+        function rollbackFbBtn() {
+          if (fbPosBtn) fbPosBtn.classList.toggle('active', prevPosActive);
+          if (fbNegBtn) fbNegBtn.classList.toggle('active', prevNegActive);
+          btn.disabled = false;
+        }
+        if (fbState && fbState.state === fb) {
+          // v0.25.0 - 取消时：negative 态若来自累计次数（不在硬拉黑里），走 dislikes 移除
+          var removeList = fb === 'positive' ? 'preferred' : (fbState.viaDislike ? 'dislikes' : 'vetoed');
+          callPrefUpdate({
+            action: 'remove_from_list',
+            agent: agent,
+            mapping_index: fbState.mappingIndex,
+            list: removeList,
+            sticker_id: stickerId,
+          }, rollbackFbBtn);
+          return;
+        }
+        callQuickFeedback({ sticker_id: stickerId, feedback_type: fb, context_emotion: emotion, context_keywords: kws, agent: agent || undefined }, rollbackFbBtn);
+        return;
+      }
+
+      if (act === 'open-editor') {
+        var editStickerId = btn.getAttribute('data-sticker');
+        var editSticker = allStickers.find(function (s) { return s.id === editStickerId; });
+        if (editSticker) openEditor(editSticker);
+        return;
+      }
+
+      if (act === 'open-chat') {
+        var chatStickerId = btn.getAttribute('data-sticker');
+        if (chatStickerId) openChatModal(chatStickerId);
+        return;
+      }
+
+      if (act === 'delete-sticker') {
+        var delStickerId = btn.getAttribute('data-sticker');
+        customConfirm('确定要删除表情包「' + delStickerId + '」吗？\n会从图库中彻底删除这张图片，并自动清理相关的偏好记录。', function () {
+          deleteSticker(delStickerId);
+        });
+        return;
+      }
+
+      if (!card) return;
+      var agent = card.getAttribute('data-agent');
+      var li = parseInt(card.getAttribute('data-li'), 10);
+      if (!agent || isNaN(li)) return;
+
+      if (act === 'remove') {
+        var list = btn.getAttribute('data-list');
+        var stickerId3 = btn.getAttribute('data-sticker');
+        callPrefUpdate({ action: 'remove_from_list', agent: agent, mapping_index: li, list: list, sticker_id: stickerId3 });
+      }
+
+      if (act === 'remove-context-fit') {
+        var fitStickerId = btn.getAttribute('data-sticker');
+        var fitEmotion = btn.getAttribute('data-emotion') || '';
+        callRemoveContextFit({ agentId: agent, contextEmotion: fitEmotion, stickerId: fitStickerId });
+      }
+    });
+  }
+
+  async function callQuickFeedback(body, onFail) {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/preferences/correct'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        await refreshContextFeedback();
+        await refreshPreferences();
+        toast('已反馈');
+      } else {
+        if (onFail) onFail();
+        toast('反馈失败: ' + (data.error || ''), true);
+      }
+    } catch (err) {
+      if (onFail) onFail();
+      toast('反馈出错: ' + err.message, true);
+    }
+  }
+
+  // v0.33.63 - 应景账本单独刷新（服务端注入的 __CONTEXT_FEEDBACK__ 只在打开页面时新鲜）
+  async function refreshContextFeedback() {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/context-feedback'));
+      var data = await resp.json();
+      if (data.ok) window.__CONTEXT_FEEDBACK__ = data.data;
+    } catch (e) {}
+  }
+
+  // v0.33.63 - 移除单条应景记录
+  async function callRemoveContextFit(body) {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/context-feedback/remove'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        await refreshContextFeedback();
+        await refreshPreferences();
+        toast('已移除这次应景');
+      } else {
+        toast('移除失败: ' + (data.error || ''), true);
+      }
+    } catch (err) {
+      toast('移除出错: ' + err.message, true);
+    }
+  }
+
+  // v0.22.0 - 从偏好设置直接删除表情包（二次确认后调删除接口，自动清理偏好引用/向量）
+  async function deleteSticker(id) {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', id: id }),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        toast(data.message || '已删除');
+        await refreshPreferences();
+        await refreshStickersAndGroups();
+      } else {
+        toast('删除失败: ' + (data.error || ''), true);
+      }
+    } catch (err) {
+      toast('删除出错: ' + err.message, true);
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  //  v0.18.0 聊天调整标签
+  // ════════════════════════════════════════════════════════════════
+  var chatSessionId = null;
+  var chatStickerId = null;
+  var chatCurrentSuggestion = null;
+
+  async function openChatModal(stickerId) {
+    var sticker = allStickers.find(function (s) { return s.id === stickerId; });
+    if (!sticker) {
+      toast('表情包不存在或已删除', true);
+      return;
+    }
+    chatStickerId = stickerId;
+    chatSessionId = null;
+    chatCurrentSuggestion = null;
+
+    $('chat-sticker-id').textContent = stickerId;
+    $('chat-sticker-img').src = withAuth(API + '/api/image?id=' + encodeURIComponent(stickerId));
+    $('chat-sticker-img').onerror = function () { this.style.opacity = '.3'; };
+
+    var tags = sticker.tags || {};
+    $('chat-tag-desc').textContent = sticker.description || '（无描述）';
+    renderTagList('chat-tag-emotion', tags.emotion || []);
+    renderTagList('chat-tag-scene', tags.scene || []);
+    renderTagList('chat-tag-keywords', tags.keywords || []);
+
+    $('chat-messages').innerHTML = '<div class="chat-empty">告诉我哪里不对、该怎么调。<br>比如：这张图表达的是撒娇不是开心</div>';
+    $('chat-preview').hidden = true;
+    $('chat-input').value = '';
+    $('chat-send-btn').disabled = false;
+
+    $('chat-modal').hidden = false;
+    $('chat-modal').style.display = 'flex';
+    setTimeout(function () { $('chat-input').focus(); }, 100);
+  }
+
+  function renderTagList(elId, items) {
+    var el = $(elId);
+    el.innerHTML = '';
+    if (!items || items.length === 0) {
+      el.innerHTML = '<span style="color:var(--text-light);font-size:11px">（无）</span>';
+      return;
+    }
+    for (var i = 0; i < items.length; i++) {
+      var span = document.createElement('span');
+      span.className = 'tag';
+      span.textContent = items[i];
+      el.appendChild(span);
+    }
+  }
+
+  function appendChatBubble(role, text) {
+    var container = $('chat-messages');
+    var empty = container.querySelector('.chat-empty');
+    if (empty) empty.remove();
+    var bubble = document.createElement('div');
+    bubble.className = 'chat-bubble chat-' + role;
+    bubble.textContent = text;
+    container.appendChild(bubble);
+    container.scrollTop = container.scrollHeight;
+    return bubble;
+  }
+
+  function updateChatBubble(bubble, text) {
+    if (bubble) bubble.textContent = text;
+  }
+
+  async function sendChatMessage() {
+    var input = $('chat-input');
+    var msg = input.value.trim();
+    if (!msg) return;
+    appendChatBubble('user', msg);
+    input.value = '';
+    input.style.height = 'auto';
+
+    var sendBtn = $('chat-send-btn');
+    sendBtn.disabled = true;
+    sendBtn.textContent = '思考中...';
+
+    var thinkingBubble = appendChatBubble('thinking', '小花正在思考...');
+
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/sticker/chat'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sticker_id: chatStickerId,
+          message: msg,
+          session_id: chatSessionId,
+        }),
+      });
+      var data = await resp.json();
+      thinkingBubble.remove();
+      // 失败回合也可能带回聊天号，保留它才能让“继续”沿用当前上下文。
+      if (data.session_id) chatSessionId = data.session_id;
+      if (data.ok) {
+        appendChatBubble('assistant', data.reply || '（无回复）');
+        if (data.suggestion) {
+          chatCurrentSuggestion = data.suggestion;
+          renderChatPreview(data.suggestion);
+        }
+      } else {
+        appendChatBubble('error', '出错：' + (data.error || '未知错误'));
+      }
+    } catch (e) {
+      thinkingBubble.remove();
+      appendChatBubble('error', '网络错误：' + e.message);
+    } finally {
+      sendBtn.disabled = false;
+      sendBtn.textContent = '发送';
+      input.focus();
+    }
+  }
+
+  function renderChatPreview(suggestion) {
+    var sticker = allStickers.find(function (s) { return s.id === chatStickerId; });
+    if (!sticker) return;
+    var oldTags = sticker.tags || {};
+
+    var diffHtml = '<div class="chat-preview-col">';
+    diffHtml += '<h5>修改前</h5>';
+    diffHtml += '<div class="diff-row"><b>描述：</b>' + escHtml(sticker.description || '（空）') + '</div>';
+    diffHtml += '<div class="diff-row"><b>情绪：</b>' + (oldTags.emotion || []).map(escHtml).join('、') + '</div>';
+    diffHtml += '<div class="diff-row"><b>场景：</b>' + (oldTags.scene || []).map(escHtml).join('、') + '</div>';
+    diffHtml += '<div class="diff-row"><b>关键词：</b>' + (oldTags.keywords || []).map(escHtml).join('、') + '</div>';
+    diffHtml += '</div>';
+
+    diffHtml += '<div class="chat-preview-col modified">';
+    diffHtml += '<h5 class="modified">修改后</h5>';
+    diffHtml += '<div class="diff-row"><b>描述：</b>' + escHtml(suggestion.description || sticker.description || '（空）') + '</div>';
+    diffHtml += '<div class="diff-row"><b>情绪：</b>' + (suggestion.emotion || []).map(escHtml).join('、') + '</div>';
+    diffHtml += '<div class="diff-row"><b>场景：</b>' + (suggestion.scene || []).map(escHtml).join('、') + '</div>';
+    diffHtml += '<div class="diff-row"><b>关键词：</b>' + (suggestion.keywords || []).map(escHtml).join('、') + '</div>';
+    diffHtml += '</div>';
+
+    $('chat-preview-diff').innerHTML = diffHtml;
+    $('chat-preview').hidden = false;
+    $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
+  }
+
+  function discardChatPreview() {
+    chatCurrentSuggestion = null;
+    $('chat-preview').hidden = true;
+    appendChatBubble('assistant', '好的，那我不动这张图。你要是想继续聊就再说。');
+  }
+
+  async function confirmChatChange() {
+    if (!chatSessionId || !chatCurrentSuggestion) return;
+    var btn = $('chat-preview-confirm');
+    var requestSessionId = chatSessionId;
+    var requestStickerId = chatStickerId;
+    var requestSuggestion = chatCurrentSuggestion;
+    var finished = false;
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+    function resetConfirmButton() {
+      if (!btn) return;
+      btn.disabled = false;
+      btn.textContent = '✅ 确认修改';
+    }
+    async function finishConfirm(recovered) {
+      finished = true;
+      toast(recovered ? '已修改（刚才回包晚了一点）' : '已修改');
+      closeChatModal();
+      // 刷新展柜失败不能倒灌成“确认失败”，标签已经在后端落盘。
+      try {
+        await loadStickers();
+        await refreshPreferences();
+      } catch (e) {}
+    }
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/sticker/chat/confirm'), {
+        noAbort: true,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: requestSessionId,
+          sticker_id: requestStickerId,
+          new_tags: requestSuggestion,
+        }),
+      });
+      var data;
+      try { data = await timedPromise(resp.json(), 5000); } catch (e) { data = null; }
+      if (data && data.ok) {
+        await finishConfirm(false);
+      } else if (await recoverChatChange(requestStickerId, requestSuggestion)) {
+        await finishConfirm(true);
+      } else {
+        toast('保存失败: ' + ((data && data.error) || ('HTTP ' + resp.status)), true);
+      }
+    } catch (e) {
+      if (await recoverChatChange(requestStickerId, requestSuggestion)) {
+        await finishConfirm(true);
+      } else {
+        toast('网络错误: ' + e.message, true);
+      }
+    } finally {
+      if (!finished) resetConfirmButton();
+    }
+  }
+
+  function closeChatModal() {
+    // 通知后端清空 session（如果还有效）
+    if (chatSessionId) {
+      apiFetch(withAuth(API + '/api/sticker/chat/close'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: chatSessionId }),
+      }).catch(function () {});
+    }
+    chatSessionId = null;
+    chatStickerId = null;
+    chatCurrentSuggestion = null;
+    $('chat-modal').hidden = true;
+    $('chat-modal').style.display = '';
+  }
+
+  function bindChatModalActions() {
+    var sendBtn = $('chat-send-btn');
+    if (sendBtn && !sendBtn.__bound) {
+      sendBtn.__bound = true;
+      sendBtn.addEventListener('click', sendChatMessage);
+    }
+    var input = $('chat-input');
+    if (input && !input.__bound) {
+      input.__bound = true;
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendChatMessage();
+        }
+      });
+      input.addEventListener('input', function () {
+        // v0.34.2 - 打破「打字→重设高度→弹窗重排→scrollHeight 失真→再设更矮」的负反馈循环：
+        //   单行以内保持默认高度不动，超出才按内容撑高（上限 96px），且只在真实长高时更新。
+        var lineH = 20;
+        var want = Math.min(Math.max(this.scrollHeight, lineH + 2), 96);
+        if (Math.abs(want - this.offsetHeight) > 4) {
+          this.style.height = 'auto';
+          this.style.height = want + 'px';
+        }
+      });
+    }
+    var confirmBtn = $('chat-preview-confirm');
+    if (confirmBtn && !confirmBtn.__bound) {
+      confirmBtn.__bound = true;
+      confirmBtn.addEventListener('click', confirmChatChange);
+    }
+    var discardBtn = $('chat-preview-discard');
+    if (discardBtn && !discardBtn.__bound) {
+      discardBtn.__bound = true;
+      discardBtn.addEventListener('click', discardChatPreview);
+    }
+  }
+
+  async function cleanupPreferences() {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/preferences/cleanup'), { method: 'POST' });
+      var data = await resp.json();
+      if (data.ok) {
+        await refreshPreferences();
+        toast(data.message || ('已清理 ' + data.cleanedReferences + ' 条引用'));
+      } else {
+        toast('清理失败: ' + (data.error || ''), true);
+      }
+    } catch (err) {
+      toast('清理出错: ' + err.message, true);
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  //  v0.18.x 助手配图频率（场景维度化：日常 / 正事）
+  // ════════════════════════════════════════════════════════════════
+  var freqAgentsData = [];
+  var freqConfigData = { version: 2, global_enabled: true, default_daily: 50, default_task: 20, agents: {} };
+  var globalAutoImageEnabled = true;
+  var duplicateAgentNames = {};
+  var editingLibraryAgentId = '';
+  // v0.34.33 - 已经从列表里移除（隐藏）的伙伴，来自 /api/agents 的 hidden 字段。
+  var hiddenAgentsData = [];
+
+  var FREQ_LEVELS = [
+    { value: 0, label: '不配图', desc: '这个场景不主动提示配图' },
+    { value: 15, label: '少配图', desc: '偶尔提示' },
+    { value: 50, label: '正常', desc: '大约一半合适场景会提示' },
+    { value: 90, label: '经常配图', desc: '大多数合适场景会提示' },
+  ];
+
+  function getAgentFreqSettings(agentId) {
+    if (!freqConfigData.agents[agentId]) {
+      freqConfigData.agents[agentId] = {
+        enabled: true,
+        daily: freqConfigData.default_daily,
+        task: freqConfigData.default_task,
+      };
+    }
+    return freqConfigData.agents[agentId];
+  }
+
+  function setAgentSceneFreq(agentId, scene, value) {
+    var agent = getAgentFreqSettings(agentId);
+    if (scene === 'task') agent.task = value;
+    else agent.daily = value;
+  }
+
+  function freqToLevel(freq) {
+    var best = FREQ_LEVELS[0];
+    var minDiff = Infinity;
+    for (var i = 0; i < FREQ_LEVELS.length; i++) {
+      var diff = Math.abs(freq - FREQ_LEVELS[i].value);
+      if (diff < minDiff) { minDiff = diff; best = FREQ_LEVELS[i]; }
+    }
+    return best.value;
+  }
+
+  function applyAgentFreqLock() {
+    var disabled = !globalAutoImageEnabled;
+    var view = $('view-agent-freq');
+    if (view) view.classList.toggle('global-off', disabled);
+    var list = $('agent-freq-list');
+    if (list) {
+      list.querySelectorAll('button[data-act]').forEach(function (button) {
+        // 把伙伴从插件配置里移除跟配图无关，始终可用。
+        if (button.getAttribute('data-act') === 'remove-agent') return;
+        button.disabled = disabled;
+      });
+    }
+    var note = $('agent-freq-global-note');
+    if (note) {
+      note.classList.toggle('is-off', disabled);
+      note.textContent = disabled
+        ? '自动配图总闸已关闭。伙伴原有的频率和图库设置仍保留，这里只展示、不能调整；方言、识图和纸飞机不受影响。'
+        : '自动配图已开启。每位伙伴的日常与正事两档都在这张卡里，改完立即生效。';
+    }
+  }
+
+  function applyGlobalAutoImageConfig(config) {
+    if (config && typeof config === 'object') freqConfigData = config;
+    globalAutoImageEnabled = !(freqConfigData && freqConfigData.global_enabled === false);
+    renderGlobalAutoImageState();
+    if (freqAgentsData.length > 0) renderAgentFreqList();
+    applyAgentFreqLock();
+  }
+
+  function renderGlobalAutoImageState() {
+    var toggle = $('auto-image-toggle-top');
+    var status = $('auto-image-status');
+    if (!toggle) return;
+    var enabled = globalAutoImageEnabled;
+    toggle.classList.toggle('on', enabled);
+    toggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    var switchEl = toggle.querySelector('.ball-toggle-switch');
+    if (switchEl) switchEl.classList.toggle('on', enabled);
+    toggle.title = enabled
+      ? '关闭自动情绪检测和自动配图；不影响方言、识图和纸飞机'
+      : '开启自动情绪检测和自动配图；不影响方言、识图和纸飞机';
+    if (status) status.textContent = enabled ? '已开启' : '已关闭';
+  }
+
+  async function loadGlobalAutoImageState() {
+    var status = $('auto-image-status');
+    var toggle = $('auto-image-toggle-top');
+    if (status) status.textContent = '读取中…';
+    if (toggle) toggle.disabled = true;
+    try {
+      var result = await apiFetch(withAuth(API + '/api/agent-freq/global'), { signal: AbortSignal.timeout(5000) }).then(function (r) { return r.json(); });
+      if (!result || !result.ok || !result.data) throw new Error((result && result.error) || '读取失败');
+      applyGlobalAutoImageConfig(result.data);
+    } catch (e) {
+      if (status) status.textContent = '读取失败';
+      if (toggle) toggle.title = '自动配图状态读取失败：' + (e.message || '请稍后再试');
+    } finally {
+      if (toggle) toggle.disabled = false;
+    }
+  }
+
+  async function toggleGlobalAutoImage() {
+    var toggle = $('auto-image-toggle-top');
+    var status = $('auto-image-status');
+    if (!toggle || toggle.disabled) return;
+    var enabled = !globalAutoImageEnabled;
+    toggle.disabled = true;
+    if (status) status.textContent = '处理中…';
+    try {
+      var response = await apiFetch(withAuth(API + '/api/agent-freq/global'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: enabled }),
+        signal: AbortSignal.timeout(5000),
+      });
+      var result = await response.json();
+      if (!result || !result.ok || !result.data) throw new Error((result && result.error) || '保存失败');
+      applyGlobalAutoImageConfig(result.data);
+      toast(enabled ? '自动配图已开启' : '自动配图已关闭；原有伙伴设置已保留');
+    } catch (e) {
+      renderGlobalAutoImageState();
+      toast('自动配图开关保存失败：' + (e.message || '未知错误'), true);
+    } finally {
+      toggle.disabled = false;
+    }
+  }
+
+  function renderAgentFreq() {
+    var list = $('agent-freq-list');
+    if (!list) return;
+    list.innerHTML = '加载中...';
+
+    // v0.25.2 - 刷新列表按钮：重新读取 Hana 当前助手（新助手会出现，已删除的不会回来）
+    var refreshBtn = $('refresh-agents-btn');
+    if (refreshBtn && refreshBtn.dataset.bound !== '1') {
+      refreshBtn.dataset.bound = '1';
+      refreshBtn.addEventListener('click', function () {
+        renderAgentFreq();
+        toast('已刷新助手列表');
+      });
+    }
+    bindAgentHiddenModal();
+
+    Promise.all([
+      apiFetch(withAuth(API + '/api/agents'), { signal: AbortSignal.timeout(5000) }).then(function (r) { return r.json(); }),
+      apiFetch(withAuth(API + '/api/agent-freq'), { signal: AbortSignal.timeout(5000) }).then(function (r) { return r.json(); }),
+    ]).then(function (results) {
+      var agentsResult = results[0];
+      var freqResult = results[1];
+      if (!agentsResult.ok || !Array.isArray(agentsResult.data) || !freqResult.ok) throw new Error('加载失败');
+      freqAgentsData = agentsResult.data;
+      freqConfigData = freqResult.data;
+      // v0.34.33 - 被移除（隐藏）的伙伴不进列表，单独存着给「已移除的伙伴」入口用。
+      hiddenAgentsData = Array.isArray(agentsResult.hidden) ? agentsResult.hidden : [];
+      duplicateAgentNames = {};
+      for (var i = 0; i < freqAgentsData.length; i++) {
+        var name = freqAgentsData[i].name || freqAgentsData[i].id;
+        duplicateAgentNames[name] = (duplicateAgentNames[name] || 0) + 1;
+      }
+      globalAutoImageEnabled = !(freqConfigData && freqConfigData.global_enabled === false);
+      renderAgentFreqList();
+      bindFreqList();
+      bindAgentLibraryModal();
+      renderGlobalAutoImageState();
+      applyAgentFreqLock();
+      syncAgentHiddenEntry();
+    }).catch(function () {
+      list.innerHTML = '<div style="color:var(--text-muted);font-size:13px">加载失败，请稍后重试</div>';
+    });
+  }
+
+  function freqLineHtml(agentId, scene, label, selected) {
+    var html = '<div class="freq-line"><span class="freq-line-label">' + label + '</span>';
+    for (var i = 0; i < FREQ_LEVELS.length; i++) {
+      var level = FREQ_LEVELS[i];
+      html += '<button type="button" class="freq-pill' + (level.value === selected ? ' is-active' : '') + '"'
+        + ' data-act="set-freq" data-agent-id="' + escHtml(agentId) + '" data-scene="' + scene + '" data-freq="' + level.value + '"'
+        + ' title="' + escHtml(level.desc) + '">' + escHtml(level.label) + '</button>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // 把伙伴的可用图库翻译成一句人话，让卡片上就能看出 ta 能用哪些图。
+  function describeAgentLibrary(config) {
+    if (!config || config.configured !== true) return '全库';
+    var parts = [];
+    var ids = Array.isArray(config.groupIds) ? config.groupIds : [];
+    for (var i = 0; i < ids.length; i++) {
+      for (var j = 0; j < (groupData.groups || []).length; j++) {
+        if (groupData.groups[j].id === ids[i]) { parts.push(groupData.groups[j].name); break; }
+      }
+    }
+    if (config.includeUngrouped) parts.push('未分组图片');
+    if (parts.length === 0) return '没有可用的图';
+    var weights = config.groupWeights && typeof config.groupWeights === 'object' ? config.groupWeights : {};
+    var weighted = 0;
+    var topWeight = 0;
+    Object.keys(weights).forEach(function (id) {
+      var w = Number(weights[id]) || 0;
+      if (w <= 0) return;
+      weighted += 1;
+      if (w > topWeight) topWeight = w;
+    });
+    var text = parts.join('、');
+    if (text.length > 22) text = parts.length + ' 项';
+    return weighted > 0 ? (text + ' · ' + weighted + ' 组加权' + (topWeight >= 3 ? '（有主推）' : '')) : text;
+  }
+
+  function renderAgentFreqRow(agent) {
+    var settings = getAgentFreqSettings(agent.id);
+    var config = getLocalAgentGroupConfig(agent.id);
+    var showId = duplicateAgentNames[agent.name || agent.id] > 1;
+    var html = '<div class="agent-card" data-agent-row="' + escHtml(agent.id) + '">';
+    html += '<div class="agent-card-head"><span class="agent-card-name">' + escHtml(agent.name || agent.id) + '</span>';
+    if (showId) html += '<span class="agent-card-id">' + escHtml(agent.id) + '</span>';
+    html += '<button type="button" class="agent-card-remove" data-act="remove-agent" data-agent-id="' + escHtml(agent.id) + '" title="把这位伙伴从插件里移除：清掉 ta 的配图频率、图库偏好和方言设置，并且不再出现在列表里（不影响 Hana 里的伙伴本身）。以后想找回来，点右上角的「已移除的伙伴」。">移除</button></div>';
+    html += freqLineHtml(agent.id, 'daily', '日常', freqToLevel(settings.daily));
+    html += freqLineHtml(agent.id, 'task', '正事', freqToLevel(settings.task));
+    html += '<div class="agent-card-foot"><span class="agent-card-lib" title="可用图库">可用图库：' + escHtml(describeAgentLibrary(config)) + '</span>'
+      + '<button type="button" class="agent-card-config" data-act="open-library" data-agent-id="' + escHtml(agent.id) + '">配置图库</button></div>';
+    html += '</div>';
+    return html;
+  }
+
+  function renderAgentFreqList() {
+    var list = $('agent-freq-list');
+    if (!list) return;
+    if (freqAgentsData.length === 0) {
+      list.innerHTML = '<div style="color:var(--text-muted);font-size:13px">没有找到助手</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < freqAgentsData.length; i++) html += renderAgentFreqRow(freqAgentsData[i]);
+    list.innerHTML = html;
+    applyAgentFreqLock();
+  }
+
+  // 分组权重（1~3 星）：key 为分组 id，值为档位；只有挂在已勾选分组上的才有效。
+  function pruneGroupWeights(weights, groupIds) {
+    var out = {};
+    var source = weights && typeof weights === 'object' ? weights : {};
+    Object.keys(source).forEach(function (id) {
+      var w = Math.round(Number(source[id]));
+      if (groupIds.indexOf(id) < 0 || !isFinite(w) || w <= 0) return;
+      out[id] = Math.min(w, 3);
+    });
+    return out;
+  }
+
+  // 指纹用：排序成数组，保证同样内容序列化结果稳定。
+  function groupWeightPairs(weights) {
+    var source = weights && typeof weights === 'object' ? weights : {};
+    return Object.keys(source).sort().map(function (id) { return [id, Math.min(Math.max(Math.round(Number(source[id])) || 0, 0), 3)]; });
+  }
+
+  var GROUP_WEIGHT_TEXT = { 1: '稍微偏一点', 2: '偏爱', 3: '主推' };
+
+  // 三颗星：点第 i 颗设为 i 星，再点同一颗取消。
+  function renderGroupWeightStars(groupId, weight, enabled) {
+    var html = '<span class="group-weight-stars' + (weight > 0 ? ' is-on' : '') + '" role="group" aria-label="分组权重">';
+    for (var i = 1; i <= 3; i++) {
+      var lit = i <= weight;
+      var tip = weight === i
+        ? '点击取消加权（当前 ' + i + ' 星：' + GROUP_WEIGHT_TEXT[i] + '）'
+        : '设为 ' + i + ' 星：' + GROUP_WEIGHT_TEXT[i] + '（只在已经勾上的分组里加权）';
+      html += '<button type="button" class="group-weight-star' + (lit ? ' is-lit' : '') + '"'
+        + ' data-lib-act="weight" data-group-id="' + escHtml(groupId) + '" data-weight="' + i + '"'
+        + (enabled ? '' : ' disabled') + ' title="' + tip + '" aria-label="' + i + ' 星">★</button>';
+    }
+    html += '</span>';
+    return html;
+  }
+
+  function getLocalAgentGroupConfig(agentId) {
+    var existing = groupData.agents && Object.prototype.hasOwnProperty.call(groupData.agents, agentId)
+      ? groupData.agents[agentId]
+      : null;
+    if (existing && typeof existing === 'object') {
+      return {
+        configured: existing.configured === true,
+        groupIds: Array.isArray(existing.groupIds) ? existing.groupIds.slice() : [],
+        groupWeights: pruneGroupWeights(existing.groupWeights, Array.isArray(existing.groupIds) ? existing.groupIds : []),
+        includeUngrouped: existing.includeUngrouped !== false,
+      };
+    }
+    return { configured: false, groupIds: [], groupWeights: {}, includeUngrouped: true };
+  }
+
+  function saveLocalAgentGroupConfig(agentId, config) {
+    if (!groupData.agents || typeof groupData.agents !== 'object') groupData.agents = {};
+    var groupIds = Array.from(new Set((config.groupIds || []).filter(Boolean)));
+    groupData.agents[agentId] = {
+      configured: config.configured === true,
+      groupIds: groupIds,
+      groupWeights: pruneGroupWeights(config.groupWeights, groupIds),
+      includeUngrouped: config.includeUngrouped !== false,
+    };
+  }
+
+  function findAgentFreqRow(agentId) {
+    var list = $('agent-freq-list');
+    if (!list) return null;
+    var rows = list.querySelectorAll('[data-agent-row]');
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-agent-row') === agentId) return rows[i];
+    }
+    return null;
+  }
+
+  function refreshAgentFreqRow(agentId, focusAction, focusFreq, focusScene) {
+    var row = findAgentFreqRow(agentId);
+    var agent = freqAgentsData.find(function (item) { return item.id === agentId; });
+    if (!row || !agent) return;
+    row.outerHTML = renderAgentFreqRow(agent);
+    applyAgentFreqLock();
+    var newRow = findAgentFreqRow(agentId);
+    if (!newRow || !focusAction) return;
+    var buttons = newRow.querySelectorAll('button[data-act]');
+    for (var i = 0; i < buttons.length; i++) {
+      var sameAction = buttons[i].getAttribute('data-act') === focusAction;
+      var sameFreq = focusAction !== 'set-freq' || buttons[i].getAttribute('data-freq') === focusFreq;
+      var sameScene = focusAction !== 'set-freq' || buttons[i].getAttribute('data-scene') === focusScene;
+      if (sameAction && sameFreq && sameScene) { buttons[i].focus(); break; }
+    }
+  }
+
+  // v0.34.33 - 「移除」现在是真移除：清数据 + 进隐藏名单，刷新和重启都不会再带出 ta。
+  // 想找回来走「已移除的伙伴」弹窗（/api/agents/unhide）。
+  function removeAgentFromPlugin(agentId) {
+    var theAgent = null;
+    for (var ai = 0; ai < freqAgentsData.length; ai++) {
+      if (freqAgentsData[ai].id === agentId) { theAgent = freqAgentsData[ai]; break; }
+    }
+    var agentLabel = (theAgent && theAgent.name) || agentId;
+    customConfirm('要把「' + agentLabel + '」从插件里移除吗？\n会清掉 ta 的配图频率、图库偏好和方言设置，并且不再出现在列表里（不影响 Hana 里的伙伴本身）。\n以后想找回来，点右上角的「已移除的伙伴」。', function () {
+      apiFetch(withAuth(API + '/api/agents/remove'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentId: agentId }),
+        signal: AbortSignal.timeout(8000),
+      }).then(function (r) { return r.json(); }).then(function (data) {
+        if (data.ok) {
+          toast('已移除「' + agentLabel + '」，数据已清理，刷新列表也不会再带出 ta');
+          freqAgentsData = freqAgentsData.filter(function (a) { return a.id !== agentId; });
+          if (freqConfigData.agents && freqConfigData.agents[agentId]) delete freqConfigData.agents[agentId];
+          if (!hiddenAgentsData.some(function (a) { return a.id === agentId; })) {
+            hiddenAgentsData.push({ id: agentId, name: agentLabel });
+          }
+          renderAgentFreqList();
+          syncAgentHiddenEntry();
+        } else {
+          toast('移除失败: ' + (data.error || ''), true);
+        }
+      }).catch(function () { toast('移除失败，网络开小差了', true); });
+    });
+  }
+
+  // 有移除过才显示入口，「0 位」摆在那里只会占地方。
+  function syncAgentHiddenEntry() {
+    var btn = $('agent-hidden-btn');
+    if (!btn) return;
+    var count = hiddenAgentsData.length;
+    btn.hidden = count === 0;
+    btn.textContent = '已移除的伙伴（' + count + '）';
+  }
+
+  function renderAgentHiddenList() {
+    var list = $('agent-hidden-list');
+    if (!list) return;
+    if (hiddenAgentsData.length === 0) {
+      list.innerHTML = '<div class="form-hint">还没有移除过任何伙伴。</div>';
+      return;
+    }
+    var html = '';
+    hiddenAgentsData.forEach(function (agent) {
+      html += '<div class="agent-hidden-row">'
+        + '<span title="' + escHtml(agent.id) + '">' + escHtml(agent.name || agent.id) + '</span>'
+        + '<button type="button" data-unhide-id="' + escHtml(agent.id) + '">放回列表</button>'
+        + '</div>';
+    });
+    list.innerHTML = html;
+  }
+
+  function bindAgentHiddenModal() {
+    var btn = $('agent-hidden-btn');
+    if (btn && btn.dataset.bound !== '1') {
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', function () {
+        renderAgentHiddenList();
+        openModal('agent-hidden-modal');
+      });
+    }
+    var list = $('agent-hidden-list');
+    if (list && list.dataset.bound !== '1') {
+      list.dataset.bound = '1';
+      list.addEventListener('click', function (event) {
+        var button = event.target.closest('[data-unhide-id]');
+        if (!button || button.disabled) return;
+        var agentId = button.getAttribute('data-unhide-id');
+        if (!agentId) return;
+        button.disabled = true;
+        apiFetch(withAuth(API + '/api/agents/unhide'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agentId: agentId }),
+          signal: AbortSignal.timeout(8000),
+        }).then(function (r) { return r.json(); }).then(function (data) {
+          if (!data.ok) throw new Error(data.error || '恢复失败');
+          hiddenAgentsData = hiddenAgentsData.filter(function (a) { return a.id !== agentId; });
+          renderAgentHiddenList();
+          syncAgentHiddenEntry();
+          // 重新扫描一次，把 ta 正式带回列表（连带最新的名字）。
+          renderAgentFreq();
+          toast('已放回列表');
+        }).catch(function (error) {
+          button.disabled = false;
+          toast('恢复失败：' + (error && error.message ? error.message : '未知错误'), true);
+        });
+      });
+    }
+  }
+
+  // 改一下就立刻落盘，不再有「忘了点保存」这回事。连续点击用队列串行，避免写入乱序。
+  var freqSaveChain = Promise.resolve();
+
+  function persistFreqConfig() {
+    freqSaveChain = freqSaveChain.then(function () {
+      // 不再提交 enabled：归一化层会按「日常和正事是否都为 0」推导开关语义。
+      var agentsPayload = {};
+      Object.keys(freqConfigData.agents || {}).forEach(function (id) {
+        var item = freqConfigData.agents[id] || {};
+        agentsPayload[id] = { daily: item.daily, task: item.task };
+      });
+      var payload = {
+        version: freqConfigData.version,
+        global_enabled: freqConfigData.global_enabled,
+        default_daily: freqConfigData.default_daily,
+        default_task: freqConfigData.default_task,
+        agents: agentsPayload,
+      };
+      return apiFetch(withAuth(API + '/api/agent-freq'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(8000),
+      }).then(function (response) {
+        return response.json().then(function (result) {
+          if (!response.ok || !result.ok) {
+            var error = new Error(result.error || '保存失败');
+            error.status = response.status;
+            throw error;
+          }
+          return result;
+        });
+      }).then(function (result) {
+        freqConfigData = result.data;
+        globalAutoImageEnabled = !(freqConfigData && freqConfigData.global_enabled === false);
+      }).catch(function (error) {
+        if (error && error.status === 409) {
+          loadGlobalAutoImageState();
+          toast('自动配图已关闭，设置已锁定', true);
+          return;
+        }
+        toast('保存失败：' + error.message, true);
+        // 回读服务器真实状态，不要停在没存进去的值上。
+        return apiFetch(withAuth(API + '/api/agent-freq'), { signal: AbortSignal.timeout(5000) })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (data && data.ok) { freqConfigData = data.data; renderAgentFreqList(); }
+          })
+          .catch(function () {});
+      });
+    });
+    return freqSaveChain;
+  }
+
+  function persistAgentGroups() {
+    var agents = {};
+    freqAgentsData.forEach(function (agent) { agents[agent.id] = getLocalAgentGroupConfig(agent.id); });
+    return apiFetch(withAuth(API + '/api/agent-groups'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agents: agents }),
+      signal: AbortSignal.timeout(8000),
+    }).then(function (response) {
+      return response.json().then(function (result) {
+        if (!response.ok || !result.ok) throw new Error(result.error || '保存失败');
+        return result;
+      });
+    }).then(function () {
+      return true;
+    }, function (error) {
+      toast('图库设置保存失败：' + error.message, true);
+      return false;
+    }).then(function (saved) {
+      // 成功或失败都回读一次，避免界面停在没存进去的值上。
+      return loadGroups().then(function () { return saved; });
+    });
+  }
+
+  // v0.34.32 - 顶部一个「全部图库」开关：打开 = 不限（以后新建分组也自动算进来），
+  // 关掉 = 按下面勾选的分组来。开关开着时列表整体置灰、选不了。
+  function renderAgentLibraryList() {
+    var list = $('agent-library-list');
+    if (!list) return;
+    var config = getLocalAgentGroupConfig(editingLibraryAgentId);
+    var unlimited = config.configured !== true;
+    var groups = groupData.groups || [];
+    var toggle = $('agent-lib-all-toggle');
+    if (toggle) {
+      toggle.classList.toggle('on', unlimited);
+      toggle.setAttribute('aria-checked', unlimited ? 'true' : 'false');
+    }
+    var note = $('agent-lib-all-note');
+    if (note) {
+      note.textContent = unlimited
+        ? 'ta 能用图库里任何一张图，以后新建的分组也会自动算进来。'
+        : 'ta 只能用下面勾上的分组里的图；想放开就打开上面的开关。';
+    }
+    var html = '<div class="group-check is-ungrouped"><input type="checkbox" data-lib-act="ungrouped"' + (config.includeUngrouped ? ' checked' : '') + (unlimited ? ' disabled' : '') + '><span>未分组图片</span></div>';
+    groups.forEach(function (group) {
+      var enabled = config.groupIds.indexOf(group.id) >= 0;
+      var weight = Math.round(Number(config.groupWeights && config.groupWeights[group.id])) || 0;
+      if (weight < 0) weight = 0;
+      html += '<div class="group-check' + (weight > 0 ? ' is-favorite' : '') + '">'
+        + '<input type="checkbox" data-lib-act="group" data-group-id="' + escHtml(group.id) + '"' + (enabled ? ' checked' : '') + (unlimited ? ' disabled' : '') + '>'
+        + '<span title="' + escHtml(group.name) + '">' + escHtml(group.name) + '</span>'
+        + renderGroupWeightStars(group.id, weight, enabled && !unlimited)
+        + '</div>';
+    });
+    if (groups.length === 0) {
+      html += '<div class="form-hint">还没有自定义分组。先去「分组管理」建几个，回来这里就能挑给 ta 用了。</div>';
+    }
+    list.innerHTML = html;
+    // 不限图库时列表整体置灰，告诉用户「不是没得选，是现在用不着选」。
+    list.classList.toggle('is-locked', unlimited);
+  }
+
+  function openAgentLibrary(agentId) {
+    var agent = freqAgentsData.find(function (item) { return item.id === agentId; });
+    if (!agent) return;
+    editingLibraryAgentId = agentId;
+    var title = $('agent-library-title');
+    if (title) title.textContent = (agent.name || agent.id) + ' 的可用图库';
+    renderAgentLibraryList();
+    openModal('agent-library-modal');
+  }
+
+  function bindAgentLibraryModal() {
+    var toggle = $('agent-lib-all-toggle');
+    if (toggle && toggle.dataset.bound !== '1') {
+      toggle.dataset.bound = '1';
+      toggle.addEventListener('click', function () {
+        if (!editingLibraryAgentId || !globalAutoImageEnabled) return;
+        var config = getLocalAgentGroupConfig(editingLibraryAgentId);
+        if (config.configured !== true) {
+          // 关掉开关：回到按分组挑。一个都没勾过就默认全勾，别让她从空白开始。
+          config.configured = true;
+          if (config.groupIds.length === 0 && config.includeUngrouped !== true) {
+            config.groupIds = (groupData.groups || []).map(function (group) { return group.id; });
+            config.includeUngrouped = true;
+          }
+        } else {
+          // 打开开关：不限图库。原来的勾选留着，关回来还在。
+          config.configured = false;
+          config.includeUngrouped = true;
+        }
+        saveLocalAgentGroupConfig(editingLibraryAgentId, config);
+        renderAgentLibraryList();
+      });
+    }
+    var list = $('agent-library-list');
+    if (list && list.dataset.bound !== '1') {
+      list.dataset.bound = '1';
+      list.addEventListener('click', function (event) {
+        var control = event.target.closest('[data-lib-act]');
+        if (!control || control.disabled || !editingLibraryAgentId || !globalAutoImageEnabled) return;
+        var config = getLocalAgentGroupConfig(editingLibraryAgentId);
+        var action = control.getAttribute('data-lib-act');
+        if (action === 'ungrouped') {
+          config.includeUngrouped = Boolean(control.checked);
+        } else if (action === 'group') {
+          var gid = control.getAttribute('data-group-id');
+          config.groupIds = config.groupIds.filter(function (id) { return id !== gid; });
+          if (control.checked && gid) config.groupIds.push(gid);
+          config.groupWeights = pruneGroupWeights(config.groupWeights, config.groupIds);
+        } else if (action === 'weight') {
+          event.preventDefault();
+          var wId = control.getAttribute('data-group-id');
+          var targetWeight = parseInt(control.getAttribute('data-weight'), 10);
+          if (!wId || !targetWeight || config.groupIds.indexOf(wId) < 0) return;
+          if (!config.groupWeights || typeof config.groupWeights !== 'object') config.groupWeights = {};
+          var currentWeight = Math.round(Number(config.groupWeights[wId])) || 0;
+          if (currentWeight === targetWeight) delete config.groupWeights[wId];
+          else config.groupWeights[wId] = targetWeight;
+        } else return;
+        saveLocalAgentGroupConfig(editingLibraryAgentId, config);
+        renderAgentLibraryList();
+      });
+    }
+    var saveBtn = $('save-agent-library-btn');
+    if (saveBtn && saveBtn.dataset.bound !== '1') {
+      saveBtn.dataset.bound = '1';
+      saveBtn.addEventListener('click', function () {
+        if (!editingLibraryAgentId || !globalAutoImageEnabled) return;
+        var config = getLocalAgentGroupConfig(editingLibraryAgentId);
+        if (config.configured && config.groupIds.length === 0 && !config.includeUngrouped) {
+          toast('至少要勾一项，或者打开上面的「全部图库」', true);
+          return;
+        }
+        saveBtn.disabled = true;
+        saveBtn.textContent = '保存中…';
+        persistAgentGroups().then(function (saved) {
+          if (saved) {
+            closeModal('agent-library-modal');
+            renderAgentFreqList();
+            toast('图库设置已保存');
+          }
+          saveBtn.disabled = false;
+          saveBtn.textContent = '保存';
+        });
+      });
+    }
+  }
+
+  function bindFreqList() {
+    var list = $('agent-freq-list');
+    if (!list || list.dataset.bound === '1') return;
+    list.dataset.bound = '1';
+    list.addEventListener('click', function (event) {
+      var button = event.target.closest('button[data-act]');
+      if (!button) return;
+      var agentId = button.getAttribute('data-agent-id');
+      if (!agentId) return;
+      var action = button.getAttribute('data-act');
+      if (action === 'remove-agent') { removeAgentFromPlugin(agentId); return; }
+      if (!globalAutoImageEnabled) return;
+      if (action === 'open-library') { openAgentLibrary(agentId); return; }
+      if (action !== 'set-freq') return;
+      var scene = button.getAttribute('data-scene') === 'task' ? 'task' : 'daily';
+      setAgentSceneFreq(agentId, scene, parseInt(button.getAttribute('data-freq'), 10));
+      refreshAgentFreqRow(agentId, 'set-freq', button.getAttribute('data-freq'), scene);
+      persistFreqConfig();
+    });
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  //  v0.20.0 方言口音（让助手说话带方言味）
+  // ════════════════════════════════════════════════════════════════
+  var dialectAgentsData = [];
+  var dialectConfigData = { version: 3, agents: {} };
+  var dialectMetaData = { dialects: [] };
+  var dialectDirty = false;
+  var dialectDuplicateNames = {};
+
+  function getDialectSetting(agentId) {
+    if (!dialectConfigData.agents[agentId]) {
+      dialectConfigData.agents[agentId] = { dialect: '', enabled: false };
+    }
+    return dialectConfigData.agents[agentId];
+  }
+
+  function markDialectDirty() {
+    dialectDirty = true;
+    var status = $('dialect-save-status');
+    var button = $('save-dialect-btn');
+    if (status) { status.textContent = '有未保存的更改'; status.classList.add('is-dirty'); }
+    if (button) button.disabled = false;
+  }
+
+  function markDialectSaved() {
+    dialectDirty = false;
+    var status = $('dialect-save-status');
+    var button = $('save-dialect-btn');
+    if (status) { status.textContent = '已保存'; status.classList.remove('is-dirty'); }
+    if (button) button.disabled = true;
+  }
+
+  // 方言预览句（v0.23.0 起难度提示仅新疆话保留，其余方言不带括号标注）
+  function dialectPreviewText(dialectId) {
+    var d = null;
+    for (var i = 0; i < dialectMetaData.dialects.length; i++) {
+      if (dialectMetaData.dialects[i].id === dialectId) { d = dialectMetaData.dialects[i]; break; }
+    }
+    if (!d) return '';
+    // v0.30.0：学我说话预览特殊文案（提示模板状态）
+    if (d.id === 'userstyle') {
+      return '开启后 ta 打字会自然带点你的味道，正事闲聊都这样 · 像 ta 一样说话';
+    }
+    var note = d.difficultyNote ? '（模型表现：' + d.difficultyNote + '）' : '';
+    return '开启后 ta 打字会自然带点' + d.name + '味，正事闲聊都这样' + note + ' · ' + d.tagline;
+  }
+
+  // 方言 id → 名字（渲染选择器按钮标签用）
+  function dialectName(id) {
+    for (var i = 0; i < dialectMetaData.dialects.length; i++) {
+      if (dialectMetaData.dialects[i].id === id) return dialectMetaData.dialects[i].name;
+    }
+    return id;
+  }
+
+  // v0.25.0 方言元数据（加强版对所有方言有效，不再需要 hasAdvanced 判断）
+
+  // v0.23.0 单控件选择器：一个按钮搞定开关+选择（选方言=开，选(不选)=关）
+  function renderDialectRow(agent) {
+    var settings = getDialectSetting(agent.id);
+    var enabled = settings.dialect && settings.enabled;
+    var showId = dialectDuplicateNames[agent.name || agent.id] > 1;
+    var html = '<div class="dialect-item' + (enabled ? '' : ' is-off') + '" data-agent-row="' + escHtml(agent.id) + '">';
+    html += '<div class="dialect-head"><span class="dialect-name">' + escHtml(agent.name || agent.id) + '</span>';
+    if (showId) html += '<span class="dialect-id">' + escHtml(agent.id) + '</span>';
+    // v0.26.0 浓方言开关（独立于 picker，放 head 层、选方言左边）
+    // 开启后 = 动态回响（每轮注入短提示，正事自动让路）+ 有精修文案的方言写加强人格
+    var boostOn = !!settings.boost;
+    var isUserstyle = settings.dialect === 'userstyle';
+    // v0.30.0：学我说话不走回响层，不显示「方言加浓」开关（模板本身就是用户风格）
+    if (!isUserstyle) {
+      // v0.26.0 token 提示：只在开启后显示，放开关左边，让两个按钮挨着
+      if (boostOn) html += '<span class="dialect-boost-tip">开加浓每轮多费一点 token</span>';
+      html += '<button type="button" class="dialect-boost-toggle' + (boostOn ? ' is-on' : '') + (enabled ? '' : ' is-disabled') + '" data-act="toggle-boost"' + (enabled ? '' : ' disabled') + ' title="' + (enabled ? '方言加浓：浓度更高，每轮对话有方言回响，正事场合自动让路' : '先给 ta 选个方言，才能开方言加浓') + '">'
+        + '<span class="dialect-boost-track"><span class="dialect-boost-knob"></span></span>'
+        + '<span class="dialect-boost-label">方言加浓</span></button>';
+    }
+    html += '<div class="dialect-picker" data-agent-id="' + escHtml(agent.id) + '">';
+    html += '<button type="button" class="dialect-picker-btn' + (enabled ? ' is-on' : '') + '" data-act="toggle-picker">';
+    html += '<span class="dialect-picker-label">' + escHtml(enabled ? dialectName(settings.dialect) : '选个方言') + '</span>';
+    html += '<span class="dialect-picker-arrow">▾</span></button>';
+    html += '<div class="dialect-picker-menu" hidden>';
+    html += '<button type="button" data-act="pick-dialect" data-value="" class="is-none' + (!enabled ? ' is-current' : '') + '">(不选)</button>';
+    for (var i = 0; i < dialectMetaData.dialects.length; i++) {
+      var d = dialectMetaData.dialects[i];
+      html += '<button type="button" data-act="pick-dialect" data-value="' + escHtml(d.id) + '"' + (settings.dialect === d.id ? ' class="is-current"' : '') + '>' + escHtml(d.name);
+      if (d.difficultyNote) html += '<span class="dialect-picker-note">' + escHtml(d.difficultyNote) + '</span>';
+      html += '</button>';
+    }
+    html += '</div>';
+    html += '</div>';
+    html += '</div>';
+    html += '<div class="dialect-preview" id="dialect-preview-' + escHtml(agent.id) + '">' + (enabled ? escHtml(dialectPreviewText(settings.dialect)) : '挑一个方言试试，味道会显示在这里') + '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  function renderDialectList() {
+    var list = $('dialect-list');
+    if (!list) return;
+    if (dialectAgentsData.length === 0) {
+      list.innerHTML = '<div style="color:var(--text-muted);font-size:13px">没有找到助手</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < dialectAgentsData.length; i++) html += renderDialectRow(dialectAgentsData[i]);
+    list.innerHTML = html;
+  }
+
+  function refreshDialectRow(agentId) {
+    var list = $('dialect-list');
+    if (!list) return;
+    var rows = list.querySelectorAll('[data-agent-row]');
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-agent-row') === agentId) {
+        var agent = null;
+        for (var j = 0; j < dialectAgentsData.length; j++) {
+          if (dialectAgentsData[j].id === agentId) { agent = dialectAgentsData[j]; break; }
+        }
+        if (agent) rows[i].outerHTML = renderDialectRow(agent);
+        return;
+      }
+    }
+  }
+
+  function renderDialect() {
+    var list = $('dialect-list');
+    if (!list) return;
+    list.innerHTML = '加载中...';
+
+    Promise.all([
+      apiFetch(withAuth(API + '/api/agents'), { signal: AbortSignal.timeout(5000) }).then(function (r) { return r.json(); }),
+      apiFetch(withAuth(API + '/api/dialect'), { signal: AbortSignal.timeout(5000) }).then(function (r) { return r.json(); }),
+    ]).then(function (results) {
+      var agentsResult = results[0];
+      var dialectResult = results[1];
+      if (!agentsResult.ok || !Array.isArray(agentsResult.data) || !dialectResult.ok) throw new Error('加载失败');
+      dialectAgentsData = agentsResult.data;
+      dialectConfigData = dialectResult.data.config || { version: 2, agents: {} };
+      dialectMetaData = dialectResult.data;
+      dialectDuplicateNames = {};
+      for (var i = 0; i < dialectAgentsData.length; i++) {
+        var name = dialectAgentsData[i].name || dialectAgentsData[i].id;
+        dialectDuplicateNames[name] = (dialectDuplicateNames[name] || 0) + 1;
+      }
+      markDialectSaved();
+      renderDialectList();
+      bindDialectList();
+      bindDialectSave();
+      bindUserstyleActions();
+    }).catch(function () {
+      list.innerHTML = '<div style="color:var(--text-muted);font-size:13px">加载失败，请稍后重试</div>';
+    });
+  }
+
+  function bindDialectList() {
+    var list = $('dialect-list');
+    if (!list || list.dataset.bound === '1') return;
+    list.dataset.bound = '1';
+    list.addEventListener('click', function (event) {
+      var pickerBtn = event.target.closest('button[data-act="toggle-picker"]');
+      if (pickerBtn) {
+        var picker = pickerBtn.closest('.dialect-picker');
+        if (!picker) return;
+        var menu = picker.querySelector('.dialect-picker-menu');
+        var wasOpen = menu && !menu.hidden;
+        closeAllDialectMenus();
+        if (!wasOpen && menu) { menu.hidden = false; picker.classList.add('open'); }
+        return;
+      }
+      var pickBtn = event.target.closest('button[data-act="pick-dialect"]');
+      if (pickBtn) {
+        var picker2 = pickBtn.closest('.dialect-picker');
+        if (!picker2) return;
+        var agentId = picker2.getAttribute('data-agent-id');
+        if (!agentId) return;
+        var newValue = pickBtn.getAttribute('data-value') || '';
+        // v0.30.0：选「学我说话」但模板还没总结时，引导先去设置（不直接选上）
+        if (newValue === 'userstyle' && !userstyleHasTemplate()) {
+          closeAllDialectMenus();
+          toast('「' + dialectName('userstyle') + '」还没模板：先去「' + userstyleName() + '」设置里总结一次吧', true);
+          showView('userstyle');
+          renderUserstyle();
+          return;
+        }
+        var settings = getDialectSetting(agentId);
+        settings.dialect = newValue;
+        settings.enabled = !!settings.dialect;
+        // v0.25.0：boost 对所有方言有效（动态回响不依赖精修文案），换方言无需清理
+        closeAllDialectMenus();
+        markDialectDirty();
+        refreshDialectRow(agentId);
+        return;
+      }
+      // v0.25.0 浓方言开关：拨动切换 boost（开/关）。开关在 picker 外，从行元素取 agentId
+      var boostBtn = event.target.closest('button[data-act="toggle-boost"]');
+      if (boostBtn) {
+        var row = boostBtn.closest('.dialect-item');
+        if (!row) return;
+        var agentId3 = row.getAttribute('data-agent-row');
+        if (!agentId3) return;
+        var s = getDialectSetting(agentId3);
+        s.boost = !s.boost;
+        markDialectDirty();
+        refreshDialectRow(agentId3);
+        return;
+      }
+    });
+    // 点击选择器外部时收起所有下拉面板
+    document.addEventListener('click', function (event) {
+      if (!event.target.closest('.dialect-picker')) closeAllDialectMenus();
+    });
+  }
+
+  function closeAllDialectMenus() {
+    var list = $('dialect-list');
+    if (!list) return;
+    var menus = list.querySelectorAll('.dialect-picker-menu');
+    for (var i = 0; i < menus.length; i++) menus[i].hidden = true;
+    var pickers = list.querySelectorAll('.dialect-picker.open');
+    for (var j = 0; j < pickers.length; j++) pickers[j].classList.remove('open');
+  }
+
+  function bindDialectSave() {
+    var saveButton = $('save-dialect-btn');
+    if (!saveButton || saveButton.dataset.bound === '1') return;
+    saveButton.dataset.bound = '1';
+    saveButton.addEventListener('click', function () {
+      if (!dialectDirty) return;
+      var status = $('dialect-save-status');
+      saveButton.disabled = true;
+      if (status) { status.textContent = '正在保存…'; status.classList.remove('is-dirty'); }
+      apiFetch(withAuth(API + '/api/dialect'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(dialectConfigData),
+        signal: AbortSignal.timeout(5000),
+      }).then(function (response) { return response.json(); })
+        .then(function (result) {
+          if (!result.ok) throw new Error(result.error || '保存失败');
+          dialectConfigData = result.data;
+          markDialectSaved();
+          if (result.syncFailed && result.syncFailed.length) {
+            var names = result.syncFailed.map(function (f) { return f.agentId; }).join('、');
+            var reason = result.syncFailed.map(function (f) { return f.error; }).join('；');
+            toast('已保存，但 ' + names + ' 的人格写入失败：' + reason + '（重启后不生效）', true);
+          } else {
+            toast(result.message || '已保存');
+          }
+        }).catch(function (error) {
+          markDialectDirty();
+          toast('保存失败：' + error.message, true);
+        });
+    });
+  }
+
+  // ═══════════════════════════════════
+  //  v0.30.0 学我说话（userstyle）· 风格模板设置
+  // ═══════════════════════════════════
+  var userstyleData = null;          // { template, levels, tasks }
+  var userstylePollTimer = null;
+  var userstyleSelectedLevel = 'balanced';
+
+  // 当前是否有已确认模板（方言选择器拦截用）
+  function userstyleHasTemplate() {
+    return !!(userstyleData && userstyleData.template && userstyleData.template.current);
+  }
+
+  // 学我说话：固定展示名
+  function userstyleName() {
+    return '学我说话';
+  }
+
+  function renderUserstyle() {
+    var title = $('userstyle-title');
+    if (title) title.textContent = userstyleName();
+
+    // 档位按钮
+    var lvWrap = $('userstyle-levels');
+    if (lvWrap && !lvWrap.dataset.bound) {
+      lvWrap.dataset.bound = '1';
+      renderUserstyleLevels();
+    }
+
+    loadUserstyleData();
+  }
+
+  // v0.30.7：渲染「从哪些助手学」排除列表（默认全勾，取消勾选 = 排除）
+  function renderUserstyleAgents() {
+    var wrap = $('userstyle-agents');
+    if (!wrap || !userstyleData) return;
+    var agents = userstyleData.agents || [];
+    var excluded = new Set((userstyleData.template && userstyleData.template.excluded_agents) || []);
+    var html = '';
+    for (var i = 0; i < agents.length; i++) {
+      var a = agents[i];
+      var checked = !excluded.has(a.id);
+      html += '<label style="display:inline-flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;background:var(--bg-soft,#f6f4ef);border-radius:999px;padding:4px 10px;border:1px solid var(--border)">'
+        + '<input type="checkbox" data-userstyle-agent="' + escHtml(a.id) + '"' + (checked ? ' checked' : '') + ' style="accent-color:var(--primary);cursor:pointer">'
+        + escHtml(a.name || a.id) + '</label>';
+    }
+    wrap.innerHTML = html;
+    if (wrap.dataset.bound === '1') return;
+    wrap.dataset.bound = '1';
+    wrap.addEventListener('change', function () {
+      var excludedIds = [];
+      wrap.querySelectorAll('input[data-userstyle-agent]').forEach(function (cb) {
+        if (!cb.checked) excludedIds.push(cb.getAttribute('data-userstyle-agent'));
+      });
+      // 记住排除名单（下次总结还用）
+      apiFetch(withAuth(API + '/api/style-template/excluded'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent_ids: excludedIds }),
+        signal: AbortSignal.timeout(5000),
+      }).then(function (r) { return r.json(); }).catch(function () {});
+    });
+  }
+
+  // v0.30.9：移除一键套用逻辑（配方言是方言页的职责）
+
+  function renderUserstyleLevels() {
+    var lvWrap = $('userstyle-levels');
+    if (!lvWrap) return;
+    var levels = (userstyleData && userstyleData.levels) || {
+      light: { label: '轻量', count: 500, desc: '约 500 条聊天记录，适合刚用几天、聊天不多' },
+      balanced: { label: '均衡', count: 2000, desc: '约 2000 条聊天记录，默认推荐' },
+      deep: { label: '深度', count: 5000, desc: '约 5000 条聊天记录，聊得多更精准，会慢一些' },
+    };
+    // v0.30.1：三个等宽按钮，选中只改高亮色，不再撑满宽度（回归：btn-primary 自带 width:100% 导致选中拉长）
+    var html = '<div style="display:flex;gap:8px">';
+    var keys = ['light', 'balanced', 'deep'];
+    for (var i = 0; i < keys.length; i++) {
+      var lv = levels[keys[i]];
+      if (!lv) continue;
+      var active = userstyleSelectedLevel === keys[i];
+      html += '<button type="button" data-userstyle-level="' + keys[i] + '" title="' + escHtml(lv.desc || '') + '" style="flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:13px;border:1px solid ' + (active ? 'var(--primary)' : 'var(--border)') + ';background:' + (active ? 'var(--primary-light)' : 'transparent') + ';color:' + (active ? 'var(--primary-dark)' : 'var(--text-muted)') + '">'
+        + escHtml(lv.label || keys[i]) + '<br><span style="font-size:11px;opacity:.85">约 ' + (lv.count || '?') + ' 条</span></button>';
+    }
+    html += '</div>';
+    lvWrap.innerHTML = html;
+    lvWrap.querySelectorAll('button[data-userstyle-level]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        userstyleSelectedLevel = btn.getAttribute('data-userstyle-level');
+        renderUserstyleLevels();
+      });
+    });
+  }
+
+  function loadUserstyleData() {
+    var status = $('userstyle-task-status');
+    apiFetch(withAuth(API + '/api/style-template'), { signal: AbortSignal.timeout(5000) })
+      .then(function (r) { return r.json(); })
+      .then(function (result) {
+        if (!result.ok) throw new Error(result.error || '加载失败');
+        userstyleData = result.data;
+        // v0.30.1：接口返回 userName 时刷新标题（兜底 dialectMetaData 未加载的情况）
+        if (result.data && result.data.userName) {
+          var title = $('userstyle-title');
+          if (title) title.textContent = userstyleName();
+        }
+        renderUserstyleTemplate();
+        renderUserstyleLevels();
+        renderUserstyleAgents(); // v0.30.7：排除列表
+        loadUserstyleProfile(); // v2：数据画像（展柜版）
+        // v0.30.9：保存提示里的方言名动态刷新
+        var saveHint = $('userstyle-save-hint-name');
+        if (saveHint) saveHint.textContent = userstyleName();
+        // 后台任务可能在切页期间结束：按最新任务状态恢复草稿、失败提示或轮询。
+        var taskState = result.data.task_state || { status: 'idle' };
+        var startBtn = $('userstyle-start-btn');
+        if (taskState.status === 'running' && taskState.task_id) {
+          if (startBtn) startBtn.disabled = true;
+          renderUserstyleTaskState(taskState);
+          startUserstylePoll(taskState.task_id);
+        } else {
+          if (startBtn) startBtn.disabled = false;
+          stopUserstylePoll();
+          renderUserstyleTaskState(taskState);
+        }
+      })
+      .catch(function (e) {
+        if (status) status.textContent = '加载失败：' + e.message;
+      });
+  }
+
+  // v2：展柜版数据画像（读取 /api/style-profile，提炼过才显示）
+  var USERSTYLE_PROFILE_LOADED = false;
+  function pctShow(n) {
+    return Math.round((n || 0) * 100) + '%';
+  }
+  function userstyleMetricCell(label, value) {
+    return '<div style="min-width:86px;flex:1"><div style="font-size:11px;opacity:.75">' + escHtml(label) + '</div>'
+      + '<div style="font-size:15px;font-weight:600;color:var(--primary-dark);font-variant-numeric:tabular-nums">' + escHtml(String(value)) + '</div></div>';
+  }
+  function loadUserstyleProfile() {
+    var wrap = $('userstyle-profile-wrap');
+    if (!wrap) return;
+    // 每请求拉一次即可（数据变更靠重构/总结触发）
+    if (USERSTYLE_PROFILE_LOADED) return;
+    USERSTYLE_PROFILE_LOADED = true;
+    apiFetch(withAuth(API + '/api/style-profile'), { signal: AbortSignal.timeout(5000) })
+      .then(function (r) { return r.json(); })
+      .then(function (result) {
+        if (!result.ok || !result.data || !result.data.profile || !result.data.profile.baseline) {
+          wrap.hidden = true;
+          return;
+        }
+        var b = result.data.profile.baseline;
+        var fb = result.data.feedback || { counterexamples: [], locked: [] };
+        var box = $('userstyle-profile');
+        if (!box) return;
+        var html = '';
+        // metric 网格（4 个，偶数布局）
+        html += '<div style="display:flex;flex-wrap:wrap;gap:12px 16px;margin-bottom:8px">'
+          + userstyleMetricCell('采样消息', b.sampled)
+          + userstyleMetricCell('平均句长', (b.avg_sentence_len || 0) + ' 字')
+          + userstyleMetricCell('短消息占比', pctShow(b.short_ratio))
+          + userstyleMetricCell('波浪号使用', pctShow(b.punct && b.punct.wave))
+          + '</div>';
+        // 高频短语候选 TOP（标签式）
+        if (b.catchphrases && b.catchphrases.length) {
+          html += '<div style="margin-bottom:8px"><span style="opacity:.8">高频短语候选：</span>'
+            + b.catchphrases.map(function (c) {
+              return '<span style="display:inline-block;background:var(--primary-light);border-radius:999px;padding:1px 8px;margin:2px 4px 2px 0;font-size:11px">' + escHtml(c.phrase) + ' ×' + c.count + '</span>';
+            }).join('')
+            + '</div>';
+        }
+        // 句尾语气词排行
+        if (b.end_tone_top && b.end_tone_top.length) {
+          html += '<div style="margin-bottom:8px"><span style="opacity:.8">句尾语气词：</span>'
+            + b.end_tone_top.slice(0, 4).map(function (e) {
+              return '<span style="display:inline-block;margin-right:8px;font-size:11px">' + escHtml(e.word) + ' <b style="color:var(--primary-dark);font-weight:600">' + pctShow(e.ratio) + '</b></span>';
+            }).join('')
+            + '</div>';
+        }
+        // 标点习惯（细条）
+        var punct = b.punct || {};
+        var rows = [
+          ['波浪号', punct.wave], ['省略号', punct.ellipsis], ['感叹号', punct.exclaim],
+          ['问句', punct.question], ['光溜溜结束', punct.end_clean],
+        ];
+        html += '<div><span style="opacity:.8">标点习惯：</span>';
+        rows.forEach(function (r) {
+          var w = Math.min(100, Math.round((r[1] || 0) * 100));
+          html += '<div style="display:flex;align-items:center;gap:6px;margin-top:3px">'
+            + '<span style="width:70px;flex:none;font-size:11px">' + r[0] + '</span>'
+            + '<div style="flex:1;height:6px;background:var(--bg-soft,#f6f4ef);border-radius:3px;overflow:hidden"><div style="width:' + w + '%;height:100%;background:var(--primary);border-radius:3px"></div></div>'
+            + '<span style="width:38px;flex:none;text-align:right;font-size:11px">' + w + '%</span></div>';
+        });
+        html += '</div>';
+        // 修正回流：锁定 + 反例
+        if (fb.locked.length || fb.counterexamples.length) {
+          html += '<div style="margin-top:8px;font-size:11px;opacity:.85">';
+          if (fb.locked.length) html += '你手动加的保护句 <b style="color:var(--primary-dark);font-weight:600">' + fb.locked.length + '</b> 条；';
+          if (fb.counterexamples.length) html += '你删过的避让句 <b style="font-weight:600">' + fb.counterexamples.length + '</b> 条（下轮总结自动避开）';
+          html += '</div>';
+        }
+        box.innerHTML = html;
+        wrap.hidden = false;
+      })
+      .catch(function () { wrap.hidden = true; });
+  }
+
+  function formatUserstyleTaskError(error) {
+    var text = String(error || '').trim();
+    if (/模型未回复正文|仅思考|空正文/.test(text)) return '模型这次只返回了思考，没有生成正文';
+    return text || '未知原因';
+  }
+
+  function renderUserstyleTaskState(state) {
+    var status = $('userstyle-task-status');
+    var pText = $('userstyle-progress-text');
+    if (!state || state.status === 'idle') {
+      if (status) status.textContent = '';
+      if (pText) pText.textContent = '';
+      return;
+    }
+    if (state.status === 'running') {
+      if (status) status.textContent = '总结中，可以先去干别的，回来就好';
+      return;
+    }
+    if (state.status === 'draft') {
+      if (status) status.textContent = '新草稿已生成，往下看，确认后才会保存';
+      if (pText) pText.textContent = '';
+      return;
+    }
+    if (state.status === 'failed') {
+      if (status) status.textContent = '上次总结没有生成出来：' + formatUserstyleTaskError(state.error) + '。再点一次即可重试';
+      if (pText) pText.textContent = '';
+    }
+  }
+
+  function renderUserstyleTemplate() {
+    if (!userstyleData) return;
+    var tpl = userstyleData.template || {};
+    var current = tpl.current || '';
+    var history = tpl.history || [];
+
+    var curWrap = $('userstyle-current-wrap');
+    var curBox = $('userstyle-current');
+    if (curWrap) curWrap.hidden = !current;
+    if (curBox) curBox.textContent = current || '';
+
+    // v0.31.1：历史只留最近一版，不展示列表；有上一版时显示「返回上一版」按钮
+    var revertBtn = $('userstyle-revert-btn');
+    if (revertBtn) {
+      var last = history.length > 0 ? history[history.length - 1] : null;
+      revertBtn.hidden = !(current && last);
+      if (last) {
+        var prevText = (last.content || '').trim();
+        if (revertBtn.title !== prevText) revertBtn.title = '上一版内容：' + prevText;
+      }
+    }
+
+    // 草稿区只认最新任务，避免失败任务回来后把更早的旧草稿冒充新结果。
+    var latestTask = (userstyleData.tasks || [])[0];
+    var lastTask = latestTask
+      && latestTask.status === 'completed'
+      && latestTask.confirmed !== true
+      && latestTask.draft
+      ? latestTask
+      : null;
+    if (lastTask) showUserstyleDraft(lastTask.draft, lastTask.id);
+    else hideUserstyleDraft();
+  }
+
+  function showUserstyleDraft(draft, taskId) {
+    var wrap = $('userstyle-draft-wrap');
+    if (!wrap) return;
+    wrap.hidden = false;
+    var box = $('userstyle-draft');
+    if (box && !box.dataset.filled) {
+      box.value = draft;
+      box.dataset.filled = '1';
+      box.dataset.taskId = taskId || '';
+      // v0.30.5：实时字数计数（超 600 禁用确认，避免保存时才报错）
+      if (!box.dataset.countBound) {
+        box.dataset.countBound = '1';
+        box.addEventListener('input', updateUserstyleDraftCount);
+      }
+      updateUserstyleDraftCount();
+    }
+  }
+
+  // v0.30.5：草稿字数实时显示，超 600 红色提示 + 禁用确认按钮
+  var USERSTYLE_DRAFT_MAX = 600;
+  function updateUserstyleDraftCount() {
+    var box = $('userstyle-draft');
+    if (!box) return;
+    var count = $('userstyle-draft-count');
+    var btn = $('userstyle-confirm-btn');
+    var shortenBtn = $('userstyle-shorten-btn');
+    var len = (box.value || '').length;
+    if (count) {
+      count.textContent = len + ' / ' + USERSTYLE_DRAFT_MAX + ' 字';
+      count.style.color = len > USERSTYLE_DRAFT_MAX ? '#d9534f' : 'var(--text-muted)';
+    }
+    if (btn) {
+      btn.disabled = len > USERSTYLE_DRAFT_MAX;
+      btn.title = len > USERSTYLE_DRAFT_MAX ? '模板超过 ' + USERSTYLE_DRAFT_MAX + ' 字，先点「自动精简」' : '';
+    }
+    // v0.30.6：超长时显示「自动精简」按钮（分享版用户不用手动删）
+    if (shortenBtn) shortenBtn.hidden = len <= USERSTYLE_DRAFT_MAX;
+  }
+
+  // v0.30.9：保存草稿为当前模板（纯编辑器职责；配方言是方言页的事）
+  function confirmUserstyleDraft() {
+    var box = $('userstyle-draft');
+    if (!box || !box.value.trim()) { toast('草稿是空的', true); return; }
+    var btn = $('userstyle-confirm-btn');
+    if (btn) btn.disabled = true;
+    apiFetch(withAuth(API + '/api/style-template/confirm'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        draft: box.value,
+        task_id: box.dataset.taskId || '',
+        agent_id: '',
+        level: userstyleSelectedLevel,
+      }),
+      signal: AbortSignal.timeout(8000),
+    }).then(function (r) { return r.json(); })
+      .then(function (result) {
+        if (!result.ok) throw new Error(result.error || '保存失败');
+        // v0.31.0：保存后已自动同步到开了「学我说话」的助手 ishiki.md
+        var synced = (result.sync && result.sync.synced) || [];
+        if (synced.length > 0) {
+          toast('模板已保存！已自动同步给 ' + synced.length + ' 个开了「' + userstyleName() + '」的助手，重启 Hana 后生效');
+        } else {
+          toast('模板已保存！去「方言口音」给助手选上「' + userstyleName() + '」就生效');
+        }
+        hideUserstyleDraft();
+        loadUserstyleData();
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        toast('保存失败：' + e.message, true);
+      });
+  }
+
+  // v0.30.6：自动精简草稿（超长时一键压缩，不用手动删）
+  function shortenUserstyleDraft() {
+    var box = $('userstyle-draft');
+    if (!box || !box.value.trim()) return;
+    var shortenBtn = $('userstyle-shorten-btn');
+    var confirmBtn = $('userstyle-confirm-btn');
+    if (shortenBtn) { shortenBtn.disabled = true; shortenBtn.textContent = '精简中…'; }
+    apiFetch(withAuth(API + '/api/style-template/shorten'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draft: box.value }),
+      signal: AbortSignal.timeout(60000),
+    }).then(function (r) { return r.json(); })
+      .then(function (result) {
+        if (!result.ok) throw new Error(result.error || '精简失败');
+        box.value = result.data;
+        updateUserstyleDraftCount();
+        toast('已精简到 ' + result.data.length + ' 字，看看还满意不');
+      })
+      .catch(function (e) {
+        toast('精简失败：' + e.message + '（也可以自己删掉一些句子）', true);
+      })
+      .finally(function () {
+        if (shortenBtn) { shortenBtn.disabled = false; shortenBtn.textContent = '自动精简'; }
+        if (confirmBtn) confirmBtn.disabled = (box.value || '').length > USERSTYLE_DRAFT_MAX;
+      });
+  }
+
+  function hideUserstyleDraft() {
+    var wrap = $('userstyle-draft-wrap');
+    if (wrap) wrap.hidden = true;
+    var box = $('userstyle-draft');
+    if (box) { box.value = ''; delete box.dataset.filled; delete box.dataset.taskId; }
+  }
+
+  function startUserstyleTask() {
+    var btn = $('userstyle-start-btn');
+    if (btn) btn.disabled = true;
+    var status = $('userstyle-task-status');
+    if (status) status.textContent = '正在创建任务…';
+
+    apiFetch(withAuth(API + '/api/style-task'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level: userstyleSelectedLevel }), // v0.30.7：不用选助手，全量采集
+      signal: AbortSignal.timeout(8000),
+    }).then(function (r) { return r.json(); })
+      .then(function (result) {
+        if (!result.ok) throw new Error(result.error || '创建任务失败');
+        hideUserstyleDraft();
+        startUserstylePoll(result.data.taskId);
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        if (status) status.textContent = '';
+        toast('创建任务失败：' + e.message, true);
+      });
+  }
+
+  // 轮询任务进度（切走页面也不影响后端执行，回来继续显示）
+  function startUserstylePoll(taskId) {
+    stopUserstylePoll();
+    var status = $('userstyle-task-status');
+    var progress = $('userstyle-progress');
+    var btn = $('userstyle-start-btn');
+    if (btn) btn.disabled = true;
+    if (progress) progress.hidden = false;
+
+    var PHASE_TEXT = {
+      reading: '正在读取会话记录…',
+      sampling: '正在取样…',
+      baseline: '正在统计你的说话习惯…',
+      distilling: '正在分通道提炼你的风格…',
+      merging: '正在组织人格文案…',
+      drafting: '草稿生成中…',
+    };
+
+    userstylePollTimer = setInterval(function () {
+      apiFetch(withAuth(API + '/api/style-task/' + encodeURIComponent(taskId)), { signal: AbortSignal.timeout(5000) })
+        .then(function (r) { return r.json(); })
+        .then(function (result) {
+          if (!result.ok) { stopUserstylePoll(); if (status) status.textContent = '任务查询失败'; return; }
+          var t = result.data;
+          var pText = $('userstyle-progress-text');
+          if (t.status === 'running') {
+            // v2：后端 note 带通道粒度提示（「正在分析你的词汇习惯…」），优先展示
+            var phase = t.note ? t.note : (PHASE_TEXT[t.phase] || '处理中…');
+            var detail = t.total_messages ? '（共 ' + t.total_messages + ' 条发言' + (t.sampled_count ? '，已取样 ' + t.sampled_count + ' 条' : '') + '）' : '';
+            if (pText) pText.textContent = phase + detail;
+            if (status) status.textContent = '总结中，可以先去干别的，回来就好';
+          } else if (t.status === 'completed') {
+            stopUserstylePoll();
+            if (pText) pText.textContent = '完成！共 ' + t.total_messages + ' 条发言，取样 ' + t.sampled_count + ' 条。';
+            if (status) status.textContent = '总结完成，正在载入新草稿…';
+            if (btn) btn.disabled = false;
+            // v2：画像随新快照刷新
+            USERSTYLE_PROFILE_LOADED = false;
+            loadUserstyleProfile();
+            loadUserstyleData(); // 刷新拿草稿
+          } else if (t.status === 'failed') {
+            stopUserstylePoll();
+            if (btn) btn.disabled = false;
+            renderUserstyleTaskState({ status: 'failed', error: t.error });
+            toast('总结失败：' + formatUserstyleTaskError(t.error), true);
+          }
+        })
+        .catch(function () { /* 轮询失败等下一轮 */ });
+    }, 2000);
+  }
+
+  function stopUserstylePoll() {
+    if (userstylePollTimer) { clearInterval(userstylePollTimer); userstylePollTimer = null; }
+    var progress = $('userstyle-progress');
+    if (progress) progress.hidden = true;
+  }
+
+  function revertUserstyleTemplate(version) {
+    apiFetch(withAuth(API + '/api/style-template/revert'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: version }),
+      signal: AbortSignal.timeout(8000),
+    }).then(function (r) { return r.json(); })
+      .then(function (result) {
+        if (!result.ok) throw new Error(result.error || '回退失败');
+        toast('已返回上一版');
+        loadUserstyleData();
+      })
+      .catch(function (e) { toast('回退失败：' + e.message, true); });
+  }
+
+  function bindUserstyleActions() {
+    // v0.31.0：模型未配置提示条里的「去配置」→ 打开设置弹窗并定位到内容分析模型
+    var cfgBtn = $('userstyle-model-config-btn');
+    if (cfgBtn && !cfgBtn.dataset.bound) {
+      cfgBtn.dataset.bound = '1';
+      cfgBtn.addEventListener('click', function () {
+        openSettings();
+        var sec = $('text-settings-section');
+        if (sec && sec.scrollIntoView) sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    }
+    var startBtn = $('userstyle-start-btn');
+    if (startBtn && !startBtn.dataset.bound) {
+      startBtn.dataset.bound = '1';
+      startBtn.addEventListener('click', startUserstyleTask);
+    }
+    // v0.31.1：返回上一版（取历史最近一版；可逆，再点一次换回来）
+    var revertBtn = $('userstyle-revert-btn');
+    if (revertBtn && !revertBtn.dataset.bound) {
+      revertBtn.dataset.bound = '1';
+      revertBtn.addEventListener('click', function () {
+        var tpl = userstyleData && userstyleData.template;
+        var last = (tpl && tpl.history || []).slice(-1)[0];
+        if (!last) return;
+        revertUserstyleTemplate(last.version);
+      });
+    }
+    var confirmBtn = $('userstyle-confirm-btn');
+    if (confirmBtn && !confirmBtn.dataset.bound) {
+      confirmBtn.dataset.bound = '1';
+      confirmBtn.addEventListener('click', confirmUserstyleDraft);
+    }
+    // v0.30.6：自动精简按钮
+    var shortenBtn = $('userstyle-shorten-btn');
+    if (shortenBtn && !shortenBtn.dataset.bound) {
+      shortenBtn.dataset.bound = '1';
+      shortenBtn.addEventListener('click', shortenUserstyleDraft);
+    }
+    var clearBtn = $('userstyle-clear-btn');
+    if (clearBtn && !clearBtn.dataset.bound) {
+      clearBtn.dataset.bound = '1';
+      clearBtn.addEventListener('click', function () {
+        customConfirm('确定清空「' + userstyleName() + '」模板和历史版本吗？\n已选该方言的助手会失去效果（重启 Hana 后生效）。', function () {
+          apiFetch(withAuth(API + '/api/style-template/clear'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+            signal: AbortSignal.timeout(5000),
+          }).then(function (r) { return r.json(); })
+            .then(function (result) {
+              if (!result.ok) throw new Error(result.error || '清空失败');
+              toast('模板已清空');
+              loadUserstyleData();
+            })
+            .catch(function (e) { toast('清空失败：' + e.message, true); });
+        });
+      });
+    }
+    // v0.31.1：「从哪些助手学」展开/收起时切换箭头方向
+    var agentsDetails = $('userstyle-agents-details');
+    if (agentsDetails && !agentsDetails.dataset.bound) {
+      agentsDetails.dataset.bound = '1';
+      agentsDetails.addEventListener('toggle', function () {
+        var arrow = $('userstyle-agents-arrow');
+        if (arrow) arrow.textContent = agentsDetails.open ? '▴' : '▾';
+      });
+    }
+  }
+
+  // ═══════════════════════════════════
+  //  多选模式 + 批量操作
+  // ═══════════════════════════════════
+  function toggleBatchMode() {
+    batchMode = !batchMode;
+    document.body.classList.toggle('batch-mode', batchMode);
+    var btn = $('btnToggleMulti');
+    if (btn) {
+      btn.textContent = batchMode ? '退出多选' : '多选';
+      btn.style.background = batchMode ? 'var(--primary-light)' : '';
+      btn.style.borderColor = batchMode ? 'var(--primary)' : '';
+      btn.style.color = batchMode ? 'var(--primary)' : '';
+    }
+    var toolbar = $('batch-toolbar');
+    if (toolbar) toolbar.hidden = !batchMode;
+    if (!batchMode) clearSelection();
+  }
+
+  function toggleSelect(id) {
+    if (selectedIds.has(id)) selectedIds.delete(id);
+    else selectedIds.add(id);
+    var card = document.querySelector('.sticker-card[data-id="' + id + '"]');
+    if (card) card.classList.toggle('selected', selectedIds.has(id));
+    updateBatchCount();
+  }
+
+  function clearSelection() {
+    selectedIds.clear();
+    document.querySelectorAll('.sticker-card.selected').forEach(function (c) { c.classList.remove('selected'); });
+    updateBatchCount();
+  }
+
+  function selectAllVisible() {
+    document.querySelectorAll('#sticker-grid .sticker-card').forEach(function (c) {
+      var id = c.getAttribute('data-id');
+      if (id && !selectedIds.has(id)) { selectedIds.add(id); c.classList.add('selected'); }
+    });
+    updateBatchCount();
+  }
+
+  async function selectAllUntagged() {
+    var button = $('batch-select-untagged');
+    if (button) button.disabled = true;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/list'), { signal: AbortSignal.timeout(5000) });
+      var data = await resp.json();
+      if (!resp.ok || !data.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+      var untagged = (data.data || []).filter(function (sticker) { return !sticker.tagged_at; });
+      selectedIds.clear();
+      for (var i = 0; i < untagged.length; i++) selectedIds.add(untagged[i].id);
+      document.querySelectorAll('#sticker-grid .sticker-card').forEach(function (card) {
+        card.classList.toggle('selected', selectedIds.has(card.getAttribute('data-id')));
+      });
+      updateBatchCount();
+      toast(untagged.length ? '已选中全部 ' + untagged.length + ' 张未识图表情包' : '图库里没有未识图的表情包');
+    } catch (e) {
+      toast('读取未识图列表失败：' + e.message, true);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  function updateBatchCount() {
+    var el = $('batch-count');
+    if (el) el.textContent = selectedIds.size;
+  }
+
+  async function batchDelete() {
+    if (selectedIds.size === 0) { toast('请先勾选表情包', true); return; }
+    var ids = Array.from(selectedIds);
+    customConfirm('确定要批量删除 ' + ids.length + ' 张表情包吗？', async function () {
+      var ok = 0, fail = 0;
+      for (var i = 0; i < ids.length; i++) {
+        try {
+          var resp = await apiFetch(withAuth(API + '/api'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'delete', id: ids[i] }),
+          });
+          var d = await resp.json();
+          if (d.ok) ok++; else fail++;
+        } catch { fail++; }
+      }
+      clearSelection();
+      await refreshStickersAndGroups();
+      toast(ok + ' 张已删除' + (fail ? '（' + fail + ' 张失败）' : ''), fail > 0);
+    });
+  }
+
+  function closeBatchModal() {
+    var modal = $('batch-modal');
+    if (modal) { modal.hidden = true; modal.style.display = ''; }
+    stopBatchPolling();
+    currentBatchTaskId = null;
+    batchFailureView = false;
+    batchViewGeneration++;
+  }
+
+  function addModalCloseButton() {
+    var box = $('batch-modal').querySelector('.modal-box');
+    if (!box) return;
+    var existing = box.querySelector('#batch-modal-close');
+    if (existing) return;
+    var btn = document.createElement('button');
+    btn.id = 'batch-modal-close';
+    btn.className = 'modal-close';
+    btn.textContent = '✕';
+    btn.style.cssText = 'position:absolute;top:14px;right:16px;z-index:10;width:30px;height:30px;border:1px solid var(--border);border-radius:50%;background:var(--surface);cursor:pointer;font-size:16px;line-height:1;color:var(--text-muted);font-family:inherit;display:flex;align-items:center;justify-content:center;padding:0';
+    btn.onclick = closeBatchModal;
+    box.appendChild(btn);
+  }
+
+  // ═══════════════════════════════════
+  //  异步批量识图
+  // ═══════════════════════════════════
+  var batchPollTimer = null;
+  var currentBatchTaskId = null;
+  var batchTaskNotified = {};
+  var batchTasksData = [];
+  var batchFailuresData = { total: 0, items: [] };
+  var batchFailureView = false;
+  var batchFailureRetryBusy = false;
+  var batchViewGeneration = 0;
+  var batchTasksRequestGeneration = 0;
+
+  async function batchAutoTag() {
+    if (selectedIds.size === 0) { toast('请先勾选表情包', true); return; }
+    var ids = Array.from(selectedIds);
+    batchFailureView = false;
+    batchViewGeneration++;
+    if ($('batch-failure-actions')) $('batch-failure-actions').hidden = true;
+    // v0.25.1 - 不再限制 200 张：任务本身是流式队列，几百张一个任务直接跑，用户不用自己分批
+
+    var modal = $('batch-modal');
+    var summary = $('batch-summary');
+    var list = $('batch-list');
+    modal.removeAttribute('hidden');
+    modal.hidden = false;
+    modal.style.cssText = 'display:flex;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(45,58,53,.45);align-items:center;justify-content:center;z-index:99999;pointer-events:auto';
+    addModalCloseButton();
+
+    summary.innerHTML = '<div class="batch-progress"><span class="spinner"></span>正在创建识图任务...</div>';
+    list.innerHTML = '';
+
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-auto-tag'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sticker_ids: ids, concurrency: 5 }),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        currentBatchTaskId = data.data.taskId;
+        if (batchPollTimer) clearInterval(batchPollTimer);
+        batchPollTimer = setInterval(function () { pollBatchTask(currentBatchTaskId); }, 1500);
+        pollBatchTask(currentBatchTaskId);
+      } else {
+        summary.innerHTML = '<div style="color:var(--danger);padding:20px">创建任务失败：' + escHtml(data.error || '') + '</div>';
+      }
+    } catch (e) {
+      summary.innerHTML = '<div style="color:var(--danger);padding:20px">网络错误：' + escHtml(e.message) + '</div>';
+    }
+  }
+
+  function stopBatchPolling() {
+    if (batchPollTimer) { clearInterval(batchPollTimer); batchPollTimer = null; }
+  }
+
+  // v0.25.1 - 轮询走精简接口（不拉 results，省带宽）；任务结束后拉一次完整数据渲染结果视图
+  async function pollBatchTask(taskId) {
+    var generation = batchViewGeneration;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-task/' + encodeURIComponent(taskId)), { cache: 'no-store' });
+      var data = await resp.json();
+      if (generation !== batchViewGeneration || batchFailureView || currentBatchTaskId !== taskId) return;
+      if (!data.ok) {
+        $('batch-list').innerHTML = '<div style="color:var(--danger);padding:20px">❌ ' + escHtml(data.error || '任务不存在') + '</div>';
+        $('batch-summary').innerHTML = '';
+        stopBatchPolling();
+        return;
+      }
+      var t = data.data;
+      if (t.status === 'running') {
+        // v0.26.0：处理数已达总数但状态还是 running（worker 收尾中）时，直接拉完整结果渲染，
+        // 不等状态切换——否则用户只看到 100% 进度条没有结果图，要重开弹窗才正常
+        if (t.total > 0 && (t.completed_count + t.failed_count) >= t.total) {
+          stopBatchPolling();
+          await loadFullBatchResult(taskId);
+          return;
+        }
+        renderBatchProgress(t);
+        return;
+      }
+      // 结束态：拉完整数据渲染结果视图
+      stopBatchPolling();
+      await loadFullBatchResult(taskId);
+    } catch (e) {
+      console.warn('[batch] poll error:', e);
+    }
+  }
+
+  // v0.26.0 - 抽取：拉取任务完整数据并渲染结果视图（结束态与收尾兜底共用）
+  async function loadFullBatchResult(taskId) {
+    var generation = batchViewGeneration;
+    try {
+      var fullResp = await apiFetch(withAuth(API + '/api/batch-task/' + encodeURIComponent(taskId) + '?full=1'), { cache: 'no-store' });
+      var fullData = await fullResp.json();
+      if (generation !== batchViewGeneration || batchFailureView || currentBatchTaskId !== taskId) return;
+      if (fullData.ok) {
+        renderBatchResultView(fullData.data);
+      } else {
+        $('batch-list').innerHTML = '<div style="color:var(--danger);padding:20px">❌ ' + escHtml(fullData.error || '读取任务失败') + '</div>';
+      }
+    } catch (e2) {
+      if (generation !== batchViewGeneration || batchFailureView || currentBatchTaskId !== taskId) return;
+      console.warn('[batch] fetch full detail error:', e2);
+      $('batch-list').innerHTML = '<div style="color:var(--danger);padding:20px">❌ 读取任务详情失败</div>';
+    }
+  }
+
+  // ═══ 进度视图（任务进行中）：一条大进度条 + 正在处理的几张图，不渲染全部 ═══
+  function renderBatchProgress(t) {
+    var processed = t.completed_count + t.failed_count;
+    var pct = t.total > 0 ? Math.round(processed / t.total * 100) : 0;
+    var html = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">';
+    html += '<div style="flex:1;min-width:200px">';
+    html += '<div style="font-size:13px;color:var(--primary-dark);margin-bottom:6px">';
+    html += '已完成 <b style="color:var(--primary);font-size:16px">' + processed + '</b> / ' + t.total + ' 张';
+    if (t.completed_count > 0) html += ' · 成功 <b style="color:var(--success)">' + t.completed_count + '</b>';
+    if (t.failed_count > 0) html += ' · 失败 <b style="color:var(--danger)">' + t.failed_count + '</b>';
+    html += '</div>';
+    html += '<div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:var(--primary);transition:width .3s"></div></div>';
+    html += '</div>';
+    html += '<div style="display:flex;flex-direction:column;gap:8px;align-items:stretch;min-width:92px;margin-left:auto;flex-shrink:0">';
+    if (t.failed_count > 0) {
+      html += '<button class="btn btn-secondary" id="batch-retry-failed-live" data-task-id="' + escHtml(t.id) + '" style="font-size:12px;width:100%;border-color:var(--danger);color:var(--danger)">重试失败 (' + t.failed_count + ')</button>';
+    }
+    html += '<button class="btn btn-secondary" id="batch-cancel-task" data-task-id="' + escHtml(t.id) + '" style="font-size:12px;width:100%">取消任务</button>';
+    html += '</div></div>';
+    $('batch-summary').innerHTML = html;
+
+    var listHtml = '';
+    var currentIds = Array.isArray(t.current_ids) ? t.current_ids : [];
+    if (currentIds.length > 0) {
+      listHtml += '<div class="batch-current-thumbs">';
+      for (var i = 0; i < currentIds.length; i++) {
+        var imgUrl = withAuth(API + '/api/image?id=' + encodeURIComponent(currentIds[i]));
+        listHtml += '<img src="' + imgUrl + '" title="正在识别这张..." alt="">';
+      }
+      listHtml += '</div>';
+    } else if (t.pending_count > 0) {
+      listHtml += '<div class="batch-progress-tip">排队中，马上开始...</div>';
+    }
+    $('batch-list').innerHTML = listHtml || '<div class="batch-progress-tip">就绪</div>';
+  }
+
+  // ═══ 结果视图（任务结束）：统计 + 一键全部应用 + 结果网格 ═══
+  var currentResultTask = null; // 当前结果视图对应的完整任务数据
+
+  function renderBatchResultView(task) {
+    currentResultTask = task;
+    var appliedSet = new Set(Array.isArray(task.applied) ? task.applied : []);
+    var pendingApply = (task.completed || []).filter(function (id) { return !appliedSet.has(id); });
+    var failedList = task.failed || [];
+    var cancelled = task.status === 'cancelled';
+    var statusLabel = cancelled ? '已取消' : (task.status === 'failed' ? '失败' : '已完成');
+    var statusColor = cancelled ? 'var(--text-muted)' : (task.status === 'failed' ? 'var(--danger)' : 'var(--success)');
+    // v0.34.37 - 整批都应用完（手动或自动）时保留结果展示，并给一句明确的去向交代
+    var appliedCount = appliedSet.size;
+    var allApplied = appliedCount > 0 && pendingApply.length === 0;
+
+    var html = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">';
+    html += '<div style="flex:1;min-width:200px">';
+    html += '<div style="font-size:13px;color:var(--text);margin-bottom:4px">';
+    html += '<b style="color:' + statusColor + '">' + statusLabel + '</b>';
+    html += ' · 成功 <b style="color:var(--success)">' + (task.completed || []).length + '</b>';
+    if (failedList.length > 0) html += ' · 失败 <b style="color:var(--danger)">' + failedList.length + '</b>';
+    if (cancelled && task.pending && task.pending.length > 0) html += ' · 剩余 ' + task.pending.length;
+    html += '</div>';
+    if (!cancelled) {
+      html += '<div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:100%;background:' + statusColor + '"></div></div>';
+    }
+    html += '</div>';
+    var showApply = pendingApply.length > 0;
+    var showRetry = !cancelled && failedList.length > 0;
+    if (showApply || showRetry) {
+      html += '<div style="display:flex;flex-direction:column;gap:8px;align-items:stretch;min-width:92px;margin-left:auto;flex-shrink:0">';
+      if (showApply) html += '<button class="btn btn-secondary" id="batch-apply-all" style="border-color:var(--success);color:var(--success);width:100%">全部应用 (' + pendingApply.length + ')</button>';
+      if (showRetry) html += '<button class="btn btn-secondary" id="batch-retry-failed" style="border-color:var(--danger);color:var(--danger);width:100%">全部重试</button>';
+      html += '</div>';
+    }
+    // v0.34.37 - 写入完成后明确告知，否则自动应用时用户不知道结果去哪儿了
+    if (allApplied && !cancelled) {
+      html += '<div style="flex-basis:100%;font-size:12.5px;color:var(--success);background:rgba(93,174,142,.1);border-radius:8px;padding:6px 10px;margin-top:6px">'
+        + '✅ ' + appliedCount + ' 张识别结果已写入图库：标题、情绪、场景、关键词都存好了。'
+        + '</div>';
+    }
+    html += '</div>';
+    $('batch-summary').innerHTML = html;
+
+    var listHtml = '<div class="batch-result-grid">';
+    for (var i = 0; i < (task.completed || []).length; i++) {
+      var cid = task.completed[i];
+      // v0.25.1 - 已应用的项不再展示：处理完了就退场，只留还没处理完的；
+      // v0.34.37 - 但整批都应用完时保留展示，否则弹窗只剩一句「没有可显示的结果」
+      if (appliedSet.has(cid) && !allApplied) continue;
+      listHtml += renderBatchGridItem(cid, task.results[cid], appliedSet.has(cid) ? 'applied' : 'success');
+    }
+    for (var j = 0; j < failedList.length; j++) {
+      var f = failedList[j];
+      listHtml += renderBatchGridItem(f.id, { ok: false, error: f.error }, 'failed');
+    }
+    listHtml += '</div>';
+    $('batch-list').innerHTML = listHtml || '<div class="batch-progress-tip">没有可显示的结果</div>';
+    bindBatchGridActions();
+  }
+
+  // ═══ 结果网格项（轻量：缩略图 + 描述 + 标签 + 应用）═══
+  function renderBatchGridItem(id, result, status) {
+    var sticker = allStickers.find(function (s) { return s.id === id; });
+    // v0.26.0 - 描述优先用识别结果（粘贴导入的图原名是「粘贴图片」，识别完应显示识别的标题）
+    var sugDesc = (result && result.ok && result.data && result.data.description) ? result.data.description : '';
+    var desc = sugDesc || (sticker ? sticker.description : id);
+    var imgUrl = withAuth(API + '/api/image?id=' + encodeURIComponent(id));
+    var html = '<div class="batch-grid-item" data-id="' + escHtml(id) + '" data-status="' + status + '">';
+    html += '<img loading="lazy" src="' + imgUrl + '" onerror="this.style.display=\'none\'" alt="">';
+    html += '<div class="bgi-desc" title="' + escHtml(desc) + '">' + escHtml(desc) + '</div>';
+    if (status === 'success' || status === 'applied') {
+      var sug = result && result.ok ? result.data : null;
+      if (sug) {
+        var tagHtml = '';
+        var emos = sug.emotion || [];
+        for (var ei = 0; ei < Math.min(emos.length, 3); ei++) {
+          tagHtml += '<span>' + escHtml(emos[ei]) + '</span>';
+        }
+        if (emos.length > 3) tagHtml += '<span>+' + (emos.length - 3) + '</span>';
+        if (tagHtml) html += '<div class="bgi-tags">' + tagHtml + '</div>';
+        // v0.26.0 - 编辑区确认按钮叫「应用」不叫「保存」（与应用语义统一，不再混淆）
+        html += '<div class="bgi-edit" hidden>'
+          + '<input class="bgi-edit-desc" placeholder="描述" value="' + escHtml(sug.description || '') + '">'
+          + '<input class="bgi-edit-semantic" type="hidden" value="' + escHtml(sug.semantic_description || '') + '">'
+          + '<input class="bgi-edit-emotion" placeholder="情绪（逗号分隔）" value="' + escHtml((sug.emotion || []).join(', ')) + '">'
+          + '<input class="bgi-edit-scene" placeholder="场景（逗号分隔）" value="' + escHtml((sug.scene || []).join(', ')) + '">'
+          + '<input class="bgi-edit-keywords" placeholder="关键词（逗号分隔）" value="' + escHtml((sug.keywords || []).join(', ')) + '">'
+          + '<div class="bgi-edit-actions">'
+          + '<button data-g-act="edit-cancel">取消</button>'
+          + '<button data-g-act="edit-confirm" style="border-color:var(--primary);color:var(--primary)">应用</button>'
+          + '</div></div>';
+        html += '<div class="bgi-actions">';
+        if (status === 'success') html += '<button data-g-act="apply" class="apply">应用</button>';
+        html += '<button data-g-act="edit">编辑</button>';
+        html += '</div>';
+        html += '<div class="bgi-status ' + (status === 'applied' ? '' : 'pending') + '">' + (status === 'applied' ? '已应用' : '待应用') + '</div>';
+      } else {
+        html += '<div class="bgi-err">结果缺失</div>';
+        html += '<div class="bgi-actions"><button data-g-act="retry">重试</button></div>';
+      }
+    } else if (status === 'failed') {
+      html += '<div class="bgi-err">' + escHtml(result.error || '识别失败') + '</div>';
+      html += '<div class="bgi-actions"><button data-g-act="retry" style="border-color:var(--danger);color:var(--danger)">重试</button></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function bindBatchGridActions() {
+    var list = $('batch-list');
+    if (!list || list.__bound) return;
+    list.__bound = true;
+    list.addEventListener('click', function (e) {
+      var btn = e.target.closest('button[data-g-act]');
+      if (!btn) return;
+      var item = btn.closest('.batch-grid-item');
+      if (!item) return;
+      var act = btn.getAttribute('data-g-act');
+      var id = item.getAttribute('data-id');
+      if (act === 'apply') {
+        applyGridItem(item, id);
+      } else if (act === 'edit') {
+        var editArea = item.querySelector('.bgi-edit');
+        if (editArea) editArea.hidden = !editArea.hidden;
+      } else if (act === 'edit-cancel') {
+        var ea = item.querySelector('.bgi-edit');
+        if (ea) ea.hidden = true;
+      } else if (act === 'edit-confirm') {
+        var ea2 = item.querySelector('.bgi-edit');
+        if (!ea2) return;
+        var customTags = {
+          description: ea2.querySelector('.bgi-edit-desc').value.trim(),
+          semantic_description: (ea2.querySelector('.bgi-edit-semantic') || {}).value || '',
+          emotion: ea2.querySelector('.bgi-edit-emotion').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+          scene: ea2.querySelector('.bgi-edit-scene').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+          keywords: ea2.querySelector('.bgi-edit-keywords').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+        };
+        applyGridItem(item, id, customTags);
+      } else if (act === 'retry') {
+        retryGridItem(id, item);
+      }
+    });
+  }
+
+  // v0.25.1 - 应用成功后该项直接从网格退场，不再留在原地
+  function setGridItemApplied(item, id) {
+    selectedIds.delete(id);
+    var card = document.querySelector('.sticker-card[data-id="' + id + '"]');
+    if (card) card.classList.remove('selected');
+    updateBatchCount();
+    if (item && item.parentNode) item.parentNode.removeChild(item);
+  }
+
+  async function markBatchItemsApplied(taskId, ids) {
+    if (!taskId || !ids.length) return false;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-task/' + encodeURIComponent(taskId) + '/applied'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sticker_ids: ids }),
+      });
+      var data = await resp.json();
+      return !!data.ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // v0.25.1 - 应用单张（走批量接口一次写 meta；无自定义标签时用识别结果原样）
+  async function applyGridItem(item, id, customTags) {
+    var task = currentResultTask;
+    var tags;
+    if (customTags) {
+      tags = customTags;
+    } else {
+      var sug = { description: '', semantic_description: '', emotion: [], scene: [], keywords: [] };
+      var r = task && task.results ? task.results[id] : null;
+      if (r && r.ok) {
+        sug.description = r.data.description;
+        sug.semantic_description = r.data.semantic_description || '';
+        sug.emotion = r.data.emotion;
+        sug.scene = r.data.scene;
+        sug.keywords = r.data.keywords;
+      }
+      tags = sug;
+    }
+    try {
+      var resp = await apiFetch(withAuth(API + '/api'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'batch_update', items: [Object.assign({ id: id }, tags)] }),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        if (task) {
+          await markBatchItemsApplied(task.id, [id]);
+          task.applied = task.applied || [];
+          task.applied.push(id);
+        }
+        var sticker = allStickers.find(function (s) { return s.id === id; });
+        if (sticker) {
+          sticker.tagged_at = new Date().toISOString();
+          if (tags.description) sticker.description = tags.description;
+        }
+        setGridItemApplied(item, id);
+        maybeCloseResultIfDone();
+        toast('已应用');
+      } else {
+        toast('应用失败: ' + (data.error || ''), true);
+      }
+    } catch (e) {
+      toast('应用出错: ' + e.message, true);
+    }
+  }
+
+  // v0.25.1 - 重试成功后清除旧任务的失败记录（失败项已由新任务接管）
+  async function clearRetriedFromTask(taskId, ids) {
+    if (!taskId || !ids || !ids.length) return;
+    try {
+      await apiFetch(withAuth(API + '/api/batch-task/' + encodeURIComponent(taskId) + '/retried'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sticker_ids: ids }),
+      });
+    } catch (e) { console.warn('[batch] mark retried error:', e); }
+  }
+
+  async function retryGridItem(id, item) {
+    if (batchFailureView) { await retryBatchFailures([id]); return; }
+    var button = item && item.querySelector('[data-g-act="retry"]');
+    if (button) { button.disabled = true; button.textContent = '加入中...'; }
+    var oldTaskId = currentResultTask ? currentResultTask.id : null;
+    var taskId = await enqueueTagTask([id], { message: '已创建重试任务', openDetail: true });
+    if (taskId && oldTaskId) await clearRetriedFromTask(oldTaskId, [id]);
+    if (!taskId && button) { button.disabled = false; button.textContent = '重试'; }
+  }
+
+  // v0.25.1 - 一键全部应用：所有识别成功且未应用的标签一次写库
+  async function applyAllBatchResult() {
+    var task = currentResultTask;
+    if (!task) { toast('任务数据未加载', true); return; }
+    var appliedSet = new Set(Array.isArray(task.applied) ? task.applied : []);
+    var pending = (task.completed || []).filter(function (id) { return !appliedSet.has(id); });
+    if (pending.length === 0) { toast('没有待应用的项', true); return; }
+    var items = [];
+    for (var i = 0; i < pending.length; i++) {
+      var id = pending[i];
+      var r = task.results[id];
+      if (!r || !r.ok) continue;
+      items.push({
+        id: id,
+        description: r.data.description || '',
+        semantic_description: r.data.semantic_description || '',
+        emotion: r.data.emotion || [],
+        scene: r.data.scene || [],
+        keywords: r.data.keywords || [],
+      });
+    }
+    if (items.length === 0) { toast('没有可应用的识别结果', true); return; }
+    try {
+      var resp = await apiFetch(withAuth(API + '/api'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'batch_update', items: items }),
+        signal: AbortSignal.timeout(30000),
+      });
+      var data = await resp.json();
+      if (!data.ok) { toast('应用失败: ' + (data.error || ''), true); return; }
+      await markBatchItemsApplied(task.id, items.map(function (it) { return it.id; }));
+      task.applied = Array.from(new Set([...(task.applied || []), ...items.map(function (it) { return it.id; })]));
+      var now = new Date().toISOString();
+      var idSet = {};
+      items.forEach(function (it) { idSet[it.id] = true; });
+      allStickers.forEach(function (s) { if (idSet[s.id]) s.tagged_at = now; });
+      toast('已应用 ' + items.length + ' 张' + (task.failed.length ? '（' + task.failed.length + ' 张失败未应用）' : ''));
+      refreshBatchResultView();
+    } catch (e) {
+      toast('应用出错: ' + e.message, true);
+    }
+  }
+
+  // v0.25.1 - 任务没有待处理项时（全部应用且无失败），弹窗自动关闭，任务退场
+  function maybeCloseResultIfDone() {
+    var task = currentResultTask;
+    if (!task) return;
+    var appliedSet = new Set(task.applied || []);
+    var pendingApply = (task.completed || []).filter(function (id) { return !appliedSet.has(id); });
+    if (pendingApply.length === 0 && (task.failed || []).length === 0) {
+      var doneCount = (task.applied || []).length;
+      var generation = batchViewGeneration;
+      setTimeout(function () {
+        if (generation !== batchViewGeneration || batchFailureView) return;
+        closeBatchModal();
+        toast(doneCount > 0 ? '识别结果已写入图库（' + doneCount + ' 张）' : '已全部完成');
+      }, 400);
+    }
+  }
+
+  async function refreshBatchResultView() {
+    if (!currentResultTask) return;
+    var generation = batchViewGeneration;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-task/' + encodeURIComponent(currentResultTask.id) + '?full=1'), { cache: 'no-store' });
+      var data = await resp.json();
+      if (generation !== batchViewGeneration || batchFailureView) return;
+      if (data.ok) { renderBatchResultView(data.data); checkBatchTasks(); maybeCloseResultIfDone(); }
+    } catch (e) { console.warn('[batch] refresh result error:', e); }
+  }
+
+  // v0.34.34 - 运行中重试失败项：不取消整个任务，把失败的图放回队列继续识别
+  async function retryFailedLive(taskId) {
+    if (!taskId) return;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-task/' + encodeURIComponent(taskId) + '/retry-failed'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        toast(data.message || '已重新排队');
+        pollBatchTask(taskId);
+      } else {
+        toast('重试失败: ' + (data.error || ''), true);
+      }
+    } catch (e) {
+      toast('重试出错: ' + e.message, true);
+    }
+  }
+
+  async function cancelBatchTask(taskId) {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-task/' + encodeURIComponent(taskId) + '/cancel'), { method: 'POST' });
+      var data = await resp.json();
+      if (data.ok) { toast('任务已取消'); pollBatchTask(taskId); checkBatchTasks(); }
+      else { toast('取消失败: ' + (data.error || ''), true); }
+    } catch (e) { toast('取消出错: ' + e.message, true); }
+  }
+
+  // v0.25.1 - 全部重试：从当前结果视图的任务数据里收集失败项，成功后清旧任务失败记录
+  async function retryAllFailedBatchResult() {
+    var task = currentResultTask;
+    if (!task || !task.failed || task.failed.length === 0) { toast('没有失败的项需要重试', true); return; }
+    var ids = task.failed.map(function (f) { return f.id; });
+    var newTaskId = await enqueueTagTask(ids, { message: '已创建全部重试任务，共 ' + ids.length + ' 张', openDetail: true });
+    if (newTaskId) await clearRetriedFromTask(task.id, ids);
+  }
+
+  // ═══════════════════════════════════
+  //  后台任务角标
+  // ═══════════════════════════════════
+  async function checkBatchTasks() {
+    var requestGeneration = ++batchTasksRequestGeneration;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-tasks'));
+      var data = await resp.json();
+      if (requestGeneration !== batchTasksRequestGeneration) return;
+      if (!resp.ok || !data.ok || !Array.isArray(data.data) || !data.failures) return;
+      batchTasksData = data.data;
+      var failuresChanged = JSON.stringify(batchFailuresData) !== JSON.stringify(data.failures);
+      batchFailuresData = data.failures;
+      renderBatchTasksBadge(data.data, data.failures);
+      if (batchFailureView && failuresChanged && !batchFailureRetryBusy) renderBatchFailures(data.failures);
+
+      for (var i = 0; i < data.data.length; i++) {
+        var t = data.data[i];
+        if (t.status !== 'running' && t.status !== 'cancelled' && !batchTaskNotified[t.id]) {
+          batchTaskNotified[t.id] = true;
+          if (t.status === 'completed') {
+            var notApplied = t.completed - t.applied;
+            if (t.failed > 0) toast('批量识图完成：' + t.completed + ' 张成功，' + t.failed + ' 张失败', false);
+            else if (t.completed > 0) toast('批量识图完成：' + t.completed + ' 张都成功', false);
+            // v0.34.37 - 还有没写入图库的，别让提示一闪而过就没了
+            if (notApplied > 0) {
+              setTimeout(function () {
+                toast('还有 ' + notApplied + ' 张识别结果没写进图库，点图库上方的提醒保存', true);
+              }, 1200);
+            }
+          } else if (t.status === 'failed') {
+            toast('批量识图失败，请查看详情', true);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[batch] checkBatchTasks error:', e.message);
+    }
+  }
+
+  // v0.25.1 - 角标反映「点开会看到什么」：第一个正在跑的任务；全部待应用任务的聚合数量；
+  // 全部失败任务的聚合数量。数字和弹窗内容一致，历史任务不会累加进来。
+  function renderBatchTasksBadge(tasks, failures) {
+    var badge = $('batch-tasks-badge');
+    if (!badge) return;
+    for (var i = 0; i < tasks.length; i++) {
+      var t = tasks[i];
+      if (t.status === 'running') {
+        badge.hidden = false;
+        badge.className = 'badge-btn';
+        var processed = t.completed + t.failed;
+        badge.innerHTML = '识图中 ' + processed + '/' + t.total;
+        badge.style.borderColor = 'var(--primary)';
+        badge.style.color = 'var(--primary-dark)';
+        return;
+      }
+    }
+    // v0.26.0 - 聚合所有任务的待应用数（多任务时角标显示总数，不再只显示第一个任务）
+    var pendingTotal = 0;
+    for (var j = 0; j < tasks.length; j++) {
+      var t2 = tasks[j];
+      if (t2.status === 'completed' && t2.applied < t2.completed) {
+        pendingTotal += (t2.completed - t2.applied);
+      }
+    }
+    if (pendingTotal > 0) {
+      badge.hidden = false;
+      // v0.34.37 - 识别结果没写进图库是要用户动手的事，角标改成告警态并直接说明点它干嘛
+      badge.className = 'badge-btn is-alert';
+      badge.innerHTML = '⚠️ ' + pendingTotal + ' 张识别结果未写入 · 点这里保存';
+      return;
+    }
+    // 数字与点开的清单同源：当前仍失败的图片去重计数。
+    var failedTotal = failures ? failures.total : 0;
+    if (failedTotal > 0) {
+      badge.hidden = false;
+      badge.className = 'badge-btn';
+      badge.innerHTML = failedTotal + ' 张识别失败';
+      badge.style.borderColor = 'var(--danger)';
+      badge.style.color = 'var(--danger)';
+      return;
+    }
+    badge.hidden = true;
+    badge.className = 'badge-btn';
+  }
+
+  // v0.25.1 - 角标点击直达：正在跑的任务 → 进度弹窗；有结果待应用 → 结果弹窗；
+  // 有失败项 → 失败结果弹窗。
+  function openBatchTasksModal() {
+    var running = batchTasksData.filter(function (t) { return t.status === 'running'; });
+    if (running.length > 0) { openBatchTaskDetail(running[0].id); return; }
+    var pendingApply = batchTasksData.filter(function (t) { return t.status === 'completed' && t.applied < t.completed; });
+    if (pendingApply.length > 0) { openBatchTaskDetail(pendingApply[0].id); return; }
+    if (batchFailuresData.total > 0) { openBatchFailures(); return; }
+    toast('当前没有识图任务');
+  }
+
+  function openBatchTaskDetail(taskId) {
+    batchFailureView = false;
+    batchViewGeneration++;
+    currentResultTask = null;
+    if ($('batch-failure-actions')) $('batch-failure-actions').hidden = true;
+    var modal = $('batch-modal');
+    var summary = $('batch-summary');
+    var list = $('batch-list');
+    modal.removeAttribute('hidden');
+    modal.hidden = false;
+    modal.style.cssText = 'display:flex;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(45,58,53,.45);align-items:center;justify-content:center;z-index:99999;pointer-events:auto';
+    addModalCloseButton();
+    summary.innerHTML = '<div class="batch-progress"><span class="spinner"></span>加载任务详情...</div>';
+    list.innerHTML = '';
+    currentBatchTaskId = taskId;
+    if (batchPollTimer) clearInterval(batchPollTimer);
+    batchPollTimer = setInterval(function () { pollBatchTask(taskId); }, 1500);
+    pollBatchTask(taskId);
+  }
+
+  // 全局失败视图只列当前失败图，沿用结果缩略图，不混入成功项。
+  async function openBatchFailures() {
+    batchTasksRequestGeneration++;
+    stopBatchPolling();
+    currentBatchTaskId = null;
+    currentResultTask = null;
+    batchFailureView = true;
+    var generation = ++batchViewGeneration;
+    var modal = $('batch-modal');
+    modal.hidden = false;
+    modal.style.cssText = 'display:flex;position:fixed;inset:0;background:rgba(45,58,53,.45);align-items:center;justify-content:center;z-index:99999;pointer-events:auto';
+    $('batch-summary').innerHTML = '<div class="batch-progress"><span class="spinner"></span>正在读取所有失败图片...</div>';
+    $('batch-list').innerHTML = '';
+    $('batch-failure-actions').hidden = true;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-failures'), { cache: 'no-store' });
+      var data = await resp.json();
+      if (generation !== batchViewGeneration || !batchFailureView) return;
+      if (!resp.ok || !data.ok || !data.data) throw new Error(data.error || '读取失败图片失败');
+      // 本次手动刷新落定后，废弃同时在飞的自动轮询，防旧名单覆盖。
+      batchTasksRequestGeneration++;
+      batchFailuresData = data.data;
+      renderBatchTasksBadge(batchTasksData, data.data);
+      renderBatchFailures(data.data);
+    } catch (error) {
+      if (generation !== batchViewGeneration || !batchFailureView) return;
+      $('batch-summary').textContent = '读取失败图片失败：' + error.message;
+      $('batch-list').innerHTML = '';
+      $('batch-failure-actions').hidden = false;
+      $('batch-retry-all-failures').disabled = true;
+      $('batch-retry-all-failures').textContent = '全部重新识图';
+      toast('读取失败，请点击刷新列表重试', true);
+    }
+  }
+
+  function renderBatchFailures(failures) {
+    currentResultTask = null;
+    var items = failures.items || [];
+    $('batch-summary').innerHTML = '<b>当前识图失败 ' + items.length + ' 张</b><div style="font-size:12px;margin-top:4px">只列尚未成功的图片，同一张图只算一次；已在重试的图暂不列入。</div>';
+    $('batch-list').innerHTML = items.length ? '<div class="batch-result-grid">' + items.map(function (item) {
+      return renderBatchGridItem(item.id, { ok: false, error: item.error }, 'failed');
+    }).join('') + '</div>' : '<div class="batch-progress-tip">当前没有待重试的失败图片。已提交的任务会继续在后台识别。</div>';
+    $('batch-failure-actions').hidden = false;
+    var button = $('batch-retry-all-failures');
+    button.disabled = batchFailureRetryBusy || !items.length;
+    button.textContent = batchFailureRetryBusy ? '正在加入队列...' : '全部重新识图 (' + items.length + ')';
+    bindBatchGridActions();
+  }
+
+  async function retryBatchFailures(ids) {
+    if (batchFailureRetryBusy || !ids.length) return;
+    batchFailureRetryBusy = true;
+    var generation = batchViewGeneration;
+    var button = $('batch-retry-all-failures');
+    button.disabled = true;
+    button.textContent = '正在加入队列...';
+    $('batch-list').querySelectorAll('[data-g-act="retry"]').forEach(function (btn) { btn.disabled = true; });
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-failures/retry'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sticker_ids: ids }),
+      });
+      var data = await resp.json();
+      if (!resp.ok || !data.ok) throw new Error(data.error || '提交重试失败');
+      toast(data.message || '已加入重新识图队列');
+      await checkBatchTasks();
+      if (generation === batchViewGeneration && batchFailureView) renderBatchFailures(batchFailuresData);
+    } catch (error) {
+      toast('重试未确认成功：' + error.message + '；可刷新列表后再试', true);
+    } finally {
+      batchFailureRetryBusy = false;
+      if (generation === batchViewGeneration && batchFailureView) renderBatchFailures(batchFailuresData);
+    }
+  }
+
+  // ═══════════════════════════════════
+  //  初始化
+  // ═══════════════════════════════════
+  document.addEventListener('DOMContentLoaded', function () {
+    loadGroups();
+    loadStickers();
+    loadGlobalAutoImageState();
+    loadBallState();
+    loadSemanticIndexStatus();
+    checkBatchTasks();
+    updateModelGuide();
+    updateUploadBtnState();
+    autoBootBall(); // 打开插件页面自动启动悬浮球（半自动：手动关过则本次不再弹）
+
+    // v0.34.18 - 导航：首页入口点击（主卡 / 右侧入口 / 底部提示），支持键盘 Enter/Space
+    document.querySelectorAll('.home-hero[data-goto], .home-entry[data-goto], .home-preference-tip[data-goto]').forEach(function (card) {
+      var go = function () {
+        var target = card.getAttribute('data-goto');
+        showView(target);
+        if (target === 'preferences') initPreferencesView();
+        if (target === 'agent-freq') renderAgentFreq();
+        if (target === 'dialect') renderDialect();
+        if (target === 'userstyle') renderUserstyle();
+      };
+      card.addEventListener('click', go);
+      card.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+      });
+    });
+
+    // v0.34.18 - 顶栏「设置」收纳菜单：检查更新 / 反馈 / 模型设置 / 数据与迁移
+    var settingsBtn = $('btn-settings');
+    var homeMenu = $('home-menu');
+    function closeHomeMenu() {
+      if (!homeMenu) return;
+      homeMenu.hidden = true;
+      if (settingsBtn) {
+        settingsBtn.setAttribute('aria-expanded', 'false');
+        settingsBtn.classList.remove('active');
+      }
+    }
+    if (settingsBtn && homeMenu) {
+      settingsBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var willOpen = homeMenu.hidden;
+        homeMenu.hidden = !willOpen;
+        settingsBtn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+        settingsBtn.classList.toggle('active', willOpen);
+      });
+      homeMenu.addEventListener('click', function (e) { e.stopPropagation(); });
+      document.addEventListener('click', function () { if (!homeMenu.hidden) closeHomeMenu(); });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && !homeMenu.hidden) closeHomeMenu();
+      });
+    }
+
+    // v0.33.77 - 「数据与迁移」入口（v0.34.18 收进设置菜单）
+    var dataMigrationNav = $('btn-data-migration');
+    if (dataMigrationNav) dataMigrationNav.addEventListener('click', function () { closeHomeMenu(); showView('data-migration'); });
+
+    var groupManagerBtn = $('btn-group-manager');
+    if (groupManagerBtn) groupManagerBtn.addEventListener('click', openGroupManager);
+    bindGroupManagerActions();
+    var groupMembershipSaveBtn = $('save-group-membership-btn');
+    if (groupMembershipSaveBtn) groupMembershipSaveBtn.addEventListener('click', saveGroupMembership);
+    var groupMembershipCreateBtn = $('create-membership-group-btn');
+    if (groupMembershipCreateBtn) groupMembershipCreateBtn.addEventListener('click', createGroupFromMembership);
+    var groupRecognitionSaveBtn = $('save-group-recognition-btn');
+    if (groupRecognitionSaveBtn) groupRecognitionSaveBtn.addEventListener('click', saveGroupRecognition);
+    var undoGroupMigrationBtn = $('undo-group-migration');
+    if (undoGroupMigrationBtn) undoGroupMigrationBtn.addEventListener('click', undoGroupNameMigration);
+
+    // 导航：方言页 → 学我说话
+    var gotoUserstyleBtn = document.getElementById('goto-userstyle-btn');
+    if (gotoUserstyleBtn) {
+      gotoUserstyleBtn.addEventListener('click', function () {
+        showView('userstyle');
+        renderUserstyle();
+      });
+    }
+
+    // 导航：添加入库入口 -> 打开上传弹窗
+    var uploadCard = document.querySelector('.home-entry[data-action="upload"]');
+    if (uploadCard) {
+      var openUpload = function () { openModal('upload-modal'); };
+      uploadCard.addEventListener('click', openUpload);
+      uploadCard.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openUpload(); }
+      });
+    }
+
+    // 导航：返回按钮
+    document.querySelectorAll('.back-btn[data-goto]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        showView(btn.getAttribute('data-goto'));
+      });
+    });
+
+    // v0.34.18 - 模型设置进设置菜单；顶栏「设置」本身只负责开关菜单
+    if ($('guide-settings-btn')) $('guide-settings-btn').addEventListener('click', openSettings);
+    if ($('btn-model-settings')) {
+      $('btn-model-settings').addEventListener('click', function () { closeHomeMenu(); openSettings(); });
+    }
+    var autoImageToggleBtn = $('auto-image-toggle-top');
+    if (autoImageToggleBtn) autoImageToggleBtn.addEventListener('click', toggleGlobalAutoImage);
+    var ballToggleBtn = $('ball-toggle-top');
+    if (ballToggleBtn) ballToggleBtn.addEventListener('click', toggleBall);
+    // v0.19.5 - 检查更新按钮（v0.34.18 收进设置菜单）
+    if ($('btn-check-update')) {
+      $('btn-check-update').addEventListener('click', function () { closeHomeMenu(); checkUpdate(); });
+    }
+    // v0.27.1 - 反馈入口：打开 GitHub Issues（弹窗被拦时降级为复制链接）
+    var fbBtn = document.getElementById('btn-feedback');
+    if (fbBtn) fbBtn.addEventListener('click', function () {
+      closeHomeMenu();
+      var issueUrl = 'https://github.com/moononnn/hanako-biaoqingbao/issues';
+      var opened = null;
+      try { opened = window.open(issueUrl, '_blank'); } catch (e) {}
+      if (!opened) {
+        try { navigator.clipboard.writeText(issueUrl); } catch (e) {}
+        toast('已复制反馈链接，粘贴到浏览器打开即可', false);
+      }
+    });
+
+    // 弹窗关闭按钮（通用 data-close 属性）
+    document.querySelectorAll('[data-close]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var target = btn.getAttribute('data-close');
+        if (target === 'chat-modal') { closeChatModal(); return; }
+        closeModal(target);
+      });
+    });
+
+    // 弹窗点击外部关闭
+    document.querySelectorAll('.modal-overlay').forEach(function (overlay) {
+      overlay.addEventListener('click', function (e) {
+        if (e.target === overlay && overlay.id !== 'batch-modal' && overlay.id !== 'editor-modal') {
+          if (overlay.id === 'chat-modal') { closeChatModal(); return; }
+          closeModal(overlay.id);
+        }
+      });
+    });
+
+    // v0.18.0 - 聊天弹窗事件
+    bindChatModalActions();
+
+    // 设置弹窗
+    $('settings-save').addEventListener('click', saveAllSettings);
+    $('text-test-btn').addEventListener('click', testTextConfig);
+    $('jev-test-btn').addEventListener('click', testJevConfig);
+    $('jev-shadow-view-btn').addEventListener('click', viewJevShadowLog);
+    $('jev-clear-key').addEventListener('click', function () {
+      $('jev-api-key').value = '';
+      $('jev-api-key').dataset.clear = 'true';
+      $('jev-test-result').textContent = '已标记，点击「保存」后清除';
+      $('jev-test-result').style.color = 'var(--text-muted)';
+    });
+    $('vision-test-btn').addEventListener('click', testVisionConfig);
+    $('vision-source').addEventListener('change', toggleVisionBlocks);
+    // v0.34.37 - 批量识图自动应用开关（即时保存，不用点整体保存）
+    bindBatchAutoApplyToggle();
+    $('vision-provider').addEventListener('change', function () { updateVisionModelDropdown(this.value, ''); });
+    $('text-source').addEventListener('change', toggleTextBlocks);
+    $('text-provider').addEventListener('change', function () { updateTextModelDropdown(this.value, ''); });
+
+    // v0.16.0 - Embedding 配置；索引入口位于图库页
+    $('embedding-source').addEventListener('change', toggleEmbeddingBlocks);
+    $('embedding-test-btn').addEventListener('click', testEmbeddingConfig);
+
+    var embeddingIndexBtn = $('embedding-index-btn');
+    if (embeddingIndexBtn) embeddingIndexBtn.addEventListener('click', generateSemanticIndex);
+
+    // 上传弹窗
+    $('upload-btn').addEventListener('click', handleUpload);
+    $('import-zip-btn').addEventListener('click', handleImportZip);
+
+    // v0.33.77 - 完整搬家包入口移到「数据与迁移」页；图库只保留普通图片/ZIP 导入。
+    var dataMigrationExportBtn = $('data-migration-export-btn');
+    if (dataMigrationExportBtn) dataMigrationExportBtn.addEventListener('click', openExportModal);
+    var dataMigrationImportBtn = $('data-migration-import-btn');
+    var dataMigrationImportFile = $('data-migration-import-file');
+    if (dataMigrationImportBtn && dataMigrationImportFile) {
+      dataMigrationImportBtn.addEventListener('click', function () { dataMigrationImportFile.click(); });
+      dataMigrationImportFile.addEventListener('change', function () {
+        var file = this.files && this.files[0];
+        if (file) chooseMigrationZip(file);
+      });
+    }
+    var exportZipBtn = $('export-zip-btn');
+    if (exportZipBtn) exportZipBtn.addEventListener('click', handleExportZip);
+    // v0.34.17 - 导出内容勾选联动摘要与全选状态
+    var exportGroupIds = ['export-group-preference', 'export-group-style', 'export-group-dialect', 'export-group-interface', 'export-group-groups'];
+    exportGroupIds.forEach(function (id) {
+      var box = $(id);
+      if (box) box.addEventListener('change', updateExportSummary);
+    });
+    var exportRangePicker = $('export-group-picker');
+    if (exportRangePicker && exportRangePicker.dataset.bound !== '1') {
+      exportRangePicker.dataset.bound = '1';
+      // 分组复选框会在 renderExportGroupPicker 中动态重建，用事件委托保持摘要实时更新。
+      exportRangePicker.addEventListener('change', updateExportSummary);
+    }
+    var exportCheckAll = $('export-check-all');
+    if (exportCheckAll) {
+      exportCheckAll.addEventListener('change', function () {
+        exportGroupIds.forEach(function (id) {
+          var box = $(id);
+          if (box) box.checked = exportCheckAll.checked;
+        });
+        updateExportSummary();
+      });
+    }
+    ['export-scope-all', 'export-scope-groups'].forEach(function (id) {
+      var radio = $(id);
+      if (radio) radio.addEventListener('change', updateExportScope);
+    });
+    var exportPickBtn = $('export-pick-folder');
+    if (exportPickBtn) exportPickBtn.addEventListener('click', pickExportFolder);
+    var exportDefaultBtn = $('export-use-default');
+    if (exportDefaultBtn) exportDefaultBtn.addEventListener('click', function () {
+      var cfg = getExportConfig();
+      var input = $('export-dir');
+      if (input) { input.value = cfg.defaultExportDir || ''; input.focus(); }
+    });
+
+    // v0.25.1 - 左右并排两个选择入口：图片文件 / 整个文件夹（互斥，后选为准）
+    $('pick-files-btn').addEventListener('click', function () { $('upload-file').click(); });
+    $('upload-file').addEventListener('change', function () {
+      // 选了文件就清掉文件夹和粘贴选择，避免混用（后选为准）
+      resetFolderPick();
+      pastedFiles = [];
+      resetPasteZone();
+      updateUploadPickHint();
+      clearUploadResult();
+      updateUploadBtnState();
+    });
+    $('pick-folder-btn').addEventListener('click', function () { $('upload-folder').click(); });
+    $('upload-folder').addEventListener('change', function () {
+      if (!this.files || !this.files.length) return;
+      var r = collectFolderImages(this);
+      folderFiles = r.images;
+      var hint = $('upload-folder-hint');
+      if (folderFiles.length > 0) {
+        hint.textContent = '已从文件夹读取 ' + folderFiles.length + ' 张图片' + (r.skipped > 0 ? '（自动跳过 ' + r.skipped + ' 个非图片文件）' : '') + '，点「导入图片」开始';
+      } else {
+        hint.textContent = '文件夹里没找到图片（PNG/JPG/GIF/WebP/BMP）' + (r.skipped > 0 ? '，有 ' + r.skipped + ' 个其他文件被跳过' : '');
+      }
+      hint.hidden = false;
+      // 选了文件夹就清掉普通文件和粘贴选择，避免混用（后选为准）
+      $('upload-file').value = '';
+      pastedFiles = [];
+      resetPasteZone();
+      $('upload-file-hint').textContent = '支持 PNG、JPG、GIF、WebP 和 BMP，也可以整个文件夹一起选。';
+      clearUploadResult();
+      updateUploadBtnState();
+    });
+    // v0.25.1 - ZIP 选择也统一成按钮样式，选完提示文件名
+    $('pick-zip-btn').addEventListener('click', function () { $('upload-zip').click(); });
+    $('upload-zip').addEventListener('change', function () {
+      var file = this.files && this.files[0];
+      var hint = $('upload-zip-hint');
+      if (hint) hint.textContent = file ? '已选择：' + file.name + '，点「导入 ZIP」开始' : '选好后点「导入 ZIP」开始';
+      clearUploadResult();
+    });
+
+    // v0.25.1 - 粘贴导入：导入弹窗打开时，Ctrl+V 的图片直接算选中（快捷单张）
+    var pasteZone = $('paste-zone');
+    if (pasteZone) {
+      pasteZone.addEventListener('click', function () {
+        this.focus();
+        pasteZoneReady = true;
+        if (!this.classList.contains('active')) {
+          var sub = this.querySelector('.paste-zone-sub');
+          if (sub) sub.textContent = '就绪！直接按 Ctrl+V 粘贴';
+        }
+      });
+    }
+    document.addEventListener('paste', function (e) {
+      var modal = $('upload-modal');
+      if (!modal || modal.hidden) return;
+      // 步骤引导：必须先点击粘贴区，再粘贴
+      if (!pasteZoneReady) {
+        toast('请先点击上面的粘贴区，再按 Ctrl+V', true);
+        return;
+      }
+      var items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      var file = null;
+      for (var pi = 0; pi < items.length; pi++) {
+        var it = items[pi];
+        if (it.type && it.type.indexOf('image/') === 0) {
+          var f = it.getAsFile();
+          if (f) { file = f; break; }
+        }
+      }
+      if (!file) return;
+      e.preventDefault();
+      var ext = (file.type || 'image/png').split('/')[1] || 'png';
+      pastedFiles = [new File([file], '粘贴图片.' + ext, { type: file.type })];
+      // 快捷单张：粘贴时清掉文件夹和文件多选，避免混用
+      resetFolderPick();
+      var fileInput2 = $('upload-file');
+      if (fileInput2) fileInput2.value = '';
+      updateUploadPickHint();
+      clearUploadResult();
+      // 粘贴区直接显示这张图
+      if (lastPasteUrl) URL.revokeObjectURL(lastPasteUrl);
+      lastPasteUrl = URL.createObjectURL(pastedFiles[0]);
+      if (pasteZone) {
+        pasteZone.classList.add('active');
+        pasteZone.innerHTML = '<img src="' + lastPasteUrl + '" alt="粘贴的图片">'
+          + '<div class="paste-zone-title">已粘贴 1 张图片</div>'
+          + '<div class="paste-zone-sub">再粘贴会替换这张，点「导入图片」开始</div>';
+      }
+      toast('已粘贴 1 张图片，点「导入图片」开始');
+      updateUploadBtnState();
+    });
+
+    // 编辑弹窗
+    $('editor-save').addEventListener('click', saveEdit);
+    $('editor-autotag-btn').addEventListener('click', handleAutoTagEditor);
+
+    // 批量识图弹窗关闭按钮
+    var batchCloseBtn = $('batch-modal-close');
+    if (batchCloseBtn) batchCloseBtn.addEventListener('click', closeBatchModal);
+
+    // 多选模式
+    $('btnToggleMulti').addEventListener('click', toggleBatchMode);
+    $('batch-select-all').addEventListener('click', selectAllVisible);
+    $('batch-select-untagged').addEventListener('click', selectAllUntagged);
+    $('batch-clear').addEventListener('click', clearSelection);
+    $('batch-auto-tag').addEventListener('click', batchAutoTag);
+    var batchGroupsBtn = $('batch-groups');
+    if (batchGroupsBtn) batchGroupsBtn.addEventListener('click', function () { openGroupMembershipModal(Array.from(selectedIds)); });
+    $('batch-delete').addEventListener('click', batchDelete);
+
+    // 批量任务角标
+    var badge = $('batch-tasks-badge');
+    if (badge) badge.addEventListener('click', openBatchTasksModal);
+    $('batch-refresh-failures').addEventListener('click', function () { if (!batchFailureRetryBusy) openBatchFailures(); });
+    $('batch-retry-all-failures').addEventListener('click', function () {
+      retryBatchFailures(batchFailuresData.items.map(function (item) { return item.id; }));
+    });
+
+    // 批量 summary 事件委托
+    var batchSummaryEl = $('batch-summary');
+    if (batchSummaryEl) {
+      batchSummaryEl.addEventListener('click', function (e) {
+        var btn = e.target.closest('button');
+        if (!btn) return;
+        if (btn.id === 'batch-apply-all' && !btn.disabled) applyAllBatchResult();
+        else if (btn.id === 'batch-retry-failed') retryAllFailedBatchResult();
+        else if (btn.id === 'batch-retry-failed-live') retryFailedLive(btn.getAttribute('data-task-id'));
+        else if (btn.id === 'batch-cancel-task') {
+          var tid = btn.getAttribute('data-task-id');
+          customConfirm('确定取消这个批量识图任务吗？', function () { cancelBatchTask(tid); });
+        }
+      });
+    }
+
+    // v0.25.1 - 角标定时刷新：识别时切去聊天页，回来角标状态也是最新的
+    setInterval(function () { checkBatchTasks(); }, 5000);
+
+    // v0.33.37 - 悬浮球/其他进程入库后图库自动刷新（列表本身是元数据，轻量轮询；变了才重绘，不打断操作）
+    setInterval(async function () {
+      try {
+        var resp = await apiFetch(withAuth(API + '/api/list'));
+        if (!resp.ok) return;
+        var data = await resp.json();
+        if (!data.ok) return;
+        var list = data.data || [];
+        var fp = listFingerprint(list);
+        var listChanged = lastListFingerprint !== '' && fp !== lastListFingerprint;
+        lastListFingerprint = fp;
+
+        // 另一标签页/外部入口可能只改了 sticker-groups.json；单看图库列表指纹发现不了。
+        var groupResp = await apiFetch(withAuth(API + '/api/groups'));
+        var groupResult = await groupResp.json();
+        if (!groupResp.ok || !groupResult.ok || !groupResult.data) return;
+        var groupFp = groupFingerprint(groupResult.data);
+        var groupChanged = lastGroupFingerprint !== '' && groupFp !== lastGroupFingerprint;
+        if (listChanged || groupChanged) {
+          await refreshStickersAndGroups();
+        } else {
+          // 有本地伙伴配置草稿时记住服务端基线，避免每轮重复拉取并覆盖草稿。
+          lastGroupFingerprint = groupFp;
+        }
+      } catch (e) { /* 网络抖动/页面切走忽略，下轮再试 */ }
+    }, 20000);
+
+    // 筛选
+    $('filter-emotion').addEventListener('change', loadStickers);
+    var groupFilter = $('filter-group');
+    if (groupFilter) groupFilter.addEventListener('change', applyFilter);
+    $('filter-search').addEventListener('input', applyFilter);
+
+    // v0.33.77 - 偏好设置页：图片尺寸档位选择器
+    var sizeModeEl = $('size-mode-select');
+    if (sizeModeEl) {
+      sizeModeEl.addEventListener('change', changeSizeMode);
+      syncSizeMode();
+    }
+
+    // v0.24.0 - 偏好设置页：小图自适应开关（v0.33.78 恢复）
+    var fitToggleEl = $('sticker-fit-toggle');
+    if (fitToggleEl) {
+      fitToggleEl.addEventListener('click', toggleStickerFit);
+      syncFitToggle();
+    }
+
+    // v0.28.0 - 偏好设置页：配图卡片反馈按钮显示开关
+    var fbToggleEl = $('sticker-fb-toggle');
+    if (fbToggleEl) {
+      fbToggleEl.addEventListener('click', toggleFbButtons);
+      syncFbToggle();
+    }
+
+    // v0.34.57 - 偏好设置页：伙伴配图自评开关 + 记录行上的移除按钮
+    var agentSelfNoteEl = $('agent-self-note-toggle');
+    if (agentSelfNoteEl) {
+      agentSelfNoteEl.addEventListener('click', toggleAgentSelfNote);
+      syncAgentSelfNoteToggle();
+    }
+    var agentFitLogEl = $('agent-fit-log');
+    if (agentFitLogEl) {
+      agentFitLogEl.addEventListener('click', function (e) {
+        var btn = e.target.closest('[data-act="remove-agent-fit"]');
+        if (!btn) return;
+        callRemoveAgentFit({
+          agentId: btn.getAttribute('data-agent') || 'default',
+          emotion: btn.getAttribute('data-emotion') || '',
+          stickerId: btn.getAttribute('data-sticker') || '',
+        });
+      });
+    }
+
+    // 点击图片放大
+    $('sticker-grid').addEventListener('click', function (e) {
+      if (document.body.classList.contains('batch-mode')) return;
+      if (e.target.tagName === 'IMG' && e.target.closest('.sticker-card')) {
+        var overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.8);display:flex;align-items:center;justify-content:center;z-index:300;cursor:zoom-out';
+        var img = document.createElement('img');
+        img.src = e.target.src;
+        img.style.cssText = 'max-width:90vw;max-height:90vh;object-fit:contain;border-radius:8px';
+        overlay.appendChild(img);
+        overlay.onclick = function () { overlay.remove(); };
+        document.body.appendChild(overlay);
+      }
+    });
+
+    // ESC 关闭弹窗
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') {
+        document.querySelectorAll('.modal-overlay:not([hidden])').forEach(function (m) {
+          // v0.25.0 - ESC 关聊天弹窗也走 closeChatModal：通知后端清理 session，三条关闭路径对齐
+          if (m.id === 'chat-modal') { closeChatModal(); return; }
+          if (m.id !== 'editor-modal' && m.id !== 'batch-modal') {
+            closeModal(m.id);
+          }
+        });
+        // v0.25.1 - 任务列表弹窗已移除，仅保留兼容清理
+        var batchListModal = $('batch-tasks-list-modal');
+        if (batchListModal && batchListModal.style.display !== 'none') batchListModal.style.display = 'none';
+      }
+    });
+  });
+})();

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>表情包</title>
+<style>
+:root{color-scheme:light;--ink:#405b50;--muted:#7b9186;--line:#d5e5dd}
+*{box-sizing:border-box}
+html,body{margin:0;background:transparent;color:var(--ink);font-family:"LXGW WenKai","Microsoft YaHei UI",system-ui,sans-serif}
+/* v0.1.18 - 卡片宽度跟着图片和尺寸档位走（上报值），内容在宿主给的框里居中，
+   宿主一时没收回高度时空白也是平摊的，不会全堆在图片下面 */
+body{padding:6px;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.message{display:flex;flex-direction:column;align-items:center;gap:8px;width:100%}
+[hidden]{display:none!important}
+/* v0.1.23 - 图片高度上限改成固定像素，不再用 vh：vh 就是宿主给 iframe 的高度，
+   而我们上报的高度又决定这个框，用 vh 会形成正反馈（报大→框大→图能更高→再报更大），
+   尺寸一直在爬/重置，图还会被初始的矮框压得很小。
+   高度上限只是兜底：超过它的竖图由 JS 按高度反推宽度，图片本身始终按比例完整显示。 */
+img{display:block;max-width:100%;max-height:320px;object-fit:contain;border-radius:8px;margin:0 auto}
+.caption{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.65}
+.caption:empty{display:none}
+/* 三键反馈：沿用插件版配图卡的样子（不套外壳、不压在图里） */
+.fb-card{position:relative;display:flex;justify-content:center;align-items:center;gap:6px;width:100%;padding:2px 4px}
+.fb-btn{border:1px solid var(--line);border-radius:999px;background:transparent;cursor:pointer;font-size:12px;padding:4px 14px;color:#4a9277;transition:all .15s;flex-shrink:0;white-space:nowrap}
+.fb-btn:hover{background:#e6f3ed}
+.fb-btn.on-love{background:#5dae8e;border-color:#5dae8e;color:#fff}
+.fb-btn.on-fit{background:#e8b87a;border-color:#e8b87a;color:#fff}
+.fb-btn.on-hate{background:#e89bb0;border-color:#e89bb0;color:#fff}
+.fb-toast{position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:#fafdfb;border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:11px;color:#2d3a35;opacity:0;transition:opacity .15s;max-width:100%;white-space:normal;line-height:1.4;text-align:left;pointer-events:none}
+.fb-toast.show{opacity:1}
+.status{margin:0;color:var(--muted);font-size:12px;line-height:1.6}
+.status:empty{display:none}
+/* v0.1.29 - 点「不喜欢」后的「和小花聊聊」：聊天面板就长在这张卡片里，不另开一屏；
+   建议卡跟着消息流一起滚，改完当场给回执。面板高度写死像素、不用 vh（vh 会被上报高度反向驱动）。 */
+.fb-chat-row{display:flex;justify-content:center;width:100%}
+.fb-chat-btn{border:1px solid #e6b3c4;border-radius:999px;background:#fff7fa;color:#b0546e;font-size:12px;padding:4px 14px;cursor:pointer;transition:background .15s;flex-shrink:0;white-space:nowrap}
+.fb-chat-btn:hover{background:#fde9f0}
+.chat-panel{display:flex;flex-direction:column;gap:6px;width:100%;height:340px;padding:8px;border:1px solid var(--line);border-radius:12px;background:#fbfdfc}
+.chat-head{display:flex;align-items:center;gap:6px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.chat-thumb{width:28px;height:28px;max-height:28px;border-radius:6px;object-fit:cover;margin:0}
+.chat-title{flex:1;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chat-collapse{border:0;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;padding:2px 4px;white-space:nowrap}
+.chat-collapse:hover{color:var(--ink)}
+.chat-msgs{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding:2px}
+.chat-empty{color:var(--muted);font-size:12px;line-height:1.75;padding:8px 4px;white-space:pre-wrap}
+.chat-msg{max-width:86%;padding:6px 10px;border-radius:10px;font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}
+.chat-msg-user{align-self:flex-end;background:#e6f3ed;color:#2d3a35}
+.chat-msg-bot{align-self:flex-start;background:#fff;border:1px solid var(--line)}
+.chat-msg-err{align-self:center;background:#fdf0f3;color:#b0546e;font-size:11px;text-align:center}
+.chat-msg-busy{align-self:flex-start;color:var(--muted);font-size:11px;padding:2px 10px}
+.chat-sug{align-self:stretch;border:1px solid #cfe4da;border-radius:10px;background:#f4faf7;padding:8px;display:flex;flex-direction:column;gap:6px}
+.chat-sug-head{font-size:11px;color:#4a9277}
+.sug-row{display:flex;gap:6px;align-items:flex-start;font-size:12px;line-height:1.6}
+.sug-row.dropped{opacity:.45}
+.sug-label{color:var(--muted);flex-shrink:0}
+.sug-body{flex:1;min-width:0;overflow-wrap:anywhere}
+.sug-old{color:#9aa9a2;text-decoration:line-through}
+.sug-new{color:#2d7a5e;font-weight:600}
+.sug-drop{border:0;background:transparent;color:var(--muted);font-size:11px;cursor:pointer;padding:0 2px;text-decoration:underline;flex-shrink:0}
+.sug-drop:disabled{text-decoration:none;cursor:default}
+.sug-acts{display:flex;gap:6px;justify-content:flex-end;align-items:center;padding-top:2px}
+.sug-note{margin-right:auto;font-size:11px;color:#b0546e;overflow-wrap:anywhere}
+.sug-btn{border:1px solid var(--line);border-radius:999px;background:#fff;font-size:12px;padding:4px 12px;cursor:pointer;color:#4a9277}
+.sug-btn-yes{background:#5dae8e;border-color:#5dae8e;color:#fff}
+.sug-btn:disabled{opacity:.55;cursor:default}
+.chat-input-row{display:flex;gap:6px;align-items:flex-end}
+.chat-input{flex:1;min-width:0;border:1px solid var(--line);border-radius:10px;background:#fff;padding:6px 8px;font:inherit;font-size:12px;line-height:1.5;resize:none;max-height:72px;color:var(--ink)}
+.chat-input:focus{outline:none;border-color:#8dc7af}
+.chat-send{border:1px solid #5dae8e;border-radius:10px;background:#5dae8e;color:#fff;font-size:12px;padding:6px 12px;cursor:pointer;flex-shrink:0}
+.chat-send:disabled{opacity:.55;cursor:default}
+</style></head><body>
+<article class="message">
+  <img id="image" alt="发送的表情包" hidden>
+  <p class="caption" id="caption"></p>
+  <div class="fb-card" id="fb-card" hidden>
+    <button class="fb-btn" id="fb-pos" type="button">喜欢</button>
+    <button class="fb-btn" id="fb-fit" type="button">应景</button>
+    <button class="fb-btn" id="fb-neg" type="button">不喜欢</button>
+    <span class="fb-toast" id="fb-toast" role="status"></span>
+  </div>
+  <div class="fb-chat-row" id="fb-chat-row" hidden>
+    <button class="fb-chat-btn" id="fb-chat-btn" type="button">和小花聊聊</button>
+  </div>
+  <section class="chat-panel" id="chat-panel" hidden aria-label="和小花聊聊这张图">
+    <header class="chat-head">
+      <img class="chat-thumb" id="chat-thumb" alt="" hidden>
+      <span class="chat-title">和小花聊聊这张图</span>
+      <button class="chat-collapse" id="chat-collapse" type="button">收起</button>
+    </header>
+    <div class="chat-msgs" id="chat-msgs"></div>
+    <div class="chat-input-row">
+      <textarea class="chat-input" id="chat-input" rows="1" placeholder="说说这张图哪里不合适…"></textarea>
+      <button class="chat-send" id="chat-send-btn" type="button">发送</button>
+    </div>
+  </section>
+  <p class="status" id="status" role="status">正在读取这张图片…</p>
+</article>
+<script type="module" src="assets/paper-plane-message.js"></script>
+</body></html>
