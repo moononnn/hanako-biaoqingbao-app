@@ -1825,7 +1825,7 @@
           showUpdateResult({
             title: '❌ 检查失败',
             body: '<div style="font-size:13px;color:var(--text-muted);margin:10px 0;line-height:1.7">' + escHtml(data ? (data.error || '未知错误') : '无响应') + '</div>',
-            repoUrl: (data && data.repoUrl) || 'https://github.com/moononnn/hanako-biaoqingbao',
+            repoUrl: (data && data.repoUrl) || 'https://github.com/moononnn/hanako-biaoqingbao-app',
             okText: '知道了',
           });
           return;
@@ -1836,7 +1836,7 @@
             showUpdateResult({
               title: '⚠️ 暂时检查不了',
               body: '<div style="font-size:13px;color:var(--text-muted);margin:10px 0;line-height:1.7">' + escHtml(data.message || 'GitHub API 暂时不可用') + '，可以先去仓库看看有没有新版本。</div>',
-              repoUrl: data.repoUrl || 'https://github.com/moononnn/hanako-biaoqingbao',
+              repoUrl: data.repoUrl || 'https://github.com/moononnn/hanako-biaoqingbao-app',
               okText: '知道了',
             });
             return;
@@ -1867,7 +1867,7 @@
         showUpdateResult({
           title: '❌ 网络错误',
           body: '<div style="font-size:13px;color:var(--text-muted);margin:10px 0;line-height:1.7">' + escHtml(e.message || '请求失败') + '</div>',
-          repoUrl: 'https://github.com/moononnn/hanako-biaoqingbao',
+          repoUrl: 'https://github.com/moononnn/hanako-biaoqingbao-app',
           okText: '知道了',
         });
       })
@@ -1880,7 +1880,7 @@
     overlay.className = 'modal-overlay';
     overlay.style.zIndex = '100000';
     overlay.style.display = 'flex';
-    var repoUrl = opts.repoUrl || 'https://github.com/moononnn/hanako-biaoqingbao';
+    var repoUrl = opts.repoUrl || 'https://github.com/moononnn/hanako-biaoqingbao-app';
     var html = '<div class="modal-box" style="max-width:460px;position:relative">'
       + '<h2 style="margin-top:0;font-size:16px">' + opts.title + '</h2>'
       + opts.body;
@@ -5933,7 +5933,7 @@
     var fbBtn = document.getElementById('btn-feedback');
     if (fbBtn) fbBtn.addEventListener('click', function () {
       closeHomeMenu();
-      var issueUrl = 'https://github.com/moononnn/hanako-biaoqingbao/issues';
+      var issueUrl = 'https://github.com/moononnn/hanako-biaoqingbao-app/issues';
       var opened = null;
       try { opened = window.open(issueUrl, '_blank'); } catch (e) {}
       if (!opened) {

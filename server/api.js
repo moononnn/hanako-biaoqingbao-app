@@ -3573,7 +3573,7 @@ ${draft}
       const manifestPath = path.join(__dirname, '..', 'manifest.json');
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
       const currentVersion = manifest.version || '0.1.0';
-      const REPO = 'moononnn/hanako-biaoqingbao';
+      const REPO = 'moononnn/hanako-biaoqingbao-app';
 
       // 获取最新 tag（只取一个，请求最小化）
       const resp = await fetch(`https://api.github.com/repos/${REPO}/tags?per_page=1`, {
@@ -3624,7 +3624,9 @@ ${draft}
         latest: latestTag,
         hasUpdate,
         updateUrl: hasUpdate ? `https://github.com/${REPO}/releases/tag/${tags[0].name}` : null,
-        downloadUrl: hasUpdate ? `https://github.com/${REPO}/archive/refs/tags/${tags[0].name}.zip` : null,
+        // 直连 Release 附件（不是源码 archive）：附件名固定为 biaoqingbao-app-<tag>.zip，
+        // 见 PUBLISHING.md 的固定顺序第 7 条，改名会让这个链接失效。
+        downloadUrl: hasUpdate ? `https://github.com/${REPO}/releases/download/${tags[0].name}/biaoqingbao-app-${tags[0].name}.zip` : null,
         repoUrl: `https://github.com/${REPO}`,
         releaseBody,
         message: hasUpdate
@@ -3635,7 +3637,7 @@ ${draft}
       ctx?.log?.error?.('[biaoqingbao] 检查更新失败:', e.message || e);
       return json({
         ok: false, success: false, error: e.message || '网络不可达',
-        repoUrl: 'https://github.com/moononnn/hanako-biaoqingbao',
+        repoUrl: 'https://github.com/moononnn/hanako-biaoqingbao-app',
       });
     }
   });
