@@ -18,7 +18,8 @@ img{display:block;max-width:100%;max-height:320px;object-fit:contain;border-radi
 .caption{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.65}
 .caption:empty{display:none}
 /* 三键反馈：沿用插件版配图卡的样子（不套外壳、不压在图里） */
-.fb-card{position:relative;display:flex;justify-content:center;align-items:center;gap:6px;width:100%;padding:2px 4px}
+/* v0.1.42 - 两行控件不再 width:100%：宽度跟着自己的内容走，量出来的值才不会被宿主给的框反过来带动（详见 message-card-view.js 的 targetWidth）。 */
+.fb-card{position:relative;display:flex;justify-content:center;align-items:center;gap:6px;width:max-content;max-width:100%;padding:2px 4px}
 .fb-btn{border:1px solid var(--line);border-radius:999px;background:transparent;cursor:pointer;font-size:12px;padding:4px 14px;color:#4a9277;transition:all .15s;flex-shrink:0;white-space:nowrap}
 .fb-btn:hover{background:#e6f3ed}
 .fb-btn.on-love{background:#5dae8e;border-color:#5dae8e;color:#fff}
@@ -30,7 +31,7 @@ img{display:block;max-width:100%;max-height:320px;object-fit:contain;border-radi
 .status:empty{display:none}
 /* v0.1.29 - 点「不喜欢」后的「和小花聊聊」：聊天面板就长在这张卡片里，不另开一屏；
    建议卡跟着消息流一起滚，改完当场给回执。面板高度写死像素、不用 vh（vh 会被上报高度反向驱动）。 */
-.fb-chat-row{display:flex;justify-content:center;width:100%}
+.fb-chat-row{display:flex;justify-content:center;width:max-content;max-width:100%}
 .fb-chat-btn{border:1px solid #e6b3c4;border-radius:999px;background:#fff7fa;color:#b0546e;font-size:12px;padding:4px 14px;cursor:pointer;transition:background .15s;flex-shrink:0;white-space:nowrap}
 .fb-chat-btn:hover{background:#fde9f0}
 .chat-panel{display:flex;flex-direction:column;gap:6px;width:100%;height:340px;padding:8px;border:1px solid var(--line);border-radius:12px;background:#fbfdfc}

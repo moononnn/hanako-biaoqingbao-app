@@ -168,6 +168,19 @@ export function mountMessageCard({ showCaption = false } = {}) {
     const naturalH = Number(image?.naturalHeight) || 0;
     const mode = config.sizeMode || 'auto';
     const base = mode === 'auto' ? CARD_MAX_WIDTH : (MODE_WIDTH[mode] || CARD_MAX_WIDTH);
+    const feedbackWidth = fbCard && !fbCard.hidden ? (fbCard.scrollWidth || 0) : 0;
+    const chatWidth = chatRow && !chatRow.hidden ? (chatRow.scrollWidth || 0) : 0;
+    // v0.1.42 - 这两行以前是 width:100%，scrollWidth 读到的是「宿主框宽 - 内边距」，
+    // 而宿主框又是我们上报的宽度开的：宽 → 量到更宽 → 报更宽（反过来也同样成立）。
+    // 实机就是先撑满、再一格一格缩（2026-10-09 日志：312x351 → 310x349 → … → 254x293）。
+    // 现在 CSS 里两行改成 width:max-content，这里读到的就是控件自己需要多宽，
+    // 不随宿主框变，回路断开。
+    //
+    // ⚠ 同一天还试过「图片尺寸未知时按控件行开框、不报满宽」，当场出事就撤了：
+    // 图片刚挂上时按钮行还是 hidden（宽 0），于是卡片报了 120 宽（CARD_MIN_WIDTH），
+    // 把宿主框憋小，和另一个报 316x355 的实例打架，图直接显示不出来、要切走对话再切回
+    // （那时图已在缓存里，不再走这个分支）才恢复。教训：图片尺寸未知时保持原样报满宽，
+    // 别在这个最脆弱的首帧上动心思。
     if (config.smallImageFit === false) return base;   // 一律按档位尺寸，图片被放大填满
     if (!naturalW || !naturalH) return base;
     let shownW = naturalW;
@@ -175,8 +188,6 @@ export function mountMessageCard({ showCaption = false } = {}) {
       shownW = Math.round(naturalW * CARD_MAX_IMAGE_HEIGHT / naturalH);
     }
     // 窄图时卡片由按钮行决定宽度，不然三个按钮会被挤掉
-    const feedbackWidth = fbCard && !fbCard.hidden ? (fbCard.scrollWidth || 0) : 0;
-    const chatWidth = chatRow && !chatRow.hidden ? (chatRow.scrollWidth || 0) : 0;
     const needed = Math.max(shownW, feedbackWidth, chatWidth) + BODY_PADDING;
     return Math.max(CARD_MIN_WIDTH, Math.min(base, Math.round(needed)));
   }
