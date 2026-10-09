@@ -37,94 +37,19 @@ export default defineApp(async (sdk) => {
     }
   };
 
-  // ── ⚠ 临时实验（2026-10-06）：验证「伙伴配图能不能插回自己那条回复」──
-  //   背景：图现在走 session:send-custom，是一条独立消息（custom 角色），
-  //   模型侧把它读成「用户发来的图」，观感上也像「说完话再单独甩一张」。
-  //   目标：图作为图片块，进这条 assistant 消息本身。
-  //   开关：<dataDir>/experiment.json 的 inlineStickerInReply，缺失即关闭（现有行为一字不变）。
-  //   实验有结论后，本段连同 rememberPendingInline / tryInlinePending 一起剃掉。
-  const MIME_BY_EXT = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
-  const pendingInline = new Map(); // sessionPath -> { file, mimeType, at }
-  let experimentCache = { at: 0, value: {} };
-  const experiment = async () => {
-    if (Date.now() - experimentCache.at < 5000) return experimentCache.value;
-    try {
-      const nodeFs = await import("node:fs");
-      const raw = nodeFs.readFileSync(join(sdk.dataDir, "experiment.json"), "utf-8");
-      experimentCache = { at: Date.now(), value: JSON.parse(raw) };
-    } catch {
-      experimentCache = { at: Date.now(), value: {} };
-    }
-    return experimentCache.value;
-  };
-  const rememberPendingInline = (sessionPath, sticker) => {
-    if (!sessionPath || !sticker?.file) return;
-    const ext = String(sticker.file).split(".").pop().toLowerCase();
-    pendingInline.set(sessionPath, {
-      file: String(sticker.file),
-      mimeType: MIME_BY_EXT[ext] || "image/png",
-      at: Date.now(),
-    });
-  };
-  // 把待插的图放进「回复速览」标题之前，让图落在说完话的地方，而不是拖在整条回复末尾。
-  // 找不到那行标题就退回挂在末尾，绝不丢图。
-  const insertBeforeSummary = (content, parts) => {
-    const mark = /(^|\n)\s*>?\s*\*\*[^\n]*回复速览\*\*/;
-    for (let i = content.length - 1; i >= 0; i--) {
-      const part = content[i];
-      if (part?.type !== "text" || typeof part.text !== "string") continue;
-      const hit = part.text.match(mark);
-      if (!hit) continue;
-      const cut = hit.index;
-      return [
-        ...content.slice(0, i),
-        { ...part, text: part.text.slice(0, cut) },
-        ...parts,
-        { type: "text", text: part.text.slice(cut) },
-        ...content.slice(i + 1),
-      ];
-    }
-    return [...content, ...parts];
-  };
-
-  const tryInlinePending = async (sessionPath, content) => {
-    const cfg = await experiment();
-    // 可选模式（改 experiment.json 即切，不用重载）：
-    //   marker = 只插一个指向图的文本标记（最轻，等界面去取图）
-    //   image  = 插真图字节块（会话会变沉，仅小图可用）
-    //   both   = 两个都插（拿来做对比）
-    const mode = String(cfg.inlineMode || (cfg.inlineStickerInReply ? "image" : "") || "");
-    if (!mode) return content;
-    const pending = sessionPath ? pendingInline.get(sessionPath) : null;
-    if (!pending) return content;
-    pendingInline.delete(sessionPath);
-    if (Date.now() - pending.at > 120000) return content;
-    try {
-      const nodeFs = await import("node:fs");
-      const { STICKERS_DIR } = await import("./lib/shared.js");
-      const filePath = join(STICKERS_DIR, pending.file);
-      const parts = [];
-      if (mode === "marker" || mode === "both") {
-        parts.push({ type: "text", text: `[attached_image: ${filePath}]` });
-      }
-      if (mode === "image" || mode === "both") {
-        const bytes = nodeFs.readFileSync(filePath);
-        // 安全上限：插进会话历史会多一份图，超过 1.5MB 就不插真图（保护会话体量）
-        if (bytes.length > 1.5 * 1024 * 1024) {
-          record(`inline-sticker 跳过真图：太大 ${bytes.length} bytes file=${pending.file}`);
-        } else {
-          parts.push({ type: "image", data: bytes.toString("base64"), mimeType: pending.mimeType });
-        }
-      }
-      if (!parts.length) return content;
-      record(`inline-sticker 插入 mode=${mode} file=${pending.file} parts=${parts.map((p) => p.type).join("+")}`);
-      return insertBeforeSummary(content, parts);
-    } catch (e) {
-      record(`inline-sticker-error ${e?.message || e}`);
-      return content;
-    }
-  };
-
+  // ── 已删除的内插实验（2026-10-06 写，2026-10-09 结案）──
+  //   当时的问题是：图走 session:send-custom 是一条独立消息，只能排在正文之后，
+  //   观感上像「说完话再单独甩一张」。于是想图能插回这条 assistant 消息本身。
+  //   实机结论（2026-10-09 20:52）：两种模式都不行，这条路封死。
+  //     marker = 插一行 [attached_image: 路径]，宿主界面不认，原样显示成文字；
+  //     image  = 插真图字节块，图确实进了这条消息、也真的落进了 jsonl
+  //              （29946 字节、无投影占位），但界面上一个像素都没有。
+  //   也就是说宿主根本不渲染助手消息里的图片块。2026-10-06 关掉它时写的理由是
+  //   「怕会话变沉」——理由写错了：它本来就不可能成，跟体积无关。
+  //   当时的注释写着「实验有结论后连同 rememberPendingInline / tryInlinePending
+  //   一起剃掉」，现在就是那个时刻。已删除：experiment() / rememberPendingInline /
+  //   insertBeforeSummary / tryInlinePending / pendingInline / MIME_BY_EXT。
+  //   别再重做这个实验，除非宿主那边先支持了「渲染 assistant 消息里的图片块」。
   record("apply-enter");
 
   // ── 数据目录交接 ──
@@ -160,27 +85,6 @@ export default defineApp(async (sdk) => {
 
   // ── ⚠ 临时诊断（2026-10-06）：探 App 手里的发图通道牌面。
   //   只读探测：不调用任何接口，只问「有没有这个口子」，结果写进 probe.log。
-  //   目的：验证 session:stage-file / resources.stage 能否替代 send-custom。
-  //   结论出来、或改动落定后，本段连同诊断入口一起剃掉，不留在正式版。
-  try {
-    let verbs = [];
-    try {
-      const mod = await import("./sdk/app-bus-contract.js");
-      const all = mod.APP_BUS_REQUEST_ALLOWLIST || [];
-      verbs = all.filter((v) => /stage-file|register-file|send-custom|append-entry/.test(String(v)));
-    } catch (e) {
-      verbs = ["allowlist-import-fail " + (e?.message || e)];
-    }
-    record(
-      `probe-channels resources=${sdk.resources ? "yes" : "no"}` +
-      ` stage=${typeof sdk.resources?.stage} register=${typeof sdk.resources?.register}` +
-      ` bus=${typeof sdk.bus?.request} verbs=[${verbs.join(",")}]` +
-      ` sdkKeys=[${Object.keys(sdk).slice(0, 28).join(",")}]`
-    );
-  } catch (e) {
-    record(`probe-channels-error ${e?.message || e}`);
-  }
-
   // ── 启动健康检查：图库元数据能不能读（只读，不碰偏好与配置）──
   try {
     const shared = await import("./lib/shared.js");
@@ -195,34 +99,9 @@ export default defineApp(async (sdk) => {
   try {
     const { observeBeforeStep } = await import("./lib/observer.js");
     sdk.hooks.onDecision("agent/pre-step", async (payload) => {
-      const messages = payload?.messages;
-      const count = Array.isArray(messages) ? messages.length : -1;
-      // 临时诊断（查完就删）：看 pre-step 给的消息到底是什么形状。
-      // 现现场是辅助模型反复说「未提供具体对话内容」，怀疑我按旧插件那套
-      // {role, content} 去提取，而宿主给的是别的包装形状。
       try {
-        const shape = (m) => (m == null ? "null"
-          : `${typeof m}:${Object.keys(m).slice(0, 6).join("/")}|role=${m.role ?? m.message?.role ?? "-"}|content=${Array.isArray(m.content) ? "array(" + m.content.length + ")" : typeof m.content}`);
-        if (Array.isArray(messages) && messages.length) {
-          record(`msg-shape 首=${shape(messages[0])}`);
-          record(`msg-shape 末=${shape(messages[messages.length - 1])}`);
-          const roles = {};
-          for (const m of messages) {
-            const r = m?.role ?? m?.message?.role ?? "-";
-            roles[r] = (roles[r] || 0) + 1;
-          }
-          record(`msg-shape 角色分布=${JSON.stringify(roles)}`);
-          const lastUser = [...messages].reverse().find((m) => (m?.role ?? m?.message?.role) === "user");
-          if (lastUser) record(`msg-shape 末条用户=${JSON.stringify(lastUser).slice(0, 400)}`);
-          // 最关键的一条：分析函数实际捞到了什么
-          const { buildAnalyzeText } = await import("./lib/text-analysis.js");
-          const extracted = buildAnalyzeText(messages);
-          record(`msg-extract 长度=${extracted.length} 前240=${extracted.slice(0, 240).replace(/\n/g, " | ")}`);
-        }
-      } catch (e) {
-        record(`msg-shape-error ${e?.message || e}`);
-      }
-      try {
+        const messages = payload?.messages;
+        const count = Array.isArray(messages) ? messages.length : -1;
         const decision = await observeBeforeStep({
           ctx: sdk,
           messages,
@@ -272,13 +151,11 @@ export default defineApp(async (sdk) => {
           record(`pseudo-tag 剪掉 ${removed.length} 行 首行=${removed[0].slice(0, 60)}`);
           return { ...part, text };
         });
-        // ⚠ 临时实验（2026-10-06）：把伙伴刚配的图作为图片块插回这条回复。
-        //   跟伪标签无关，独立判断；开关见 experiment.json。
-        const withInline = await tryInlinePending(sessionPath, nextContent);
-        const inlined = withInline !== nextContent;
-        if (!removedCount && !inlined) return undefined;
+        // 2026-10-09 结案：这里原来还会把伙伴刚配的图作为图片块插回这条回复。
+        // 实机证明宿主不渲染 assistant 消息里的图片块（详见文件顶部那段结案注释），
+        // 所以整段连同 tryInlinePending / rememberPendingInline 一起删掉了。
+        if (!removedCount) return undefined;
         if (removedCount) record(`hook-post-assistant session=${payload?.session?.sessionId || "?"} 剪掉=${removedCount}`);
-        if (inlined) record(`inline-sticker 已插入 session=${payload?.session?.sessionId || "?"}`);
 
         // 补发：本轮提醒过、而且还没真的发出去，才替模型补这一张
         const info = peekInjection(sessionPath);
@@ -320,7 +197,7 @@ export default defineApp(async (sdk) => {
           }
         }
 
-        return { message: { ...message, content: withInline } };
+        return { message: { ...message, content: nextContent } };
       } catch (e) {
         // 兜底本身出问题不许影响一条已经写好的回复：记一笔，什么都不改
         record(`hook-post-assistant-error ${e?.message || e}`);
@@ -417,8 +294,6 @@ export default defineApp(async (sdk) => {
                 // 图已选定、只等本轮说完，所以这里就记「本轮发过图」，
                 // 免得 post-assistant 那段伪标记兜底以为没发、又补一张。
                 if (queued?.ok) markInjectionDelivered(sessionPath);
-                // ⚠ 临时实验：记下这一张，等这条回复定稿时试着插回回复里
-                if (queued?.ok) rememberPendingInline(sessionPath, sticker);
               }
             } catch (e) {
               // 排队出问题不能弄挂工具调用：记一笔，把原始结果照样交回去
