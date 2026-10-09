@@ -54,3 +54,26 @@ test('会话路径大小写不同算同一段对话', () => {
   assert.equal(queueStickerDelivery({ sdk, dataDir: 'C:/tmp/nope', sessionPath: 'C:/TMP/Sess.jsonl', sticker, text: '', emotion: '' }).ok, true);
   assert.equal(hasPendingSticker('c:/tmp/sess.jsonl'), true);
 });
+
+// 2026-10-09 实机修正：空闲探测原先只传 legacySessionPath，宿主那个解析器不认它，
+// 于是每张图都白白多等 2.5 秒才投出去（用户看到的就是「说完话停一会儿图才出现」）。
+// 这次钉住两个字段都带上，并且能认出宿主到底认哪一个。
+test('空闲探测同时带 sessionId 与 sessionPath，宿主认哪个都能用', async () => {
+  const asked = [];
+  const sdk = {
+    bus: {
+      request: async (_verb, payload) => {
+        asked.push(payload);
+        if (_verb === 'session:context') return { isStreaming: false };
+        throw new Error('n/a');
+      },
+    },
+  };
+  assert.equal(queueStickerDelivery({ sdk, dataDir: 'C:/tmp/nope', sessionPath: 'C:/tmp/sess.jsonl', sticker, text: '', emotion: '' }).ok, true);
+  const r = await flushStickerDelivery('C:/tmp/sess.jsonl', 'hook');
+  const ctx = asked.find((p) => p.scope === 'all' && p.sessionPath);
+  assert.ok(ctx, '应该真的去问了一次会话状态');
+  assert.ok(!('legacySessionPath' in ctx), 'legacySessionPath 是宿主不认的那个字段，不能再发');
+  assert.equal(ctx.sessionPath, 'C:/tmp/sess.jsonl', 'sessionPath 要带上');
+  assert.equal(r.probed, true, '宿主认了参数就该标记为真的探测到了');
+});
