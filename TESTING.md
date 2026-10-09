@@ -1,5 +1,39 @@
 # 自动测试
 
+## v0.1.44 本轮汇总
+
+```powershell
+node --test tests/*.test.mjs
+```
+
+零依赖。本轮五处修复，各自的来龙去脉见下面各节：
+
+- 同一条图片消息只画一次（`claimRenderSlot` 渲染认领，见下节）
+- 伙伴配的图不再把像素写进会话记录（只留 `[attached_image: 路径]`）
+- 配图投递时机：空闲探测认对字段名、回复定稿后再投
+- 配图卡两行控件宽度不再被宿主框反向带动
+- 入口文件补回丢失的 `try`，新增 `tests/entry-syntax.test.mjs` 做回归
+
+本轮抓到并修掉的一个问题：`tests/sticker-delivery.test.mjs` 里有一条断言还在要求
+「伙伴配的图必须带图片内容块」，而实现在 10-09 那次修复里已经改成不内联了——改了实现
+没同步断言，全量测试一跑就露出来。断言已按新行为重写（不带 image 块、改留路径引用）。
+
+最近结果：2026-10-10，`node --test tests/*.test.mjs` 共 **162 项**全部通过；
+Python 离屏测试 `tests/test_ball_target.py`、`tests/test_ball_wait_state.py` 各 1 项通过；
+`validate-app.mjs` 静态校验 0 error。
+
+## 同一条图只画一次（v0.1.42）
+
+```powershell
+node --test tests/ball-message-card.test.mjs tests/ball-message-card-ui.test.mjs tests/ball-message-card-chat.test.mjs tests/message-card-attribution.test.mjs tests/message-card-chat-log.test.mjs tests/sticker-delivery.test.mjs
+```
+
+零依赖。2026-10-09 实机发现：宿主把同一条图片消息挂了两个卡片实例（两个不同 surface，间隔 44ms 先后查同一条记录），同一张图在聊天流里被画了两遍。现在由后端认领、后端返回 `duplicate` 决定谁画。`tests/ball-message-card.test.mjs` 盯认领本身（先到者拿到绘制权 / 持有者续期不算重复 / 租约过期后来者能接管 / 空身份一律放行 / 不同记录互不干扰）；`tests/ball-message-card-ui.test.mjs` 盯前端（取数据那次必须带 surface 实例身份、撞上 `duplicate` 就不再拉图片也不出图、记录编号必须留在查询串第一位）。
+
+未覆盖：真机上「先到的实例被中途清掉、后来者接管」这一段只有租约逻辑的单元覆盖，没有实机样本；根治要宿主不重复挂，我们这边只是兜底。
+
+最近结果：2026-10-09，改动相关 6 个测试文件 **81 项**通过。
+
 ## 配图改成「本轮说完再投」＋卡片标题与伙伴名（v0.1.36 ~ v0.1.38）
 
 ```powershell
