@@ -179,3 +179,54 @@ test('images exactly at the gate keep their pixels; one byte more does not', (t)
   const overPayload = buildMessageCardPayload({ ...base, bytes: over, record: prepareMessageCard({ ...base, bytes: over, requestId: 'over-limit' }) });
   assert.equal(overPayload.content.length, 1);
 });
+
+// v0.1.43 - 伙伴自己配的图不再把像素送回会话记录。
+// 背景：那张 base64 落进 jsonl 之后，超 1MB 就会被宿主「瘦身投影」换成占位文字，
+// 那个窗口从此每轮 400 Invalid base64 data（2026-10-06 的事故根因）；
+// 就算不触发投影，每轮重建请求都要重发几百 KB。用户发来的图不受影响。
+test('伙伴配图只送路径与语义，像素一律不进会话记录', (t) => {
+  const base = fixture(t);
+  const small = { ...base, sender: 'partner', requestId: 'partner-small' };
+  const smallPayload = buildMessageCardPayload({ ...small, record: prepareMessageCard(small) });
+  assert.equal(smallPayload.content.length, 1, '再小的图也不送像素');
+  assert.match(smallPayload.content[0].text, /attached_image/);
+  assert.ok(!JSON.stringify(smallPayload.content).includes('"type":"image"'));
+
+  // 闸门以下的图也一样不送 —— 这条路压根不碰那条线。
+  const big = { ...base, sender: 'partner', requestId: 'partner-big', bytes: Buffer.alloc(Math.floor(MAX_INLINE_IMAGE_BASE64 / 4) * 3, 7) };
+  const bigPayload = buildMessageCardPayload({ ...big, record: prepareMessageCard(big) });
+  assert.equal(bigPayload.content.length, 1);
+  assert.ok(!JSON.stringify(bigPayload.content).includes('"type":"image"'));
+
+  // 用户发来的图照旧送像素：那条路模型真的需要看懂图。
+  const userPayload = buildMessageCardPayload({ ...base, record: prepareMessageCard(base) });
+  assert.equal(userPayload.content[1].type, 'image');
+});
+
+// ═══ 渲染认领（2026-10-09：宿主把同一条图挂了两个实例，同一张被画两遍）═══
+test('渲染认领：先到的实例拿到绘制权，后到的让位；持有者自己续期不算重复', () => {
+  __resetRenderClaimsForTests();
+  assert.equal(claimRenderSlot('a_one', 'surface-one').claimed, true);
+  assert.equal(claimRenderSlot('a_one', 'surface-two').claimed, false, '同一时刻另一个实例该让位');
+  assert.equal(claimRenderSlot('a_one', 'surface-one').claimed, true, '持有者自己续期不算重复');
+});
+
+test('渲染认领：租约过期后，后来者可以接管，不把图判没', () => {
+  __resetRenderClaimsForTests();
+  claimRenderSlot('a_one', 'surface-one', 1000);
+  const late = claimRenderSlot('a_one', 'surface-two', 1000 + RENDER_CLAIM_TTL_MS + 1);
+  assert.equal(late.claimed, true, '先到的不再续期就该让位给后来者');
+});
+
+test('渲染认领：认不出实例身份一律放行，宁可重复也不误伤唯一那张图', () => {
+  __resetRenderClaimsForTests();
+  claimRenderSlot('a_one', 'surface-one');
+  assert.equal(claimRenderSlot('a_one', '').claimed, true);
+  assert.equal(claimRenderSlot('a_one', '   ').claimed, true);
+});
+
+test('渲染认领：不同记录互不干扰', () => {
+  __resetRenderClaimsForTests();
+  claimRenderSlot('a_one', 'surface-one');
+  assert.equal(claimRenderSlot('a_two', 'surface-two').claimed, true);
+});

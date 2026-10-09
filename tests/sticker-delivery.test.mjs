@@ -102,7 +102,10 @@ test('投递：走 session:send-custom，卡片 id 正确，且不触发新一�
   assert.equal(send.payload.triggerTurn, false, '伙伴配图不该再触发一轮');
   assert.equal(send.payload.display, true);
   assert.match(send.payload.details.cardInstanceId, /^a_[0-9a-f]{20}$/);
-  assert.ok(send.payload.content.some((x) => x.type === 'image'), '必须带图片内容块');
+  // v0.1.44：伙伴配的图不再把像素写进会话记录（base64 会触发宿主 1MB 投影，
+  // 之后那个窗口每轮都报 Invalid base64）。改成只送一行路径引用。
+  assert.equal(send.payload.content.some((x) => x.type === 'image'), false, '伙伴配的图不该把像素写进会话记录');
+  assert.ok(send.payload.content.some((x) => x.type === 'text' && /\[attached_image: /.test(x.text)), '必须留一行图片路径引用');
   assert.ok(send.payload.content.some((x) => x.type === 'text' && /被萌到/.test(x.text)));
 });
 
