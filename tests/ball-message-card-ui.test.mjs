@@ -29,7 +29,7 @@ function fakeElement(height = 0, natural = { naturalWidth: 600, naturalHeight: 4
   };
 }
 
-function ui(context, fetch, initialSearch = '', viewport = { width: 314, height: 51 }) {
+function ui(context, fetch, initialSearch = '', viewport = { width: 314, height: 51 }, pathname = '/paper-plane-message.html') {
   const elements = Object.fromEntries(['image', 'caption', 'status', 'fb-card', 'fb-pos', 'fb-fit', 'fb-neg', 'fb-toast']
     .map(key => [key, fakeElement(key === 'message' ? 240 : 0)]));
   const message = fakeElement(240);
@@ -46,7 +46,7 @@ function ui(context, fetch, initialSearch = '', viewport = { width: 314, height:
   // v0.1.32 - 卡片把“重新可见就再试一次”当成一条自愈路径，测试要能手动触发它。
   const contextBox = { value: context };
   const sandbox = {
-    location: { get search() { return search.value; }, hash: '', pathname: '/paper-plane-message.html' },
+    location: { get search() { return search.value; }, hash: '', pathname },
     document: Object.assign(doc, {
       getElementById: key => elements[key],
       querySelector: () => message,
@@ -103,8 +103,35 @@ test('exact stamped id controls image and literal caption; no HTML interpolation
   await settle();
   assert.equal(state.elements.image.hidden, false);
   assert.equal(state.elements.caption.textContent, '<script>no</script>');
-  assert.ok(state.calls.every(call => call.route.endsWith('?id=' + idA)));
+  // 图片本体走 /image?id=，数据走 /?id=：两条都得把记录编号放在查询串第一位。
+  const isRecordRoute = (route) => route.startsWith('/api/paper-plane-message?id=' + idA)
+    || route.startsWith('/api/paper-plane-message/image?id=' + idA);
+  assert.ok(state.calls.every(call => isRecordRoute(call.route)),
+    '记录编号必须是查询串的第一个参数（后面可以再挂认领参数）');
+  assert.ok(state.calls.every(call => !call.route.includes('&id=')));
   assert.equal(state.calls.length, 2);
+});
+
+// 2026-10-09 实机：宿主把同一条图片消息挂了两个卡片实例，同一张图被画了两遍。
+// 后到的那个要让位 —— 关键是它不能再去拉图片，否则重复照旧。
+test('another instance is already drawing this record: yield instead of painting it twice', async () => {
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' },
+    () => response(idA, '', 'session-one', { duplicate: true }), '', { width: 314, height: 51 }, '/surface/token-two');
+  await settle();
+  assert.equal(state.calls.length, 1, '让位的那次不能再去拉图片');
+  assert.equal(state.calls[0].route.includes('/image'), false);
+  assert.equal(state.elements.image.hidden, true, '让位的实例不画图');
+});
+
+// 认领参数必须带上：没有它，后端分不出「我是谁」，也就判不出重复。
+test('picture requests carry the instance identity used for the claim', async () => {
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' },
+    () => response(idA), '', { width: 314, height: 51 }, '/surface/token-one');
+  await settle();
+  const dataCalls = state.calls.filter(call => call.route.startsWith('/api/paper-plane-message?id='));
+  assert.ok(dataCalls.length > 0 && dataCalls.every(call => call.route.includes('&instance=')),
+    '取数据那次要带实例身份，图片本体那次不用');
+  assert.ok(dataCalls.every(call => call.route.includes('token-one')), '实例身份取自当前 surface 路径');
 });
 
 test('compact width is reported to the host rather than only shrinking inner CSS', async () => {

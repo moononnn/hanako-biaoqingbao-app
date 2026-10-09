@@ -128,6 +128,9 @@ export function mountMessageCard({ showCaption = false } = {}) {
   // 宿主递来空上下文时自己多试几次：它重新装载 App 后会补身份，偶尔也会迟一步。
   let reviveTimer = null;
   let reviveTries = 0;
+  // 2026-09 新增：宿主把同一条图片消息挂了两个实例时，后到的那个先退让再决定去留。
+  let standDownTimer = null;
+  let stoodDown = false;
   let config = { ...DEFAULT_CONFIG };
   // v0.1.29 - 内联聊天的状态。聊天不落盘：卡片被宿主重放（切窗口回来）时回到三键状态，
   // 聊天记录本来就在服务端会话里，收起或过期后重开会话，不假装还记得。
@@ -228,6 +231,8 @@ export function mountMessageCard({ showCaption = false } = {}) {
   let lastW = 0;
   let lastH = 0;
   function resize(force = false) {
+    // 已经让位退出的实例不再上报：让它把自己的高度报回去，聊天流里会凭空多出一截空白。
+    if (stoodDown) return;
     // v0.1.26 - 看不见的实例不上报尺寸。切换对话框时宿主会把同一个卡另挂到视口宽 0 的框里，
     // 那时量到的宽高都是残值（现场日志里的 316x51、vw=0），报上去只会把可见实例
     // 已经撑好的框压扁、图只剩一条。
@@ -769,6 +774,52 @@ export function mountMessageCard({ showCaption = false } = {}) {
     try { hana.api.fetch('/api/message-card-context?note=' + encodeURIComponent(note)).catch(() => {}); } catch { /* 上报失败不影响卡片 */ }
   }
 
+  // 这个实例的稳定身份：宿主给每个卡片实例一个独立的 surface 页面，路径尾段就是它。
+  // 取不到就退 instanceKey；再取不到交回空串（后端对空身份一律放行），宁可多画一次也不误伤。
+  function surfaceKey(context) {
+    try {
+      const tail = String(location?.pathname || '').split('/').filter(Boolean).pop() || '';
+      if (tail) return tail.slice(0, 120);
+    } catch { /* 读不到地址就退 instanceKey */ }
+    return String(context?.instanceKey || '').slice(0, 120);
+  }
+
+  // 撞上重复实例后的退让：等一拍再查，先到的还占着就收起来，自己那一份没人要了就接管。
+  // 顺序不能反 —— 目标是「不画两张」，不是「一张都不画」。
+  const CLAIM_WAIT_MS = 2600;
+  function waitForClaim(context, candidates, ticket) {
+    clearTimeout(standDownTimer);
+    standDownTimer = setTimeout(async () => {
+      let retry = null;
+      const instance = encodeURIComponent(surfaceKey(context));
+      for (const candidate of candidates) {
+        const response = await hana.api.fetch('/api/paper-plane-message?id=' + encodeURIComponent(candidate) + '&instance=' + instance);
+        const payload = response.ok ? await response.json().catch(() => null) : null;
+        if (payload?.ok && payload.data?.id === candidate) { retry = payload; break; }
+      }
+      if (ticket !== generation) return;
+      if (!retry || retry.data?.duplicate) { collapseSelf('同一张图别处已经在画'); return; }
+      // 租约到期没人接手：把自己重新走一遍正常流程，这次认领会落到我头上。
+      report('TAKE-OVER ' + recordId);
+      binding = '';
+      recordId = '';
+      load(context);
+    }, CLAIM_WAIT_MS);
+  }
+
+  // 让位：内容全部收掉，框报成 0 高，不在聊天流里留一个空壳。
+  function collapseSelf(note) {
+    stoodDown = true;
+    clearTimeout(standDownTimer);
+    clearImage();
+    if (caption) { caption.textContent = ''; caption.hidden = true; }
+    if (fbCard) fbCard.hidden = true;
+    resetChatState();
+    if (status) status.textContent = '';
+    report('STAND-DOWN ' + recordId + ' | ' + note);
+    try { hana.ui.resize({ width: targetWidth(), height: 0 }); } catch { /* 收不起来也不拖累别的 */ }
+  }
+
   function scheduleRevive() {
     clearTimeout(reviveTimer);
     // v0.1.32 - 宿主重载 App / 重新挂载卡片时，身份可能晚一两拍才补上。
@@ -828,18 +879,22 @@ export function mountMessageCard({ showCaption = false } = {}) {
     try {
       // 候选编号可能有多个：哪个查得到用哪个
       let result = null;
+      const instance = encodeURIComponent(surfaceKey(context));
       for (const candidate of candidates) {
-        const response = await hana.api.fetch('/api/paper-plane-message?id=' + encodeURIComponent(candidate));
+        const response = await hana.api.fetch('/api/paper-plane-message?id=' + encodeURIComponent(candidate) + '&instance=' + instance);
         const payload = response.ok ? await response.json().catch(() => null) : null;
         if (payload?.ok && payload.data?.id === candidate) { result = payload; recordId = candidate; break; }
       }
       if (!result) throw new Error('这条图片记录已不可用');
+      if (result.data.duplicate) { waitForClaim(context, candidates, current); return; }
       const query = '?id=' + encodeURIComponent(recordId);
       if (current !== generation) return;
       const sessionId = context.embeddedSessionId || context.originSessionId;
       if (!sessionId) throw new Error('这张图片卡没有所属对话，请从原对话打开');
       if (result.data.sessionId !== sessionId) throw new Error('图片记录不属于这段对话');
       boundSessionId = sessionId;
+      stoodDown = false;
+      if (caption) caption.hidden = false;
       const picture = await hana.api.fetch('/api/paper-plane-message/image' + query);
       if (!picture.ok) throw new Error('这张图片已不可用');
       const blob = await picture.blob();

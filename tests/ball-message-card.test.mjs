@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { prepareMessageCard, readMessageCard, cardImagePath, buildMessageCardPayload, setMessageCardState, setMessageCardFeedback, nextPositiveKind, deliverMessageCard, MAX_INLINE_IMAGE_BASE64 } from '../lib/ball-message-card.js';
+import { prepareMessageCard, readMessageCard, cardImagePath, buildMessageCardPayload, setMessageCardState, setMessageCardFeedback, nextPositiveKind, deliverMessageCard, MAX_INLINE_IMAGE_BASE64, claimRenderSlot, __resetRenderClaimsForTests, RENDER_CLAIM_TTL_MS } from '../lib/ball-message-card.js';
 
 function fixture(t) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bqb-card-test-'));
