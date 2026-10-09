@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "biaoqingbao-app",
   "name": "表情包",
-  "version": "0.1.41",
+  "version": "0.1.44",
   "entry": "index.js",
   "description": "让伙伴在回复中根据语境自然使用表情包，越用越懂你。",
   "capabilities": [
