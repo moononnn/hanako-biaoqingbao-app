@@ -13,6 +13,19 @@
 
 ## 发布工作区
 
+### 市场安装包必须手工过一遍（2026-10-10 踩到的坑）
+
+市场的 `app-biaoqingbao-app-<version>.zip` 用**官方打包器**产出（宿主 `artifacts/server/<版本>/scripts/extension-pack.mjs`），它**不认识**本项目的构建约定，会把两样不该外发的东西打进包里：
+
+1. `PROJECT_LOG.md`——内部开发记录，含私人称呼与本机路径。红线内容。
+2. `index.js` 里 `#release-strip-start/end` 包着的开发期验证入口——`scripts/build-release.mjs` 会剥，官方打包器不会剥，包里留着一条能往任意会话投递图的接口。
+
+正确做法：先从正式目录复制一份到临时暂存目录（排除 `PROJECT_LOG.md`、`x.json`、`_backups`、`data`、`*.log`、`__pycache__` 等），暂存目录名必须是 id（`biaoqingbao-app`），在暂存目录里手工删掉 strip 标记区间，再用官方打包器对着暂存目录打包。
+
+> v0.1.41 的市场安装包已经带上了 `PROJECT_LOG.md` 和 `x.json`（`PROJECT_LOG.md` 有 108 次下载）。替换附件会让市场按 sha256 校验安装失败，所以不能动，只能从下一版开始保证干净。
+
+### 本地目录
+
 本地正式目录（`<HANA_HOME>/apps/biaoqingbao-app`）是唯一开发位置，改完直接改它，不走 Builder、不走 dev slot。公开内容从独立克隆推送：
 
 - 发布仓库克隆：`<工作台>/hanako-biaoqingbao-app`（remote 指向 `moononnn/hanako-biaoqingbao-app`）
