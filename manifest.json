@@ -2,9 +2,9 @@
   "manifestVersion": 2,
   "id": "biaoqingbao-app",
   "name": "表情包",
-  "version": "0.1.44",
+  "version": "0.2.0",
   "entry": "index.js",
-  "description": "让 AI 伙伴陪你斗图！导入你收藏的表情包，ta 会根据聊天内容挑图回复。点“喜欢、应景、不喜欢”，让选图越来越合你口味。",
+  "description": "让小花陪你斗图！导入你收藏的表情包，ta 会根据聊天内容挑图回复。点“喜欢、应景、不喜欢”，让选图越来越合你口味。另外可以让小花说不同地区的方言，还能总结用户的发言习惯，学用户说话！",
   "capabilities": [
     "app/tools.expose-to-model",
     "app/hooks.agent-pre-step",
@@ -13,6 +13,8 @@
     "app/models.read",
     "app/models.infer",
     "app/agents.read",
+    "app/resources.read",
+    "app/resources.write",
     "app/sessions.read",
     "app/sessions.manage",
     "app/session.start-turn"
