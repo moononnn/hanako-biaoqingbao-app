@@ -28,7 +28,7 @@ const { listHostAgents, cacheHostAgentNames, readAgentName } = await import('../
 test('宿主名单：缓存后能列出全部伙伴', () => {
   cacheHostAgentNames([
     { id: 'hanako', name: '小花' },
-    { id: 'yuzuki', name: '柚月' },
+    { id: 'partner-b', name: '伙伴乙' },
   ]);
   const rows = listHostAgents();
   assert.equal(rows.length, 2);
