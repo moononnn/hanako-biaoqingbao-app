@@ -94,6 +94,56 @@ export default defineApp(async (sdk) => {
     record(`meta-failed ${e?.code || ""} ${e?.message || e}`);
   }
 
+  // ── v0.1.47：把宿主 resources 通道注入人格文件读写层 ──
+  //   方言的「人格文件部分」（写/删 agents/<id>/AGENTS.md 里的方言块）靠这条通道落地。
+  //   宿主给 App 子进程的 --allow-fs-read 只有三条，agents 目录不在其中，裸 fs 必被拒；
+  //   ctx.resources 是唯一正门，盘外读需要 app/resources.read、盘外写需要 app/resources.write。
+  //   拿不到就留 null（读写层会退回 fs），此时方言的人格部分会报出「读不到/写入失败」而不是假成功。
+  try {
+    const { setPersonaResources } = await import("./lib/persona-io.js");
+    setPersonaResources(sdk.resources || null);
+    record(`persona-io resources=${sdk.resources ? "已注入" : "未注入"}`);
+  } catch (e) {
+    record(`persona-io-failed ${e?.code || ""} ${e?.message || e}`);
+  }
+
+  // 伙伴显示名：App 沙箱只能碰自己的数据目录，读不到 <hana 主目录>/agents/...，
+  // 自己拼路径取名字会一路失败、最后退化成英文 id（hanako）。宿主名单里带着中文名，
+  // 启动时拉一次存进 lib/agent-name.js，卡片标题和悬浮球都走它。
+  //
+  // v0.1.48：这段从 apply 末尾挪到了沙箱探针前面。原来探针先跑、名单后缓存，
+  // 于是它记的 host-agents 永远是 0 —— 一台假警报（真值是 12），白让人以为名单没拉到。
+  try {
+    const { cacheHostAgentNames } = await import("./lib/agent-name.js");
+    const agentList = await sdk.agents?.list?.({ scope: "all" });
+    record(`agent-names cached=${cacheHostAgentNames(agentList?.agents)}`);
+  } catch (e) {
+    record(`agent-names-error ${e?.code || ""} ${e?.message || e}`);
+  }
+
+  // ── v0.1.46 沙箱可达性探针 ──
+  //   App 的代码跑在开了 Node 权限沙箱的子进程里，能碰的目录只有三块（安装目录、自己的
+  //   app-data、宿主语言包）。<hana 主目录>/agents 不在里面，读它必然 ERR_ACCESS_DENIED。
+  //   这个坑踩过两次：10-07 漏了名字以外的路，10-10 「伙伴偏好/方言口音」两页直接白屏。
+  //   所以每次启动都实测一遍并记进 probe.log：通就照旧走文件，不通就必须走宿主名单/接口，
+  //   不用再靠猜。宿主名单条数一并记下来，对不上就能立刻看出名单没拉到。
+  //   （必须在名单缓存之后跑，否则读到的永远是 0。）
+  try {
+    const fsMod = await import("node:fs");
+    const pathMod = await import("node:path");
+    const shared = await import("./lib/shared.js");
+    const { listHostAgents } = await import("./lib/agent-name.js");
+    let dirState;
+    try {
+      dirState = `可读(${fsMod.readdirSync(pathMod.join(shared.HANA_HOME, "agents")).length})`;
+    } catch (e) {
+      dirState = `拒读(${e?.code || "?"})`;
+    }
+    record(`sandbox agents-dir=${dirState} host-agents=${listHostAgents().length}`);
+  } catch (e) {
+    record(`sandbox-probe-failed ${e?.code || ""} ${e?.message || e}`);
+  }
+
   // ── 情绪观察器：agent/pre-step（模型调用前改写 messages）──
   // 接管插件版 observer 的职责：让 App 独立完成「发现该配图 → 提示模型调 express → 模型发图」。
   try {
@@ -362,17 +412,6 @@ export default defineApp(async (sdk) => {
     record("routes-registered api.js + /api/boot");
   } catch (e) {
     record(`routes-register-error ${e?.code || ""} ${e?.message || e}`);
-  }
-
-  // 伙伴显示名：App 沙箱只能碰自己的数据目录，读不到 <hana 主目录>/agents/...，
-  // 自己拼路径取名字会一路失败、最后退化成英文 id（hanako）。宿主名单里带着中文名，
-  // 启动时拉一次存进 lib/agent-name.js，卡片标题和悬浮球都走它。
-  try {
-    const { cacheHostAgentNames } = await import("./lib/agent-name.js");
-    const agentList = await sdk.agents?.list?.({ scope: "all" });
-    record(`agent-names cached=${cacheHostAgentNames(agentList?.agents)}`);
-  } catch (e) {
-    record(`agent-names-error ${e?.code || ""} ${e?.message || e}`);
   }
 
   await sdk.logger.info("biaoqingbao-app ready");
