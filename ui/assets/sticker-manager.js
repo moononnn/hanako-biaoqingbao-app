@@ -48,6 +48,21 @@
   // v0.25.0 - 统一 fetch 封装：所有请求默认带超时，避免慢请求挂死 UI（按钮永久禁用/loading 永转）
   // 超时优先级：opts.timeout 显式指定 > 按 url 推断的类别超时 > 默认 15s
   // 已有 signal 的调用（上传 60s / ZIP 120s / 检查更新 12s 等）保持原样不动
+  // 「伙伴偏好」和「方言口音」两个页面加载失败时显示的内容。
+  // 以前两处 catch 都只写死一句「加载失败，请稍后重试」，把真实原因（超时/403/后端报错）全丢了，
+  // 出问题只能靠猜。现在把原因摆在页面上。
+  function agentLoadErrorHtml(e) {
+    var reason = '';
+    try {
+      if (e && e.name === 'TimeoutError') reason = '请求超时';
+      else if (e && e.name === 'AbortError') reason = '请求被取消';
+      else if (e && e.message) reason = e.message;
+    } catch (x) {}
+    return '<div style="color:var(--text-muted);font-size:13px;line-height:1.7">加载失败，请稍后重试'
+      + (reason ? '<br><span style="font-size:12px;opacity:.75">原因：' + escHtml(reason) + '</span>' : '')
+      + '</div>';
+  }
+
   function apiFetch(url, opts) {
     opts = opts || {};
     var noAbort = opts.noAbort === true;
@@ -3744,8 +3759,8 @@
       renderGlobalAutoImageState();
       applyAgentFreqLock();
       syncAgentHiddenEntry();
-    }).catch(function () {
-      list.innerHTML = '<div style="color:var(--text-muted);font-size:13px">加载失败，请稍后重试</div>';
+    }).catch(function (e) {
+      list.innerHTML = agentLoadErrorHtml(e);
     });
   }
 
@@ -4351,6 +4366,8 @@
   function renderDialect() {
     var list = $('dialect-list');
     if (!list) return;
+    // v0.1.48：每次重渲染先复位，免得上一次残留的状态跟着进来
+    closeAllDialectMenus();
     list.innerHTML = '加载中...';
 
     Promise.all([
@@ -4373,8 +4390,8 @@
       bindDialectList();
       bindDialectSave();
       bindUserstyleActions();
-    }).catch(function () {
-      list.innerHTML = '<div style="color:var(--text-muted);font-size:13px">加载失败，请稍后重试</div>';
+    }).catch(function (e) {
+      list.innerHTML = agentLoadErrorHtml(e);
     });
   }
 
@@ -4390,7 +4407,15 @@
         var menu = picker.querySelector('.dialect-picker-menu');
         var wasOpen = menu && !menu.hidden;
         closeAllDialectMenus();
-        if (!wasOpen && menu) { menu.hidden = false; picker.classList.add('open'); }
+        if (!wasOpen && menu) {
+          menu.hidden = false;
+          picker.classList.add('open');
+          // v0.1.48：底部保存条是 sticky 固定在视口底边的，正好压在展开的菜单下面
+          // （菜单 z-index 比它高，但一打开就把那一堆选项遮掉一半，根本没法选）。
+          // 选方言时这条也用不上，选完自动回来。
+          var bar = document.querySelector('.dialect-save-bar');
+          if (bar) bar.classList.add('is-menu-open');
+        }
         return;
       }
       var pickBtn = event.target.closest('button[data-act="pick-dialect"]');
@@ -4438,6 +4463,10 @@
   }
 
   function closeAllDialectMenus() {
+    // v0.1.48：保存条复位放在最前面，不依赖列表还在不在——切走再切回来时列表会被重建，
+    // 那时残留的 is-menu-open 会让保存条一直消失。
+    var bar = document.querySelector('.dialect-save-bar');
+    if (bar) bar.classList.remove('is-menu-open');
     var list = $('dialect-list');
     if (!list) return;
     var menus = list.querySelectorAll('.dialect-picker-menu');
@@ -4738,6 +4767,11 @@
       }
     }
 
+    // v0.1.49：历史版本列表 + 与上一版的逐句对比。
+    //   以前历史只留一版且界面不展示，每次总结等于把上一版挤掉，没法比。
+    //   现在留多版，并把「新」放上、「旧」放下，各自标出这次改了哪几句。
+    renderUserstyleHistory();
+
     // 草稿区只认最新任务，避免失败任务回来后把更早的旧草稿冒充新结果。
     var latestTask = (userstyleData.tasks || [])[0];
     var lastTask = latestTask
@@ -4938,6 +4972,90 @@
     if (userstylePollTimer) { clearInterval(userstylePollTimer); userstylePollTimer = null; }
     var progress = $('userstyle-progress');
     if (progress) progress.hidden = true;
+  }
+
+  // v0.1.49：历史版本列表 + 与上一版的逐句对比。
+//   数据层已经把两版都切好句并标了 same/added/removed，这里只负责画出来。
+//   「新」在上、「旧」在下，各自标出这次改了哪几句 —— 要看完整对比就得同时看到两份。
+function formatUserstyleTime(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    function p(n) { return n < 10 ? '0' + n : String(n); }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+      + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function renderUserstyleHistory() {
+    var wrap = $('userstyle-history-wrap');
+    if (!wrap || !userstyleData) return;
+    var tpl = userstyleData.template || {};
+    var history = Array.isArray(tpl.history) ? tpl.history : [];
+    var compare = userstyleData.compare;
+
+    if (compare) {
+      wrap.hidden = false;
+      var stats = compare.stats || {};
+      var statsEl = $('userstyle-compare-stats');
+      if (statsEl) {
+        statsEl.textContent = '这次有 ' + (stats.added || 0) + ' 句是新写的，'
+          + (stats.removed || 0) + ' 句不再说了，' + (stats.unchanged || 0) + ' 句没动。';
+      }
+      var newBox = $('userstyle-compare-new');
+      if (newBox) {
+        newBox.innerHTML = (compare.newParts || []).map(function (p) {
+          return p.type === 'added'
+            ? '<span class="userstyle-diff-add">' + escHtml(p.text) + '</span>'
+            : escHtml(p.text);
+        }).join('');
+      }
+      var oldBox = $('userstyle-compare-old');
+      if (oldBox) {
+        oldBox.innerHTML = (compare.oldParts || []).map(function (p) {
+          return p.type === 'removed'
+            ? '<span class="userstyle-diff-del">' + escHtml(p.text) + '</span>'
+            : escHtml(p.text);
+        }).join('');
+      }
+      var meta = $('userstyle-compare-old-meta');
+      if (meta) {
+        meta.textContent = '#' + compare.version + '　' + formatUserstyleTime(compare.saved_at)
+          + (compare.level ? '　' + compare.level + ' 档' : '');
+      }
+    } else {
+      wrap.hidden = true;
+    }
+
+    var countEl = $('userstyle-history-count');
+    if (countEl) countEl.textContent = String(history.length);
+
+    var listEl = $('userstyle-history-list');
+    if (!listEl) return;
+    if (!history.length) {
+      listEl.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:4px 2px">还没有历史版本。再总结一次，当前这版就会留在这里可以对比。</div>';
+      return;
+    }
+    // 新的在上面：最近一次总结最可能正是要看的那一版
+    listEl.innerHTML = history.slice().reverse().map(function (h) {
+      var content = h.content || '';
+      var brief = content.slice(0, 90) + (content.length > 90 ? '…' : '');
+      return '<div class="userstyle-history-item">'
+        + '<div class="userstyle-history-meta">'
+        + '<span class="userstyle-history-no">#' + escHtml(String(h.version)) + '</span>　'
+        + escHtml(formatUserstyleTime(h.saved_at))
+        + (h.level ? '　' + escHtml(h.level) + ' 档' : '')
+        + '<div style="margin-top:3px;color:var(--text);line-height:1.6">' + escHtml(brief) + '</div>'
+        + '</div>'
+        + '<button type="button" class="btn" data-userstyle-revert="' + escHtml(String(h.version)) + '">回到这版</button>'
+        + '</div>';
+    }).join('');
+    listEl.querySelectorAll('[data-userstyle-revert]').forEach(function (btn) {
+      if (btn.dataset.bound === '1') return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', function () {
+        revertUserstyleTemplate(Number(btn.getAttribute('data-userstyle-revert')));
+      });
+    });
   }
 
   function revertUserstyleTemplate(version) {

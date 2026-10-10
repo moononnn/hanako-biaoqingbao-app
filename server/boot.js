@@ -21,6 +21,7 @@ import { readSafeJevConfig } from '../lib/jev.js';
 import { readContextFeedback } from '../lib/context-feedback.js';
 import { listAgentFitNotes } from '../lib/agent-fit-notes.js';
 import { EXPORT_CONFIG_FILE_NAME, readLastExportDir, readAgentCatalog } from '../lib/sticker-transfer.js';
+import { listHostAgents } from '../lib/agent-name.js';
 import { readChahuahuiUsage, summarizeChahuahuiUsage } from '../lib/chahuahui-usage.js';
 
 function readJson(name, fallback) {
@@ -38,8 +39,13 @@ export function buildBootData() {
 
   const exportConfigPath = path.join(DATA_DIR, EXPORT_CONFIG_FILE_NAME);
 
+  // v0.1.46 - 宿主名单优先。readAgentCatalog() 扫的是 <hana 主目录>/agents，
+  //   App 子进程的许可根里没有这个目录，读了必然 ERR_ACCESS_DENIED 并静默返回 [],
+  //   于是这里拿到的伙伴名全空，界面上显示成英文 id。
+  const hostAgents = listHostAgents();
+  const catalog = hostAgents.length ? hostAgents : readAgentCatalog();
   const agentNames = {};
-  for (const item of readAgentCatalog()) {
+  for (const item of catalog) {
     if (item?.id) agentNames[item.id] = item.name || item.id;
   }
 

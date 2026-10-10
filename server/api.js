@@ -1,4 +1,4 @@
-﻿// 表情包插件 - API 路由
+// 表情包插件 - API 路由
 // 提供：列表 / 图片 / 上传 / 修改 / 删除 / 识图自动打标 / 模型配置
 // v0.17.4-share: 公共函数统一从 lib/shared.js 导入，消除代码重复
 import fs from 'node:fs';
@@ -132,6 +132,16 @@ import { analyzeConversation } from '../lib/text-analysis.js';
 import { hostModelReady, callHostModel } from '../lib/model-host.js';
 import { resolveFetcher } from '../lib/net.js';
 import { readHiddenAgents, hideAgent, unhideAgent, filterHiddenAgents } from '../lib/hidden-agents.js';
+import { listHostAgents } from '../lib/agent-name.js';
+// v0.1.49：把当前版与历史版逐句比出来，界面上下并排显示差异
+import { compareWithVersion } from '../lib/style-diff.js';
+// v0.1.46：下列几处导出/导入映射要用伙伴名单，宿主名单优先。
+//   扫目录版（readAgentCatalog）在 App 子进程里必然读不到，静默返回 []，
+//   导出的包就少了伙伴名、导入时的伙伴映射也全靠 id 猜。
+function transferAgentCatalog() {
+  const fromHost = listHostAgents();
+  return fromHost.length ? fromHost : readAgentCatalog(path.join(HANA_HOME, 'agents'));
+}
 import { readSafeJevConfig, writeJevConfig, testJevConfig, evaluateJev } from '../lib/jev.js';
 import { readJevShadowLog } from '../lib/jev-shadow.js';
 
@@ -917,7 +927,7 @@ export default async function registerRoutes(app, ctx) {
           stickersDir: STICKERS_DIR,
           outputPath: tempPath,
           dataDir: DATA_DIR,
-          agentCatalog: readAgentCatalog(path.join(HANA_HOME, 'agents')),
+          agentCatalog: transferAgentCatalog(),
           pluginVersion: readJsonFile(path.join(__dirname, '..', 'manifest.json'), {}).version || '',
           includeDataKeys,
           groupFilter,
@@ -1003,7 +1013,7 @@ export default async function registerRoutes(app, ctx) {
         let groupIdMap = new Map();
         let previewGroupStore = currentGroupStore;
         if (migrationPayload) {
-          const targetAgents = readAgentCatalog(path.join(HANA_HOME, 'agents'));
+          const targetAgents = transferAgentCatalog();
           migrationAgentMapping = buildAgentMapping(migrationPayload.agents || [], targetAgents);
           if (migrationPayload.data?.stickerGroups) {
             const preview = mergeGroupStores(currentGroupStore, migrationPayload.data.stickerGroups);
@@ -1195,15 +1205,15 @@ export default async function registerRoutes(app, ctx) {
         if (migrationData?.dialectConfig) {
           try {
             const savedDialect = writeDialectConfig(readJsonFile(path.join(DATA_DIR, 'dialect-config.json'), migrationData.dialectConfig));
-            const synced = syncDialectToIshiki(savedDialect);
-            const repaired = reconcileDialectToIshiki(savedDialect);
+            const synced = await syncDialectToIshiki(savedDialect);
+            const repaired = await reconcileDialectToIshiki(savedDialect);
             syncSummary = { dialect: synced, repaired };
           } catch (error) {
             syncSummary = { dialectError: error.message || '方言人格同步失败' };
           }
         }
         if (migrationData?.styleTemplate) {
-          try { syncSummary = { ...(syncSummary || {}), userstyle: syncUserstyleToIshiki() }; } catch (error) {
+          try { syncSummary = { ...(syncSummary || {}), userstyle: await syncUserstyleToIshiki() }; } catch (error) {
             syncSummary = { ...(syncSummary || {}), userstyleError: error.message || '学我说话人格同步失败' };
           }
         }
@@ -2870,35 +2880,49 @@ export default async function registerRoutes(app, ctx) {
     }
   });
 
-  // ═══ GET /api/agents — 扫描可用助手列表 ═══
+  // ═══ GET /api/agents — 伙伴清单 ═══
+  // v0.1.45 - 改成走宿主名单。这条接口原来用 readdirSync 裸扫 <hana 主目录>/agents/，
+  //   而 App 子进程开着 Node Permission Model，许可根只有「安装目录 + 自己的 app-data + locales」
+  //   三条（见 hana 启动时给子进程传的 --allow-fs-read），agents 目录根本不在里面，
+  //   扫目录被运行时拒掉。这一个接口一坏，「伙伴偏好」和「方言口音」两个页面同时白屏
+  //   （全 App 只有它俩会碰这个目录，所以别的页面全都正常，很有迷惑性）。
+  //   宿主名单走 app/agents.read（清单里本来就申请了），启动时拉一次存在 lib/agent-name.js。
+  //   扫目录只留作宿主没给出名单时的兜底。
   app.get('/api/agents', (c) => {
     try {
-      const agentsDir = path.join(HANA_HOME, 'agents');
-      if (!fs.existsSync(agentsDir)) return json({ ok: true, data: [] });
-      const dirs = fs.readdirSync(agentsDir, { withFileTypes: true });
-      const agents = [];
-      for (const d of dirs) {
-        if (!d.isDirectory()) continue;
-        // 从 config.yaml 读助手名
-        let name = d.name;
-        const yamlPath = path.join(agentsDir, d.name, 'config.yaml');
-        if (fs.existsSync(yamlPath)) {
-          try {
-            const yaml = fs.readFileSync(yamlPath, 'utf-8');
-            // 简单解析 yaml，找 agent: 下的 name:
-            const lines = yaml.split('\n');
-            let inAgent = false;
-            for (const line of lines) {
-              if (line.trim() === 'agent:') { inAgent = true; continue; }
-              if (inAgent) {
-                const m = line.match(/^\s+name:\s*['"]?([^'"\n]+)['"]?\s*$/);
-                if (m) { name = m[1].trim(); break; }
-                if (line.trim() !== '' && !line.startsWith('  ')) { inAgent = false; }
+      const fromHost = listHostAgents();
+      let agents;
+      if (fromHost.length) {
+        agents = fromHost;
+      } else {
+        ctx?.log?.warn?.('[biaoqingbao] 宿主名单为空，退回扫目录（可能被沙箱拒绝）');
+        const agentsDir = path.join(HANA_HOME, 'agents');
+        if (!fs.existsSync(agentsDir)) return json({ ok: true, data: [] });
+        const dirs = fs.readdirSync(agentsDir, { withFileTypes: true });
+        agents = [];
+        for (const d of dirs) {
+          if (!d.isDirectory()) continue;
+          // 从 config.yaml 读助手名
+          let name = d.name;
+          const yamlPath = path.join(agentsDir, d.name, 'config.yaml');
+          if (fs.existsSync(yamlPath)) {
+            try {
+              const yaml = fs.readFileSync(yamlPath, 'utf-8');
+              // 简单解析 yaml，找 agent: 下的 name:
+              const lines = yaml.split('\n');
+              let inAgent = false;
+              for (const line of lines) {
+                if (line.trim() === 'agent:') { inAgent = true; continue; }
+                if (inAgent) {
+                  const m = line.match(/^\s+name:\s*['"]?([^'"\n]+)['"]?\s*$/);
+                  if (m) { name = m[1].trim(); break; }
+                  if (line.trim() !== '' && !line.startsWith('  ')) { inAgent = false; }
+                }
               }
-            }
-          } catch {}
+            } catch {}
+          }
+          agents.push({ id: d.name, name });
         }
-        agents.push({ id: d.name, name });
       }
       // v0.34.33 - 隐藏名单里的伙伴不进列表；名单（带名字）一并返回，前端据此显示「已隐藏」入口。
       const hidden = readHiddenAgents();
@@ -2909,7 +2933,10 @@ export default async function registerRoutes(app, ctx) {
         hidden: agents.filter((a) => hiddenSet.has(a.id)),
       });
     } catch (e) {
-      return json({ ok: false, error: e.message });
+      // 这条接口被「伙伴偏好」和「方言口音」两个页面共用，挂了就是两个页面同时白屏。
+      // 以前只把 error 塞进响应体、前端又吞成一句「加载失败」，现场什么都不剩，这里必须留痕。
+      ctx?.log?.error?.('[biaoqingbao] 读取伙伴列表失败:', e.code || '', e.message || e);
+      return json({ ok: false, error: e.message || String(e) });
     }
   });
 
@@ -2948,7 +2975,7 @@ export default async function registerRoutes(app, ctx) {
       // v0.28.0：remove 默认联动配置，这里传 syncConfig:false，因为紧接着就 writeDialectConfig 统一写
       const dcfg = readDialectConfig();
       if (dcfg.agents && dcfg.agents[agentId]) {
-        try { removeDialectFromIshiki(agentId, undefined, { syncConfig: false }); } catch {}
+        try { await removeDialectFromIshiki(agentId, undefined, { syncConfig: false }); } catch {}
         delete dcfg.agents[agentId];
         writeDialectConfig(dcfg);
       }
@@ -3004,8 +3031,15 @@ export default async function registerRoutes(app, ctx) {
 
   // ── GET /api/agent-freq - 读取配图频率配置 ──
   app.get('/api/agent-freq', (c) => {
-    const config = readAgentFreqConfig();
-    return json({ ok: true, data: config });
+    // 「伙伴偏好」页面的另一半请求。以前裸读，配置读取一出问题就整页 500，
+    // 前端把原因吃掉只剩「加载失败，请稍后重试」，查起来跟玄学一样。
+    try {
+      const config = readAgentFreqConfig();
+      return json({ ok: true, data: config });
+    } catch (e) {
+      ctx?.log?.error?.('[biaoqingbao] 读取配图频率配置失败:', e.code || '', e.message || e);
+      return json({ ok: false, error: e.message || String(e) });
+    }
   });
 
   // ── POST /api/agent-freq - 校验并保存统一的 version 2 配置 ──
@@ -3060,8 +3094,15 @@ export default async function registerRoutes(app, ctx) {
 
   // ── GET /api/dialect - 读取方言配置 + 方言库元数据（纯读，自愈只发生在 POST 保存后）──
   app.get('/api/dialect', (c) => {
-    const config = readDialectConfig();
-    const userName = readUserName();
+    // 「方言口音」页面的另一半请求。同 /api/agent-freq：不留错误就永远只能看到一句「加载失败」。
+    let config, userName;
+    try {
+      config = readDialectConfig();
+      userName = readUserName();
+    } catch (e) {
+      ctx?.log?.error?.('[biaoqingbao] 读取方言配置失败:', e.code || '', e.message || e);
+      return json({ ok: false, error: e.message || String(e) });
+    }
     return json({
       ok: true,
       data: {
@@ -3107,23 +3148,32 @@ export default async function registerRoutes(app, ctx) {
       }
       // 同步写入/移除各助手的 ishiki.md（用户主动开启才写，关闭即删）
       // 传 before 作为旧配置：否则 sync 内部读到的缓存已是新配置，关闭的助手会被漏掉
-      const syncResults = syncDialectToIshiki(saved, undefined, before);
+      const syncResults = await syncDialectToIshiki(saved, undefined, before);
       const failed = Object.entries(syncResults).filter(([_, r]) => r && r.ok === false);
       // 对配置里已开启方言的助手做二次自愈：sync 失败时再补一次，仍失败才报错
-      const repaired = reconcileDialectToIshiki(saved);
+      const repaired = await reconcileDialectToIshiki(saved);
       const stillFailed = failed.filter(([id]) => !repaired.fixed.includes(id));
       // v0.23.0：错误信息去本地路径（fs 原始报错可能带 ishiki.md 绝对路径，不进前端）
       const cleanErr = (msg) => String(msg || '')
         .replace(/[A-Za-z]:\\[^\s'";，。]*/g, '<path>')
         .replace(/\\\\[^\\\s]+\\[^\s'";，。]*/g, '<path>');
+      // v0.1.47：人格文件走宿主通道，没在「应用能力」里批准读取/写入时会被权限层拒掉。
+      //   这时把原话甩给用户没意义，给一句能照做的：去哪儿、点什么。
+      const humanErr = (msg) => {
+        const text = cleanErr(msg);
+        if (/ACCESS_DENIED|restricted|未授权|not authorized|permission/i.test(text)) {
+          return '还没拿到读取/写入伙伴人格文件的权限。请到 Hana 的「设置 → 应用 → 表情包 → 应用能力」，允许“读取与写入用户资源”，然后回来重新保存。';
+        }
+        return text;
+      };
       const message = stillFailed.length
-        ? `已保存，但 ${stillFailed.map(([id]) => id).join('、')} 的人格写入失败：${stillFailed.map(([_, r]) => cleanErr(r.error)).join('；')}（重启后不生效）`
+        ? `已保存，但 ${stillFailed.map(([id]) => id).join('、')} 的人格写入失败：${stillFailed.map(([_, r]) => humanErr(r.error)).join('；')}（重启后不生效）`
         : '已保存。重启 Hana 后生效，建议开一个新对话框聊天（旧对话框里可能残留旧方言味道）';
       return json({
         ok: true,
         message,
         data: saved,
-        syncFailed: stillFailed.map(([id, r]) => ({ agentId: id, error: cleanErr(r.error) })),
+        syncFailed: stillFailed.map(([id, r]) => ({ agentId: id, error: humanErr(r.error) })),
       });
     } catch (e) {
       return json({ ok: false, error: e.message });
@@ -3378,10 +3428,13 @@ export default async function registerRoutes(app, ctx) {
     const tpl = readStyleTemplate();
     const tasks = readStyleTasks().slice(-20).reverse();
     // v0.30.7：全部助手（含名字）+ 排除名单（v0.30.9：移除 activeAgent——配方言是方言页的职责）
-    let agents = [];
-    try {
-      const agentsDir = path.join(HANA_HOME, 'agents');
-      agents = fs.readdirSync(agentsDir, { withFileTypes: true })
+    // v0.1.45 - 同 /api/agents：宿主名单优先。原来直接扫目录，沙箱拒读后 catch 掉、
+    //   agents 默默变空数组，「从哪些助手学」的下拉框就一直是空的，看着像没有伙伴可选。
+    let agents = listHostAgents();
+    if (!agents.length) {
+      try {
+        const agentsDir = path.join(HANA_HOME, 'agents');
+        agents = fs.readdirSync(agentsDir, { withFileTypes: true })
         .filter((e) => e.isDirectory() && /^[A-Za-z0-9_-]+$/.test(e.name))
         .map((e) => {
           let name = e.name;
@@ -3395,11 +3448,18 @@ export default async function registerRoutes(app, ctx) {
           } catch { /* 读不到名字用 id */ }
           return { id: e.name, name };
         });
-    } catch { /* 没有助手 */ }
+      } catch {
+        ctx?.log?.warn?.('[biaoqingbao] 读伙伴名单失败（学我说话页的来源列表会是空的）:', e.message || e);
+        agents = [];
+      }
+    }
     return json({
       ok: true,
       data: {
         template: tpl,
+        // v0.1.49：当前版与最近一个历史版的逐句对比。没有历史或两版一样时返回 null，
+        // 界面就不展示对比区（没必要给一个“没区别”的面板）。
+        compare: compareWithVersion(tpl, (tpl.history?.[tpl.history.length - 1] || {}).version),
         agents,
         userName: readUserName(),
         levels: STYLE_LEVELS,
@@ -3509,7 +3569,7 @@ export default async function registerRoutes(app, ctx) {
       }
       // v0.31.0：模板更新后自动同步到已开启「学我说话」的助手 ishiki.md，
       // 否则重启后 Hana 组装系统提示词读到的还是旧模板（回归：保存不生效）
-      const sync = syncUserstyleToIshiki();
+      const sync = await syncUserstyleToIshiki();
       // 关联任务标记已确认（历史记录用）
       if (taskId) {
         const t = getStyleTask(taskId);
@@ -3552,7 +3612,7 @@ ${draft}
       const res = revertStyleTemplate(version);
       if (!res.ok) return json({ ok: false, error: res.error }, 400);
       // v0.31.0：回退后同样重新同步 userstyle 助手的 ishiki.md
-      const sync = syncUserstyleToIshiki();
+      const sync = await syncUserstyleToIshiki();
       return json({ ok: true, data: res.data, sync });
     } catch (e) {
       return json({ ok: false, error: e.message }, 500);
@@ -3563,7 +3623,7 @@ ${draft}
   app.post('/api/style-template/clear', async (c) => {
     const res = clearStyleTemplate();
     // v0.31.0：清空后把 userstyle 人格块从各助手 ishiki.md 移除，避免旧模板残留
-    const sync = syncUserstyleToIshiki();
+    const sync = await syncUserstyleToIshiki();
     return json({ ok: true, data: res.data, sync });
   });
 
