@@ -1,5 +1,28 @@
 # 自动测试
 
+## 0.2.0 本轮汇总
+
+```powershell
+node --test tests/*.test.mjs
+python -B tests/test_ball_target.py
+python -B tests/test_ball_wait_state.py
+node <Hana 安装目录>/artifacts/server/<版本>/scripts/validate-app.mjs --dir <本项目路径> --json
+```
+
+零依赖。本轮四条主线：
+
+- **人格文件读写层**（`tests/persona-io.test.mjs`）：优先走宿主 `ctx.resources`，拿不到才退回 `fs` 且如实报错；写入用乐观并发，冲突时宁可不写；agentId 白名单拦住 `__proto__` / `prototype` / `constructor`；区分「没权限」与「文件不存在」。
+- **伙伴名单回归钉子**（`tests/agent-list.test.mjs`）：盯名单缓存本身（空结果不清缓存、脏行跳过、没显示名用 id 顶上），外加一条静态回归钉子——`/api/agents` 必须先走宿主名单、扫目录只留在兜底分支里，防止有人哪天把裸扫目录改回去。
+- **版本对比**（`tests/style-diff.test.mjs`）：句级 diff 边界（引号内的感叹号不得把句子劈成半句、右引号不得计进开引号、孤立引号不得把整篇粘成一坨）、两版相同返回 null、找不到历史版返回 null 不编。
+- 宿主模型通道、回合限流、图片卡渲染认领等既有测试全部保持通过。
+
+最近结果：2026-10-10，`node --test tests/*.test.mjs` 共 **199 项**全部通过（v0.1.44 时是 162 项）；
+Python 离屏测试 `tests/test_ball_target.py`、`tests/test_ball_wait_state.py` 各 1 项通过；
+`validate-app.mjs` 静态校验 0 error 1 warn（常驻的动态依赖警告）。
+
+未覆盖：方言人格块写入与「学我说话」总结的真实链路依赖宿主通道与真实模型，只能实机验；
+单元测试盯的是路由分支、并发保护与 diff 逻辑本身。
+
 ## v0.1.44 本轮汇总
 
 ```powershell
