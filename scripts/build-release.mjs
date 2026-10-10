@@ -20,7 +20,7 @@ const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 // 不进发布包的东西：运行时数据、备份、依赖、日志、缓存、打包产物
 const EXCLUDE_DIRS = new Set(['.git', '.github', '_backups', 'node_modules', '__pycache__', '.pytest_cache', '.cache', 'dist']);
-const EXCLUDE_FILES = new Set(['x.json', 'package-lock.json', 'PROJECT_LOG.md']);
+const EXCLUDE_FILES = new Set(['x.json', 'package-lock.json', 'PROJECT_LOG.md', 'data.json', 'preferences.json']);
 const EXCLUDE_EXT = new Set(['.log', '.zip', '.bak', '.pyc']);
 // 开发期留下的现场文件（名字里带这些词的一律不进包）
 const EXCLUDE_NAME_HINT = [/debug/i, /^probe\./i];
