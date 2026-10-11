@@ -24,6 +24,23 @@ const BATCH_TASKS_FILE = path.join(DATA_DIR, 'batch-tasks.json');
 
 let moduleCtx = null;  // 在 registerBatchTasksRoutes 里注入
 
+export function selectUntaggedForBatch(meta, tasks) {
+  const taskList = Array.isArray(tasks) ? tasks : [];
+  if (taskList.some(task => task?.status === 'running')) {
+    return { ok: false, reason: 'running', ids: [] };
+  }
+  const hasUnapplied = taskList.some(task => {
+    const applied = new Set(Array.isArray(task?.applied) ? task.applied : []);
+    return Array.isArray(task?.completed) && task.completed.some(id => id && !applied.has(id));
+  });
+  if (hasUnapplied) return { ok: false, reason: 'pending-apply', ids: [] };
+
+  const ids = Array.from(new Set((Array.isArray(meta) ? meta : [])
+    .filter(sticker => sticker && !sticker.tagged_at && typeof sticker.id === 'string' && sticker.id.trim())
+    .map(sticker => sticker.id)));
+  return { ok: true, reason: '', ids };
+}
+
 function readBatchTasks(strict = false) {
   try {
     const data = JSON.parse(fs.readFileSync(BATCH_TASKS_FILE, 'utf-8'));
@@ -531,6 +548,32 @@ export function registerBatchTasksRoutes(app, ctx) {
   moduleCtx = ctx;
   migrateAppliedState();
   moduleCtx?.log?.info?.('[biaoqingbao] 注册 batch-tasks 路由');
+
+  // POST /api/batch-auto-tag-untagged — 一键把未识图图片加入批量任务
+  app.post('/api/batch-auto-tag-untagged', async () => {
+    try {
+      const all = readBatchTasks(true);
+      const tasks = (all.order || []).map(id => all.tasks[id]).filter(Boolean);
+      const selection = selectUntaggedForBatch(readMeta(), tasks);
+      if (!selection.ok) {
+        const error = selection.reason === 'running'
+          ? '已有批量识图任务正在进行，完成后再试，避免重复识图'
+          : '有识图结果还没写入图库，请先应用结果再试';
+        return jsonResp({ ok: false, error }, 409);
+      }
+      if (selection.ids.length === 0) {
+        return jsonResp({ ok: true, data: { taskId: null, total: 0 }, message: '图库里没有未识图的图片' });
+      }
+      const task = createBatchTask(selection.ids, 5);
+      return jsonResp({
+        ok: true,
+        data: { taskId: task.id, total: task.total, concurrency: task.concurrency, status: task.status },
+        message: `已创建识图任务，共 ${task.total} 张`,
+      });
+    } catch (error) {
+      return jsonResp({ ok: false, error: '创建未识图任务失败：' + error.message }, 500);
+    }
+  });
 
   // POST /api/batch-auto-tag — 创建异步批量识图任务（新版）
   app.post('/api/batch-auto-tag', async (c) => {

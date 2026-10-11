@@ -3358,9 +3358,18 @@ export default async function registerRoutes(app, ctx) {
           }
         }
       }
-      // v0.19.5 - 模型已更换且全部失败时，不写回（磁盘保持原状），提示用户重试
-      if (modelChanged && processed === 0 && Object.keys(vectors).length === 0) {
-        return json({ ok: true, data: { total: withDesc.length, processed: 0, failed: withDesc.length, errors, note: '模型已更换且本次生成全部失败，未写入任何新向量（旧库保持不变），请检查模型配置后重试' } });
+      // 全部生成失败时保留原账本：不能只更新时间却不增加向量，否则会让“索引已更新”产生假象。
+      if (processed === 0) {
+        return json({
+          ok: true,
+          data: {
+            total: withDesc.length,
+            processed,
+            failed,
+            errors: errors.length > 0 ? errors : undefined,
+            note: '本次没有生成任何向量，现有索引未改动，请检查错误后重试',
+          },
+        });
       }
 
       const vectorsData = {

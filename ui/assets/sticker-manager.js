@@ -197,7 +197,7 @@
     $('loading-overlay').hidden = true;
   }
 
-  function toast(msg, isErr) {
+  function toast(msg, isErr, durationMs) {
     var el = document.createElement('div');
     el.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:8px 20px;border-radius:20px;font-size:13px;z-index:300;box-shadow:0 4px 12px rgba(0,0,0,.15);pointer-events:none;transition:opacity .3s';
     el.style.background = isErr ? '#c45a4e' : 'var(--primary)';
@@ -205,7 +205,7 @@
     el.textContent = msg;
     document.body.appendChild(el);
     requestAnimationFrame(function () { el.style.opacity = '1'; });
-    setTimeout(function () { el.style.opacity = '0'; setTimeout(function () { el.remove(); }, 300); }, 2500);
+    setTimeout(function () { el.style.opacity = '0'; setTimeout(function () { el.remove(); }, 300); }, durationMs || 2500);
   }
 
   // ═══════════════════════════════════
@@ -2389,7 +2389,17 @@
         toast(msg, true);
       } else {
         var d = data.data || {};
-        toast(d.processed > 0 ? '语义索引完成：' + d.processed + ' 张' : '没有需要处理的图片');
+        if (Number(d.failed) > 0) {
+          var errorDetail = Array.isArray(d.errors) ? d.errors.join('；') : '';
+          if (d.note) errorDetail = errorDetail ? errorDetail + '；' + d.note : d.note;
+          var failureText = '语义索引未完成：成功 ' + (Number(d.processed) || 0) + ' 张，失败 ' + Number(d.failed) + ' 张';
+          if (errorDetail) failureText += '。' + errorDetail.slice(0, 200);
+          toast(failureText, true, 6000);
+        } else if (Number(d.processed) > 0) {
+          toast('语义索引完成：' + d.processed + ' 张');
+        } else {
+          toast('没有需要处理的图片');
+        }
       }
     } catch (e) {
       toast('语义索引出错：' + e.message, true);
@@ -5182,6 +5192,32 @@ function formatUserstyleTime(iso) {
     updateBatchCount();
   }
 
+  async function batchTagUntagged() {
+    var button = $('batch-tag-untagged-btn');
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    button.textContent = '正在创建任务…';
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-auto-tag-untagged'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      var data = await resp.json();
+      if (!resp.ok || !data.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+      var taskId = data.data && data.data.taskId;
+      if (!taskId) { toast(data.message || '图库里没有未识图的图片'); return; }
+      toast(data.message || '已开始识图');
+      await checkBatchTasks();
+      openBatchTaskDetail(taskId);
+    } catch (error) {
+      toast('开始未识图任务失败：' + error.message, true);
+    } finally {
+      button.disabled = false;
+      button.textContent = 'AI识图未标记';
+    }
+  }
+
   async function selectAllUntagged() {
     var button = $('batch-select-untagged');
     if (button) button.disabled = true;
@@ -6266,6 +6302,8 @@ function formatUserstyleTime(iso) {
     $('btnToggleMulti').addEventListener('click', toggleBatchMode);
     $('batch-select-all').addEventListener('click', selectAllVisible);
     $('batch-select-untagged').addEventListener('click', selectAllUntagged);
+    var quickUntaggedButton = $('batch-tag-untagged-btn');
+    if (quickUntaggedButton) quickUntaggedButton.addEventListener('click', batchTagUntagged);
     $('batch-clear').addEventListener('click', clearSelection);
     $('batch-auto-tag').addEventListener('click', batchAutoTag);
     var batchGroupsBtn = $('batch-groups');

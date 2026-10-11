@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "biaoqingbao-app",
   "name": "表情包",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "entry": "index.js",
   "description": "让小花在回复里根据具体的情绪带出表情包！导入你收藏的表情包，ta 会挑着合情绪的往回复里贴。点“喜欢、应景、不喜欢”，让选图越来越合你口味。另外还能让小花说不同地区的方言，顺便总结你的发言习惯，学你说话！",
   "capabilities": [
