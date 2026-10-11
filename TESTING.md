@@ -1,5 +1,51 @@
 # 自动测试
 
+## v0.2.5 发布前全量验证（2026-10-11）
+
+```powershell
+node --test tests/*.test.mjs
+py -3 tests/test_ball_target.py
+py -3 tests/test_ball_wait_state.py
+node <Hana 安装目录>/artifacts/server/1.0.16-beta-win32-x64-.../scripts/validate-app.mjs --dir "C:\Users\laotv\.hanako\apps\biaoqingbao-app" --json
+```
+
+结果：`node --test` 共 **234 项全部通过**（v0.2.0 时是 199 项）；Python 离屏测试 `test_ball_target.py`、`test_ball_wait_state.py` 各 1 项通过（Qt offscreen）；`validate-app.mjs` 静态校验 0 error、1 warn（常驻的动态依赖未证明警告）。
+
+说明两点，避免下次误读：
+
+- 静态校验对着**正式目录**跑，不是发布克隆。校验器要求目录名等于 manifest id（`biaoqingbao-app`），克隆目录名是 `hanako-biaoqingbao-app`，对着它跑会报 `INVALID_MANIFEST: id does not match its directory name`，那是校验器给生产装载器的规矩，不是应用有问题。
+- Python 离屏测试在 `tests/`，不在 `python/`。
+
+本轮新增/改动的测试：`tests/sticker-tool-card.test.mjs`（工具结果图卡全链路）、`tests/render-claim-diagnostics.test.mjs`（认领诊断）、`tests/log-trim.test.mjs`（日志封顶）、`tests/ball-message-card-ui.test.mjs`（+221 行，共用视图认领、租约、编号耐心、输入框高度）、`tests/ball-message-card-chat.test.mjs`、`tests/text-model-host.test.mjs`（assistant 块数组兜底）。
+
+实机验收状态（如实记录，不当已解决写）：使用者在**两个新窗口**测试，两个窗口回复内插图正常、未出现末尾独立图；旧调试窗口不重启直接切回仍异常。单元测试覆盖的是认领、租约与通道逻辑本身，不等于所有切窗场景端到端通过。
+
+## v0.2.5 工具结果图卡定向验证（2026-10-11）
+
+`node --test tests/sticker-tool-card.test.mjs tests/sticker-delivery.test.mjs tests/sticker-after-turn.test.mjs tests/ball-message-card-ui.test.mjs tests/ball-message-card-chat.test.mjs tests/ball-message-card.test.mjs tests/message-card-attribution.test.mjs tests/render-claim-diagnostics.test.mjs`
+
+结果：106 项直接相关测试通过；index.js、lib/sticker-delivery.js、lib/ball-message-card.js、ui/assets/message-card-view.js 及新增/修改诊断测试语法检查通过。TMP/TEMP 指定工作台。覆盖独立工具业务记录、details.card 保留、不另发 custom、不伪造 native 身份/来源、投递失败、不选图路径、全尺寸 data URL 剥离、显式 recordId、宿主上下文迟到和既有认领/反馈/聊天边界。首次运行扩大范围后 104 中 1 失败，原因仅旧 UI 诊断断言仍期望 0.2.4，更新后通过；真实首张新通道卡出现空上下文空指针，新增失败基线（归属到达前不应请求记录）后修复，此时 105 通过。交叉审查后再补常驻 query 的明确跨会话失败基线，修前旧图被 binding 短路保留；修后先收图/不认领旧记录，原归属返回时恢复，最终 106 通过。
+
+实机：使用指定图库 ID，绕过向量/模型匹配；正式 App 管理工具重载后，第二张新通道测试卡有图片/反馈/聊天 DOM，业务记录成功载图 HIT=1、页面标记 render-diag-0.2.5。未写入反馈偏好、未发送聊天、未调用付费模型/API。桌面工具没有可识别会话控件，未完成切走切回或像素/标题视觉验收；不把 mounted/DOM/HIT 当作完整验收。旧窗口重复记录不迁移，纸飞机和 after-turn 保留旧通道。未运行全量测试。
+
+使用者后续实机反馈：旧调试窗口重启 Hana 可恢复，不重启仅切回仍异常；之后两个新窗口均在回复内插图、未出现末尾独立图，暂时接受。提供样本 sess_0mv3fvfek_ca93c394139d3e58d1ef。仅记录反馈，未独立读取/重复测试；不把初步出图通过扩写为长期切窗与全部旧场景通过。
+
+## v0.2.4 重复配图修复定向验证（2026-10-11）
+
+`node --test tests/ball-message-card-ui.test.mjs tests/ball-message-card.test.mjs tests/render-claim-diagnostics.test.mjs tests/ball-message-card-chat.test.mjs`
+
+结果：75 项相关测试通过；`node --check lib/ball-message-card.js`、`node --check ui/assets/message-card-view.js` 通过。先用真实形态 `/_surface/<身份>/paper-plane-message.html` 留下失败基线，原代码两个实例均报页面文件名，两条身份测试失败；修改后通过。新增覆盖：文件名不可作身份、持续续期超过六秒仍挡住第二实例、零宽停止续期后让位者可接管、旧实例恢复先认领、隐藏不续期、旧轮询回包不收起新记录、pagehide 释放/pageshow 重认领、其他实例及过期退出凭证不可释放新租约。兼顾共用视图的内联聊天与反馈回归。交叉审查指出恢复时身份迟到可能空白，已补失败基线并修复：宿主暂缺编号时复用已核对归属的上下文重新认领，明确切换会话时禁止回退旧图；新增同会话/跨会话边界验证，相关测试重新通过。
+
+未运行应用全量测试，未调用付费模型/API；尚未重启后的真实界面验收。实机请检查：首次一张 → 切走切回仍一张 → 停留超过六秒/隔久切回仍一张 → 不喜欢/聊天入口正常。若再重复，按 v0.2.4 CLAIM 诊断继续定位，不宣称已实机解决。
+
+
+## v0.2.3 认领诊断定向验证（2026-10-11）
+
+`node --test --test-name-pattern="claim diagnostics|instance|surfaces that share|exact stamped|渲染认领" tests/render-claim-diagnostics.test.mjs tests/ball-message-card.test.mjs tests/ball-message-card-ui.test.mjs`
+
+结果：11 项相关测试通过；后端图片卡、前端共用视图和新增诊断测试语法检查通过。覆盖身份摘要与长度、进程/模块标记、前一持有者/年龄、允许与拒绝结果、空身份与缺失页面版本、日志不可写仍保持原决策、页面版本参数及原认领行为。测试临时目录指定工作台，不读写真实运行时账本。未运行全量测试，未调用模型，未实机复现；不代表重复配图已修复。
+
+
 ## 0.2.0 本轮汇总
 
 ```powershell
