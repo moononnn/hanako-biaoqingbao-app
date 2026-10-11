@@ -102,6 +102,7 @@ import {
 } from '../lib/batch-apply.js';
 import { registerBatchTasksRoutes } from './_batch-tasks.js';
 import { safeStickerPath } from '../lib/ball-core.js';
+import { appendBoundedLog } from '../lib/log-trim.js';
 import { isCodexVisionProvider } from '../lib/vision-codex.js';
 import { applyPreferenceFeedback, mutatePreferences, snapshotMapping, ensureUser } from '../lib/feedback.js';
 import { removeStickerExposure } from '../lib/exposure.js';
@@ -3855,7 +3856,8 @@ ${draft}
   app.get('/api/message-card-context', (c) => {
     try {
       const note = String(c.req.query('note') || '').slice(0, 600);
-      fs.appendFileSync(path.join(DATA_DIR, 'card-context-debug.log'), new Date().toISOString() + ' | ' + note + '\n');
+      // v0.1.42 - 封顶 5MB，超了只留最近 1MB。排障日志是用来查事的，不是记流水账。
+      appendBoundedLog(path.join(DATA_DIR, 'card-context-debug.log'), new Date().toISOString() + ' | ' + note + '\n');
     } catch { /* 记不上就算了 */ }
     return json({ ok: true });
   });
