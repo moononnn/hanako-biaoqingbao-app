@@ -1,5 +1,22 @@
 # 自动测试
 
+## v0.2.8 发布前全量验证（2026-10-11）
+
+```powershell
+node --test tests/*.test.mjs
+py -3 tests/test_ball_target.py
+py -3 tests/test_ball_wait_state.py
+node <Hana 安装目录>/artifacts/server/<版本>/scripts/validate-app.mjs --dir <Hana 主目录>/apps/biaoqingbao-app --json
+```
+
+结果：`node --test` 共 **239 项全部通过**（v0.2.5 是 234 项；本版新增 2 项回填回归）；Python 离屏测试 `test_ball_target.py`（约 8.1 秒）、`test_ball_wait_state.py`（约 3.6 秒）各 1 项通过；`validate-app.mjs` 静态校验 0 error、1 warn（常驻的动态依赖未证明警告）。
+
+本版两处改动与覆盖：
+
+- **入口改名**：`AI识图未标记` → `一键补齐识图`（`ui/panel.html` 按钮文案与 tooltip、`ui/assets/sticker-manager.js` 加载态恢复文案、README、更新日志同步）。`tests/batch-maintenance.test.mjs` 里那条静态断言已跟着改名，漏改会直接红。
+- **接上 `backfillTaggedAt`**（`index.js` 启动流程）：新增两项回归——一项验回填行为本身（有标签数据没时间的补上、已有时间的不动、再跑一次不写盘、补过的条目不再被判为未识图），一项静态断言盯 `index.js` 必须调用它，防止接线再次断开。
+- 实机验收：使用者在 v0.2.7 包上点过一键补齐识图，按钮与识图链路正常（作者实机反馈）；本版只改了按钮名字与启动回填，未再跑一遍真实识图。
+
 ## v0.2.6 未识图一键入口与索引失败保护（2026-10-11）
 
 ```powershell
