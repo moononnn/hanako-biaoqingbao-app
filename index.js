@@ -362,7 +362,10 @@ export default defineApp(async (sdk) => {
   try {
     const apiRoutes = (await import("./server/api.js")).default;
     const boot = await import("./server/boot.js");
-    sdk.routes.register((app) => {
+    // ⚠ 这个 await 不能省：宿主可能把注册回调延后执行（SDK 会等 registration.ready 回执，
+    //   见 sdk/app-contract/server-client.js）。不 await 的话，下面那步 tagged_at 回填
+    //   就可能抢在迁移之前落盘，顺序保证落空（2026-10-11 发布前交叉审查指出）。
+    await sdk.routes.register((app) => {
       apiRoutes(app, sdk);
       registerMessageCardRoutes(app, sdk.dataDir);
       // 页面启动数据：App 版页面是静态的，改由页面自己来取（替代老版的服务端注入）
@@ -400,7 +403,9 @@ export default defineApp(async (sdk) => {
     });
     record("routes-registered api.js + /api/boot");
   } catch (e) {
-    record(`routes-register-error ${e?.code || ""} ${e?.message || e}`);
+    // 宿主没给注册回执时 SDK 会抛 APP_SDK_HOST_UNSUPPORTED：注册本身已经发生（宿主方法
+    // 已经调过），只是等不到确认。这种记成 no-receipt，免得看着像真的注册失败。
+    record(`routes-register-${e?.code === "APP_SDK_HOST_UNSUPPORTED" ? "no-receipt" : "error"} ${e?.code || ""} ${e?.message || e}`);
   }
 
   // ── 老图库补识图时间（v0.2.8）──

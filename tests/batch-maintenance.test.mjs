@@ -123,8 +123,13 @@ test('老图库缺识图时间的条目会被回填，补过的不再算未识�
   assert.deepEqual(selectUntaggedForBatch(after, []).ids, [], '补过时间的条目不能再算未识图');
 });
 
-test('回填接在启动流程里，且落在路由注册之后（防接线断开，也防被老账本迁移误读）', () => {
+test('回填接在启动流程里，落在路由注册之后，且注册要点 await（防接线断开、防被老账本迁移误读）', () => {
   const entry = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  assert.match(
+    entry,
+    /await sdk\.routes\.register\(/,
+    'sdk.routes.register 必须 await：不 await 时回调可能延后执行，回填会抢在迁移之前落盘',
+  );
   const registerAt = entry.indexOf('sdk.routes.register');
   const backfillAt = entry.indexOf('backfillTaggedAt()');
   assert.ok(registerAt > 0, 'index.js 里应有路由注册');
