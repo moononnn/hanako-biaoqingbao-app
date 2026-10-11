@@ -6,7 +6,7 @@
 node --test tests/*.test.mjs
 py -3 tests/test_ball_target.py
 py -3 tests/test_ball_wait_state.py
-node <Hana 安装目录>/artifacts/server/1.0.16-beta-win32-x64-.../scripts/validate-app.mjs --dir "C:\Users\laotv\.hanako\apps\biaoqingbao-app" --json
+node <Hana 安装目录>/artifacts/server/<版本>/scripts/validate-app.mjs --dir <Hana 主目录>/apps/biaoqingbao-app --json
 ```
 
 结果：`node --test` 共 **234 项全部通过**（v0.2.0 时是 199 项）；Python 离屏测试 `test_ball_target.py`、`test_ball_wait_state.py` 各 1 项通过（Qt offscreen）；`validate-app.mjs` 静态校验 0 error、1 warn（常驻的动态依赖未证明警告）。
