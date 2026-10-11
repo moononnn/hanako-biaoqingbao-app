@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { claimRenderSlot, __resetRenderClaimsForTests } from '../lib/ball-message-card.js';
 
 // v0.1.17 - 两张流内卡共用一份视图（message-card-view.js），
 // 入口文件只决定显不显示配文，所以这里挂真实视图 + 纸飞机入口。
@@ -29,13 +30,15 @@ function fakeElement(height = 0, natural = { naturalWidth: 600, naturalHeight: 4
   };
 }
 
-function ui(context, fetch, initialSearch = '', viewport = { width: 314, height: 51 }, pathname = '/paper-plane-message.html') {
+function ui(context, fetch, initialSearch = '', viewport = { width: 314, height: 51 }, pathname = '/paper-plane-message.html', timers = null, intervals = null) {
   const elements = Object.fromEntries(['image', 'caption', 'status', 'fb-card', 'fb-pos', 'fb-fit', 'fb-neg', 'fb-toast']
     .map(key => [key, fakeElement(key === 'message' ? 240 : 0)]));
   const message = fakeElement(240);
   let onContext;
   const calls = [];
   const resizeRequests = [];
+  // v0.1.42 - 现场日志走自己的通道（不计入「卡片数据请求」），测试要单独拿到它。
+  const debugNotes = [];
   // v0.1.27 - 卡头标题走 hana.chrome.set，这里把它收下来当断言依据。
   const chromeSets = [];
   // 窗口地址也要能改：卡片在宿主没给身份时会从地址里找记录编号。
@@ -53,10 +56,11 @@ function ui(context, fetch, initialSearch = '', viewport = { width: 314, height:
       addEventListener(name, callback) { listeners[name] = callback; },
       body: { scrollHeight: 240 },
     }),
-    window: { addEventListener() {}, get innerWidth() { return viewportBox.innerWidth; }, get innerHeight() { return viewportBox.innerHeight; } },
+    window: { addEventListener(name, callback) { listeners['window:' + name] = callback; }, get innerWidth() { return viewportBox.innerWidth; }, get innerHeight() { return viewportBox.innerHeight; } },
     requestAnimationFrame: callback => callback(),
     ResizeObserver: class { observe() {} },
-    setTimeout, clearTimeout,
+    setTimeout: timers || setTimeout, clearTimeout: timers ? clearTimeout : clearTimeout,
+    setInterval: intervals?.setInterval, clearInterval: intervals?.clearInterval,
     URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} },
     URLSearchParams,
     hana: {
@@ -70,6 +74,7 @@ function ui(context, fetch, initialSearch = '', viewport = { width: 314, height:
           return { ok: true, json: async () => ({ ok: true, data: { sizeMode: 'auto', smallImageFit: true, showFeedbackButtons: true } }) };
         }
         if (route.startsWith('/api/message-card-context')) {
+          debugNotes.push(decodeURIComponent((route.match(/note=([^&]*)/) || [])[1] || ''));
           return { ok: true, json: async () => ({ ok: true }) };
         }
         // v0.1.30 - 聊天记录也是卡片自己的前置请求（没记录就只是 null），不计入数据请求断言。
@@ -82,11 +87,12 @@ function ui(context, fetch, initialSearch = '', viewport = { width: 314, height:
     },
   };
   vm.runInNewContext(source, sandbox);
-  return { elements, calls, resizeRequests, chromeSets, change: value => onContext(value),
+  return { elements, calls, resizeRequests, chromeSets, debugNotes, change: value => onContext(value),
     setSearch: value => { search.value = value; },
     // 身份晚一拍才补上时，卡片得能靠“页面重新可见”自愈
     setContext: value => { contextBox.value = value; },
     visibilityChange: (hidden = false) => { doc.hidden = hidden; listeners.visibilitychange?.(); },
+    windowEvent: name => listeners['window:' + name]?.(),
     viewport: viewportBox, doc };
 }
 
@@ -97,6 +103,36 @@ function response(id, text = '', sessionId = 'session-one', extra = {}) {
     blob: async () => ({}),
   };
 }
+
+test('工具图卡先有业务编号而宿主上下文迟到：等归属后再读图，不空指针或跨会话读取', async () => {
+  const state = ui(null, () => response(idA, '', 'session-one', { sender: 'partner' }),
+    '?recordId=' + idA, { width: 314, height: 51 }, '/paper-plane-message.html', () => 0);
+  await settle();
+  assert.equal(state.calls.length, 0, '没有宿主归属时不先认领业务记录');
+  assert.doesNotMatch(state.elements.status.textContent, /null|embeddedSessionId/);
+  const context = { cardInstanceId: idB, embeddedSessionId: 'session-one' };
+  state.setContext(context);
+  state.change(context);
+  await settle();
+  assert.equal(state.elements.image.hidden, false);
+  assert.equal(state.calls.some(call => call.route.startsWith('/api/paper-plane-message?id=' + idA)), true);
+});
+
+test('工具图卡 query 常驻时明确跨会话先收图，不认领旧记录；归属回到原会话可恢复', async () => {
+  const first = { cardInstanceId: idB, embeddedSessionId: 'session-one' };
+  const state = ui(first, () => response(idA), '?recordId=' + idA);
+  await settle();
+  assert.equal(state.elements.image.hidden, false);
+  const before = state.calls.length;
+  const other = { ...first, embeddedSessionId: 'session-two' };
+  state.setContext(other); state.change(other);
+  await settle();
+  assert.equal(state.elements.image.hidden, true, '不能被同一 recordId 的短路保留旧会话图片');
+  assert.equal(state.calls.length, before, '已知归属不同，不先认领旧记录');
+  state.setContext(first); state.change(first);
+  await settle();
+  assert.equal(state.elements.image.hidden, false);
+});
 
 test('exact stamped id controls image and literal caption; no HTML interpolation', async () => {
   const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, route => response(idA, '<script>no</script>'));
@@ -126,12 +162,187 @@ test('another instance is already drawing this record: yield instead of painting
 // 认领参数必须带上：没有它，后端分不出「我是谁」，也就判不出重复。
 test('picture requests carry the instance identity used for the claim', async () => {
   const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' },
-    () => response(idA), '', { width: 314, height: 51 }, '/surface/token-one');
+    () => response(idA), '', { width: 314, height: 51 }, '/api/apps/biaoqingbao-app/ui/_surface/token-one/paper-plane-message.html');
   await settle();
   const dataCalls = state.calls.filter(call => call.route.startsWith('/api/paper-plane-message?id='));
   assert.ok(dataCalls.length > 0 && dataCalls.every(call => call.route.includes('&instance=')),
     '取数据那次要带实例身份，图片本体那次不用');
   assert.ok(dataCalls.every(call => call.route.includes('token-one')), '实例身份取自当前 surface 路径');
+  assert.ok(dataCalls.every(call => new URL(call.route, 'http://local').searchParams.get('view') === 'render-diag-0.2.5'),
+    '认领请求带页面代码版本，帮助区分旧页面');
+});
+
+// 2026-10-10 实机回归：宿主给同一段对话里两个实例的 surface 路径，前 175 个字符完全一样
+// （sessionId / appId / action / principalId 开头都一样），区分彼此的 leaseId 排在后面。
+// 身份一旦被截短，两个实例就报出同一个 id，后端以为「还是我」，两张图就并排挂出来了。
+test('surfaces that share a long prefix still report different identities', async () => {
+  const shared = 'eyJzY2hlbWFWZXJzaW9uIjoxLCJzZXNzaW9uSWQiOiJhcHNfOTEwYzNmMmEtYTkxZi00Y2EwLTljYWEtN2QwZTZmMDhiMDE4IiwiYXBwSWQiOiJiaWFvcWluZ2Jhby1hcHAiLCJhY3Rpb24iOiJhcHBzLnN1cmZhY2UiLCJwcmluY2lwYWxJZCI6InByaW5jaXBhbF9sb2NhbF91c2VyX3VzZXJf';
+  const identityOf = async (lease) => {
+    const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA),
+      '', { width: 314, height: 51 }, '/_surface/' + shared + lease + '/paper-plane-message.html');
+    await settle();
+    const call = state.calls.find(entry => entry.route.startsWith('/api/paper-plane-message?id='));
+    return decodeURIComponent((call.route.match(/&instance=([^&]*)/) || [])[1] || '');
+  };
+  const first = await identityOf('ZGM2NDg3MzRfYjU3Zl80Zjg5X2JlOTBfODk5N2Y2YTMwMzE5');
+  const second = await identityOf('ZTk2ZWQxNjgtODdlYy00ZDAyLTg4MjMtYTdmNjRlODBjOWM4');
+  assert.ok(first && second, '两个实例都要报得出身份');
+  assert.notEqual(first, second, '前缀相同的两条 surface 路径不能报成同一个身份');
+  assert.ok(first.includes('ZGM2NDg3MzR') && second.includes('ZTk2ZWQxNjg'),
+    '身份要保留路径尾段里真正区分实例的那一段');
+});
+
+// 等身份的耐心：宿主一直给空上下文时，卡片不能12 秒就放弃（v0.1.42）。
+// 计时器替身让重试立刻发生，好把整条等待链在测试里跑完。
+function claimIntervals() {
+  const callbacks = new Set();
+  return {
+    setInterval(callback, ms) { assert.equal(ms, 2000); callbacks.add(callback); return callback; },
+    clearInterval(callback) { callbacks.delete(callback); },
+    tick: () => Promise.all([...callbacks].map(callback => callback())),
+    count: () => callbacks.size,
+  };
+}
+
+test('surface identity never falls back to the common html filename', async () => {
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one', instanceKey: 'explicit-instance' },
+    () => response(idA));
+  await settle();
+  const route = state.calls.find(call => call.route.startsWith('/api/paper-plane-message?id=')).route;
+  assert.equal(new URL(route, 'http://local').searchParams.get('instance'), 'explicit-instance');
+});
+
+test('visible claim is renewed beyond TTL; another surface stands down and cannot also paint', async t => {
+  __resetRenderClaimsForTests();
+  t.after(__resetRenderClaimsForTests);
+  let now = 1000;
+  const fetch = route => {
+    const url = new URL(route, 'http://local');
+    const id = url.searchParams.get('id');
+    const extra = url.pathname === '/api/paper-plane-message'
+      ? { duplicate: !claimRenderSlot(id, url.searchParams.get('instance'), now).claimed } : {};
+    return response(id, '', 'session-one', extra);
+  };
+  const firstIntervals = claimIntervals(), secondIntervals = claimIntervals();
+  const context = { cardInstanceId: idA, embeddedSessionId: 'session-one' };
+  const first = ui(context, fetch, '', { width: 314, height: 51 }, '/_surface/owner/paper-plane-message.html', null, firstIntervals);
+  await settle();
+  for (let i = 0; i < 5; i++) { now += 2000; await firstIntervals.tick(); }
+  const second = ui(context, fetch, '', { width: 314, height: 51 }, '/_surface/other/paper-plane-message.html', null, secondIntervals);
+  await settle();
+  assert.equal(first.elements.image.hidden, false);
+  assert.equal(second.elements.image.hidden, true);
+  assert.ok(second.debugNotes.some(note => note.startsWith('STAND-DOWN ')));
+  assert.ok(second.resizeRequests.some(size => size.height === 0));
+  assert.equal(second.calls.some(call => call.route.startsWith('/api/paper-plane-message/image')), false);
+  // 持有者变为零宽，不再续期；超过租约后让位者能接管，不会永久隐藏。
+  first.viewport.innerWidth = 0;
+  now += 6001;
+  await firstIntervals.tick();
+  await secondIntervals.tick();
+  await settle();
+  assert.equal(second.elements.image.hidden, false);
+  assert.ok(second.debugNotes.some(note => note.startsWith('TAKE-OVER ')));
+  // 旧持有者回来先重新认领，不能直接把缓存图片显示成第二份。
+  first.viewport.innerWidth = 314;
+  first.visibilityChange(false);
+  await settle();
+  assert.equal(first.elements.image.hidden, true);
+});
+
+test('claim polling checks hidden state and stale replies cannot collapse a newly bound record', async () => {
+  const intervals = claimIntervals();
+  let hold = false, resolveOld;
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, route => {
+    const id = new URL(route, 'http://local').searchParams.get('id');
+    if (hold && route.startsWith('/api/paper-plane-message?id=')) {
+      hold = false;
+      return new Promise(resolve => { resolveOld = resolve; });
+    }
+    return response(id);
+  }, '', { width: 314, height: 51 }, '/_surface/owner/paper-plane-message.html', null, intervals);
+  await settle();
+  state.doc.hidden = true;
+  const calls = state.calls.length;
+  await intervals.tick();
+  assert.equal(state.calls.length, calls);
+  state.doc.hidden = false;
+  hold = true;
+  const pending = intervals.tick();
+  await state.change({ cardInstanceId: idB, embeddedSessionId: 'session-one' });
+  await settle();
+  resolveOld(response(idA, '', 'session-one', { duplicate: true }));
+  await pending;
+  assert.equal(state.elements.image.hidden, false);
+  assert.equal(state.debugNotes.some(note => note.startsWith('STAND-DOWN ')), false);
+});
+
+test('pagehide releases its own lease, pageshow reclaims instead of taking the binding shortcut', async () => {
+  const intervals = claimIntervals();
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA, '', 'session-one', { claimToken: 'lease-one' }),
+    '', { width: 314, height: 51 }, '/_surface/owner/paper-plane-message.html', null, intervals);
+  await settle();
+  const before = state.calls.filter(call => call.route.startsWith('/api/paper-plane-message?id=')).length;
+  state.windowEvent('pagehide');
+  assert.equal(intervals.count(), 0);
+  assert.equal(state.elements.image.hidden, true);
+  const release = state.calls.find(call => call.route === '/api/paper-plane-message/release');
+  assert.equal(release.init.method, 'POST');
+  assert.deepEqual(JSON.parse(release.init.body), { id: idA, instance: 'owner', claimToken: 'lease-one' });
+  state.setContext(null); // 宿主恢复页面时身份可能迟一步，仍可用已核对的原记录重新认领。
+  state.windowEvent('pageshow');
+  await settle();
+  assert.equal(intervals.count(), 1);
+  assert.equal(state.elements.image.hidden, false);
+  assert.ok(state.calls.filter(call => call.route.startsWith('/api/paper-plane-message?id=')).length > before);
+});
+
+test('resume with delayed identity uses verified context only for the same session', async () => {
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA),
+    '', { width: 314, height: 51 }, '/_surface/owner/paper-plane-message.html');
+  await settle();
+  state.visibilityChange(true);
+  state.setContext({ embeddedSessionId: 'session-one' });
+  state.visibilityChange(false);
+  await settle();
+  assert.equal(state.elements.image.hidden, false);
+  state.visibilityChange(true);
+  const before = state.calls.filter(call => call.route.startsWith('/api/paper-plane-message?id=')).length;
+  state.setContext({ embeddedSessionId: 'session-other' });
+  state.visibilityChange(false);
+  await settle();
+  assert.equal(state.elements.image.hidden, true);
+  assert.equal(state.calls.filter(call => call.route.startsWith('/api/paper-plane-message?id=')).length, before);
+  assert.match(state.elements.status.textContent, /认不出来/);
+});
+
+test('an identity that never arrives: keep waiting past 12s, then stop reporting noise', async () => {
+  let fired = 0;
+  const instant = (fn) => { if (fired++ > 200) return 0; fn(); return 0; };
+  // context 必须是 null：宿主给得出上下文却没编号，那条路径会直接停下等人操作（另一个分支）。
+  const state = ui(null, () => response(idA), '', { width: 314, height: 51 },
+    '/_surface/token-idle', instant);
+  await settle();
+  await settle();
+  const notes = state.debugNotes;
+  const misses = notes.filter(note => note.startsWith('MISS')).length;
+  const revives = notes.filter(note => note.startsWith('REVIVE')).length;
+  assert.ok(misses > 8, '空上下文要一直重试');
+  assert.ok(fired >= 20, '耐心从 12 秒拉到 20 次左右才停（' + fired + ' 次触发）');
+  assert.ok(misses <= 9 && revives <= 9,
+    `慢速段不再刷现场日志（MISS ${misses} 条，REVIVE ${revives} 条）`);
+  assert.ok(state.resizeRequests.some(size => size.height === 0),
+    '等不到编号时把自己收成 0 高，不在聊天流里留「正在读取…」空壳');
+});
+
+// 2026-10-11 现场数据：五天 414 个卡片实例，399 个都在最初几秒拿到编号，15 个一直没拿到。
+// 早先只有 8 次 × 1.5 秒的耐心，机器卡一下就彻底放弃；现在撑过前段转慢速。
+test('waiting for an identity is a two-stage patience, not a fixed 12 seconds', () => {
+  const source = fs.readFileSync(new URL('../ui/assets/message-card-view.js', import.meta.url), 'utf8');
+  assert.match(source, /const REVIVE_FAST_TRIES = \d+;/);
+  assert.match(source, /const REVIVE_SLOW_TRIES = \d+;/);
+  assert.ok(!/reviveTries >= 8\b/.test(source), '不能还写着写死的 8 次');
+  assert.match(source, /reviveTries >= REVIVE_MAX_TRIES/, '最终放弃要走常量，不写死数字');
 });
 
 test('compact width is reported to the host rather than only shrinking inner CSS', async () => {

@@ -468,6 +468,26 @@ test('确认改完就算销案：收起后重开是崭新的一轮', async () =>
   assert.ok(empty, '该给新话题的提示');
 });
 
+// 2026-10-10 实机：输入框越打字越矮，一路掉到一行高才停。
+// 根因是内联高度没人清——量 scrollHeight 时被上一次的高度钉着（scrollHeight 有下限 = clientHeight），
+// 每输入一个字符就把高度设成「当前高度 - 2px」。这里锁住清残值这一半（另一半是量之前先归零）。
+test('输入框高度不留残值：发完一条、收起面板都收回一行高', async () => {
+  const m = machine({ recordExtra: { feedback: 'negative' } });
+  const state = mount({ fetch: m.fetch });
+  await settle();
+  state.elements['fb-chat-btn'].dispatch('click');
+  const input = state.elements['chat-input'];
+  input.style.height = '72px';
+  input.value = '说一句';
+  state.elements['chat-send-btn'].dispatch('click');
+  await settle();
+  assert.equal(input.style.height, '', '发完要清内联高度，不然下次打开顶着上一次的多行高');
+  input.style.height = '72px';
+  state.elements['chat-collapse'].dispatch('click');
+  await settle();
+  assert.equal(input.style.height, '', '收起面板也一样');
+});
+
 test('卡片页面自带聊天面板与入口那些节点', () => {
   for (const file of ['../ui/paper-plane-message.html']) {
     const html = fs.readFileSync(new URL(file, import.meta.url), 'utf8');

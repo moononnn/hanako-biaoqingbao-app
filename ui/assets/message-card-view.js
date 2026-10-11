@@ -9,6 +9,7 @@ import { hana } from './sdk.js';
 
 // 宿主聊天列的窄档：宽度上限按老卡片保持 316，实际宽度跟着图片和用户的尺寸档位走。
 const CARD_MAX_WIDTH = 316;
+const CLAIM_DIAGNOSTIC_VERSION = 'render-diag-0.2.5';
 const CARD_MIN_WIDTH = 120;
 // 固定档位的宽度（preferences 里头的 small / medium / large）
 const MODE_WIDTH = { small: 180, medium: 240, large: CARD_MAX_WIDTH };
@@ -129,7 +130,10 @@ export function mountMessageCard({ showCaption = false } = {}) {
   let reviveTimer = null;
   let reviveTries = 0;
   // 2026-09 新增：宿主把同一条图片消息挂了两个实例时，后到的那个先退让再决定去留。
-  let standDownTimer = null;
+  let claimTimer = null;
+  let claimBusy = false;
+  let claimContext = null;
+  let claimToken = null;
   let stoodDown = false;
   let config = { ...DEFAULT_CONFIG };
   // v0.1.29 - 内联聊天的状态。聊天不落盘：卡片被宿主重放（切窗口回来）时回到三键状态，
@@ -640,6 +644,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
     if (!text || chatBusy || !chatStickerId) return;
     appendChatMsg('user', text);
     if (chatInput) chatInput.value = '';
+    resetChatInputHeight();
     setChatBusy(true);
     const thinking = appendChatMsg('busy', '小花正在想…');
     try {
@@ -714,6 +719,9 @@ export function mountMessageCard({ showCaption = false } = {}) {
       clearChildren(chatMsgs);
       chatSettled = false;
     }
+    // 内联高度是残留物，收起时清掉：留着的话下次打开顶着上一次的多行高，
+    // 打字时又要一格一格掉回一行（草稿内容不动，人回来接着写）。
+    resetChatInputHeight();
     resize(true);
   }
 
@@ -745,6 +753,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
     if (chatPanel) chatPanel.hidden = true;
     clearChildren(chatMsgs);
     if (chatInput) chatInput.value = '';
+    resetChatInputHeight();
     setChatBusy(false);
   }
 
@@ -757,6 +766,8 @@ export function mountMessageCard({ showCaption = false } = {}) {
       const text = typeof value === 'string' ? value.trim() : '';
       if (/^a_[0-9a-f]{20}$/.test(text) && !found.includes(text)) found.push(text);
     };
+    // 工具卡的宿主编号与业务记录不同；显式 recordId 优先，旧 custom 卡照旧回退。
+    try { take(new URLSearchParams(location.search).get('recordId')); } catch { /* 没有地址可读 */ }
     take(context?.cardInstanceId);
     take(context?.instanceKey);
     try { new URLSearchParams(location.search).forEach(take); } catch { /* 没有地址可读 */ }
@@ -785,71 +796,134 @@ export function mountMessageCard({ showCaption = false } = {}) {
     try { hana.api.fetch('/api/message-card-context?note=' + encodeURIComponent(note)).catch(() => {}); } catch { /* 上报失败不影响卡片 */ }
   }
 
-  // 这个实例的稳定身份：宿主给每个卡片实例一个独立的 surface 页面，路径尾段就是它。
-  // 取不到就退 instanceKey；再取不到交回空串（后端对空身份一律放行），宁可多画一次也不误伤。
+  // surface URL 是 /_surface/<独立身份>/paper-plane-message.html，文件名不是身份。
+  // 兼容末段直接是身份的地址；无 _surface 时只认宿主显式 instanceKey，不猜页面文件名。
   function surfaceKey(context) {
     try {
-      const tail = String(location?.pathname || '').split('/').filter(Boolean).pop() || '';
-      if (tail) return tail.slice(0, 120);
+      const parts = String(location?.pathname || '').split('/').filter(Boolean);
+      const at = parts.indexOf('_surface');
+      const token = at >= 0 ? parts[at + 1] : '';
+      if (token) return token;
     } catch { /* 读不到地址就退 instanceKey */ }
-    return String(context?.instanceKey || '').slice(0, 120);
+    return String(context?.instanceKey || '');
   }
 
-  // 撞上重复实例后的退让：等一拍再查，先到的还占着就收起来，自己那一份没人要了就接管。
-  // 顺序不能反 —— 目标是「不画两张」，不是「一张都不画」。
-  const CLAIM_WAIT_MS = 2600;
-  function waitForClaim(context, candidates, ticket) {
-    clearTimeout(standDownTimer);
-    standDownTimer = setTimeout(async () => {
-      let retry = null;
-      const instance = encodeURIComponent(surfaceKey(context));
-      for (const candidate of candidates) {
-        const response = await hana.api.fetch('/api/paper-plane-message?id=' + encodeURIComponent(candidate) + '&instance=' + instance);
-        const payload = response.ok ? await response.json().catch(() => null) : null;
-        if (payload?.ok && payload.data?.id === candidate) { retry = payload; break; }
+  // 同一条查询同时续期并检查：持有者继续画，让位者保留记录并等持有者退出后接管。
+  // 隐藏/零宽的实例不续期；任何旧回包都不能收起后来绑定的新卡片。
+  async function checkClaim() {
+    if (claimBusy || document.hidden || !window.innerWidth || !recordId || !boundSessionId || !claimContext) return;
+    if (!stoodDown && image.hidden) return;
+    const liveContext = hana.surface.getContext();
+    const liveSession = liveContext?.embeddedSessionId || liveContext?.originSessionId || '';
+    if (liveSession && liveSession !== boundSessionId) return;
+    const id = recordId, ticket = generation, context = claimContext;
+    claimBusy = true;
+    try {
+      const response = await hana.api.fetch('/api/paper-plane-message?id=' + encodeURIComponent(id)
+        + '&instance=' + encodeURIComponent(surfaceKey(context)) + '&view=' + CLAIM_DIAGNOSTIC_VERSION);
+      const payload = response.ok ? await response.json().catch(() => null) : null;
+      if (ticket !== generation || recordId !== id || document.hidden || !window.innerWidth) return;
+      if (!payload?.ok || payload.data?.id !== id || payload.data?.sessionId !== boundSessionId) return;
+      claimToken = payload.data.claimToken || null;
+      if (payload.data.duplicate) {
+        if (!stoodDown) collapseSelf('同一张图别处已经在画');
+      } else if (stoodDown) {
+        report('TAKE-OVER ' + id);
+        binding = '';
+        load(context);
       }
-      if (ticket !== generation) return;
-      if (!retry || retry.data?.duplicate) { collapseSelf('同一张图别处已经在画'); return; }
-      // 租约到期没人接手：把自己重新走一遍正常流程，这次认领会落到我头上。
-      report('TAKE-OVER ' + recordId);
-      binding = '';
-      recordId = '';
-      load(context);
-    }, CLAIM_WAIT_MS);
+    } catch { /* 短暂读失败交给下一次检查，不破坏当前显示 */ }
+    finally { claimBusy = false; }
+  }
+
+  function startClaimChecks() {
+    if (claimTimer == null && typeof setInterval === 'function') claimTimer = setInterval(checkClaim, 2000);
+  }
+
+  function releaseClaim() {
+    if (!recordId || !claimContext || !claimToken) return;
+    try {
+      hana.api.fetch('/api/paper-plane-message/release', { method: 'POST', keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: recordId, instance: surfaceKey(claimContext), claimToken }),
+      }).catch(() => {});
+    } catch { /* 退出未送达仍有六秒租约兜底 */ }
+  }
+
+  function resumeClaim() {
+    startClaimChecks();
+    if (document.hidden || !window.innerWidth) return;
+    // 恢复可见前先认领，不能直接走 binding 相同的尺寸短路。
+    // 宿主身份迟到时复用已经核对过归属的旧上下文；明确换了会话则绝不回退。
+    const context = hana.surface.getContext();
+    const session = context?.embeddedSessionId || context?.originSessionId || '';
+    const restore = !candidateIds(context).length && (!session || session === boundSessionId)
+      ? (claimContext || context) : context;
+    generation++;
+    binding = '';
+    clearImage();
+    reviveTries = 0;
+    load(restore);
   }
 
   // 让位：内容全部收掉，框报成 0 高，不在聊天流里留一个空壳。
-  function collapseSelf(note) {
+  // quiet=true 时不记现场日志 —— 等待期反复收放自己，那种记录只会污染排障日志。
+  function collapseSelf(note, quiet = false) {
     stoodDown = true;
-    clearTimeout(standDownTimer);
     clearImage();
     if (caption) { caption.textContent = ''; caption.hidden = true; }
     if (fbCard) fbCard.hidden = true;
     resetChatState();
     if (status) status.textContent = '';
-    report('STAND-DOWN ' + recordId + ' | ' + note);
+    if (!quiet) report('STAND-DOWN ' + recordId + ' | ' + note);
     try { hana.ui.resize({ width: targetWidth(), height: 0 }); } catch { /* 收不起来也不拖累别的 */ }
   }
 
+  // 等宿主递身份的耐心分两段（2026-10-11 现场数据改的）：
+  // 排障日志里 5 天 414 个卡片实例，399 个都在最初几秒里拿到了编号，15 个一直没拿到；
+  // 早先只有 8 次 × 1.5 秒 = 12 秒的耐心，机器卡一下、切窗口回来慢一点，就彻底放弃，
+  // 那张图在这段对话里再也认不出来，得切走再切回才看得到。
+  // 前段照旧（宿主正常就在这几秒里给），撑过前段转慢速：5 秒一次再撑一分钟左右。
+  const REVIVE_FAST_TRIES = 8;
+  const REVIVE_SLOW_TRIES = 12;
+  const REVIVE_FAST_MS = 1500;
+  const REVIVE_SLOW_MS = 5000;
+  const REVIVE_MAX_TRIES = REVIVE_FAST_TRIES + REVIVE_SLOW_TRIES;
   function scheduleRevive() {
     clearTimeout(reviveTimer);
-    // v0.1.32 - 宿主重载 App / 重新挂载卡片时，身份可能晚一两拍才补上。
-    // 窗口从 5 次×2 秒放宽到 8 次×1.5 秒，另加“页面重新可见就重置重试”。
-    if (reviveTries >= 8) return;
+    if (reviveTries >= REVIVE_MAX_TRIES) return;
+    const slow = reviveTries >= REVIVE_FAST_TRIES;
     reviveTries++;
     reviveTimer = setTimeout(() => {
       const current = hana.surface.getContext();
-      report(describeContext(current, candidateIds(current), 'REVIVE'));
+      // 慢速段不再逐次记现场：那段等待是这个 App 的常态，记下来只会把排障日志淹掉。
+      if (!slow) report(describeContext(current, candidateIds(current), 'REVIVE'));
       load(current);
-    }, 1500);
+    }, slow ? REVIVE_SLOW_MS : REVIVE_FAST_MS);
   }
 
   async function load(context) {
     await configReady;
     const candidates = candidateIds(context);
     const incomingSession = context?.embeddedSessionId || context?.originSessionId || '';
+    // 同一业务编号不能让短路绕过明确跨会话的归属变化；保留原归属供切回恢复。
+    if (incomingSession && boundSessionId && incomingSession !== boundSessionId && candidates[0] === recordId) {
+      generation++; binding = '';
+      collapseSelf('等待原对话恢复图卡归属', true);
+      return;
+    }
+    // 工具路由先有业务编号，宿主的已验证归属可能晚到；不能凭 URL 先认领或取图。
+    if (candidates.length && !incomingSession) {
+      if (recordId && boundSessionId) { resize(true); return; }
+      if (reviveTries === 0) report('WAIT-OWNER ' + candidates[0] + ' context=' + (context ? 'present' : 'null')
+        + ' slot=' + String(hana.lifecycle?.getSnapshot?.()?.slot || '') );
+      collapseSelf('等待宿主确认图卡归属', true);
+      scheduleRevive();
+      return;
+    }
     if (!candidates.length) {
-      report(describeContext(context, candidates, 'MISS'));
+      // 等编号是常态（前 12 秒宿主一直在补身份），现场只记前段那几次。
+      if (reviveTries <= REVIVE_FAST_TRIES) report(describeContext(context, candidates, 'MISS'));
       // v0.1.20 - 宿主会在卡片已经显示图片之后又推一个空上下文（编号、会话、槽位全空），
       // 从前那样会把已经载入的图直接抹掉，表现就是「图一闪而过变成一句提示」。
       if (recordId && (!incomingSession || incomingSession === boundSessionId)) { resize(true); return; }
@@ -863,10 +937,17 @@ export function mountMessageCard({ showCaption = false } = {}) {
       if (context) {
         clearTimeout(reviveTimer);
         status.textContent = '这张图暂时认不出来，切到别的对话再切回来就好';
-      } else if (reviveTries >= 8) {
+      } else if (reviveTries >= REVIVE_MAX_TRIES) {
         // v0.1.32 - 实测“重新装载 App”对这张卡反而更糟（重载会让卡片丢身份，要等宿主重新挂），
         // 真正管用的动作是让卡片重新挂一次：切走对话再切回来。
         status.textContent = '这张图暂时拿不到，切到别的对话再切回来就好';
+      } else if (reviveTries >= REVIVE_FAST_TRIES) {
+        // v0.1.42 - 撑过头一段还没等到身份：别在聊天流里留一行「正在读取…」的空壳
+        // （一段对话十几张图就成一排看着像坏消息的小字）。把自己收成 0 高安静等，
+        // 编号一到就自己长出来 —— 宁可晚点看见，也别一直占着位置。
+        collapseSelf('还没等到编号，先收起来', true);
+        scheduleRevive();
+        return;
       } else {
         status.textContent = '正在读取这张图片…';
         scheduleRevive();
@@ -892,18 +973,21 @@ export function mountMessageCard({ showCaption = false } = {}) {
       let result = null;
       const instance = encodeURIComponent(surfaceKey(context));
       for (const candidate of candidates) {
-        const response = await hana.api.fetch('/api/paper-plane-message?id=' + encodeURIComponent(candidate) + '&instance=' + instance);
+        const response = await hana.api.fetch('/api/paper-plane-message?id=' + encodeURIComponent(candidate) + '&instance=' + instance + '&view=' + CLAIM_DIAGNOSTIC_VERSION);
         const payload = response.ok ? await response.json().catch(() => null) : null;
-        if (payload?.ok && payload.data?.id === candidate) { result = payload; recordId = candidate; break; }
+        if (payload?.ok && payload.data?.id === candidate) { result = payload; break; }
       }
-      if (!result) throw new Error('这条图片记录已不可用');
-      if (result.data.duplicate) { waitForClaim(context, candidates, current); return; }
-      const query = '?id=' + encodeURIComponent(recordId);
       if (current !== generation) return;
+      if (!result) throw new Error('这条图片记录已不可用');
+      recordId = result.data.id;
+      const query = '?id=' + encodeURIComponent(recordId);
       const sessionId = context.embeddedSessionId || context.originSessionId;
       if (!sessionId) throw new Error('这张图片卡没有所属对话，请从原对话打开');
       if (result.data.sessionId !== sessionId) throw new Error('图片记录不属于这段对话');
       boundSessionId = sessionId;
+      claimContext = context;
+      claimToken = result.data.claimToken || null;
+      if (result.data.duplicate) { collapseSelf('同一张图别处已经在画'); return; }
       stoodDown = false;
       if (caption) caption.hidden = false;
       const picture = await hana.api.fetch('/api/paper-plane-message/image' + query);
@@ -968,11 +1052,20 @@ export function mountMessageCard({ showCaption = false } = {}) {
     }
   });
   // 输入长一点就长高一点，最多 72px（CSS 里也是这个上限），再多就面板内滚
+  // v0.1.50 - 量之前必须先把内联高度清掉。scrollHeight 有个下限等于 clientHeight，
+  // 顶着上一次的 height 去量，量出来的永远比当前高度小一点：每打一个字就把高度
+  // 设成「当前高度 - 2px」，一路从 72 格一格掉到一行高为止（实机：越打字输入框越矮）。
   chatInput?.addEventListener('input', () => {
     if (!chatInput.style) return;
+    chatInput.style.height = 'auto';
     const measured = Number(chatInput.scrollHeight) || 0;
     chatInput.style.height = measured ? Math.min(72, measured) + 'px' : '';
   });
+  // 内联高度是残留物：清 value 不清它，下次打开输入框会顶着上一次的多行高，
+  // 然后又要一格一格掉回来（就是上面那个现象的起因）。
+  function resetChatInputHeight() {
+    if (chatInput?.style) chatInput.style.height = '';
+  }
 
   // 图片量到真实尺寸后再报一次：只报一次容易停在加载前的旧高度。
   image.addEventListener('load', () => { resize(true); requestAnimationFrame(() => resize(true)); });
@@ -983,16 +1076,18 @@ export function mountMessageCard({ showCaption = false } = {}) {
   // v0.1.32 - 重新可见时如果还没认领记录（重载 App / 换对话回来常见的状态），
   // 直接重置重试次数并立刻重跑一次：宿主这时通常刚好把身份补上了。
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) return;
-    if (!recordId) { reviveTries = 0; load(hana.surface.getContext()); }
-    resize(true);
+    if (document.hidden) { generation++; releaseClaim(); clearImage(); return; }
+    resumeClaim();
   });
-  window.addEventListener('pageshow', () => {
-    if (!recordId) { reviveTries = 0; load(hana.surface.getContext()); }
-    resize(true);
-  });
+  window.addEventListener('pageshow', resumeClaim);
   hana.surface.onContextChanged(load);
   hana.ready();
+  startClaimChecks();
   load(hana.surface.getContext());
-  window.addEventListener('pagehide', () => { generation++; clearImage(); });
+  window.addEventListener('pagehide', () => {
+    generation++;
+    if (claimTimer != null) { clearInterval(claimTimer); claimTimer = null; }
+    releaseClaim();
+    clearImage();
+  });
 }
