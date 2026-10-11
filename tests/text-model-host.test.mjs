@@ -89,6 +89,30 @@ test('宿主通道：assistant 角色保留', async () => {
   assert.deepEqual(captured.payload.messages.map((m) => m.role), ['user', 'assistant', 'user']);
 });
 
+// 2026-10-10 实机：标签聊天第一轮正常，第二轮把上一轮回复塞回历史就被宿主整份拒掉，
+// 报 "assistant.content must be an array."。user 允许字符串，assistant 只认块数组。
+test('宿主通道：assistant 的字符串正文包成块数组', async () => {
+  const { ctx, captured } = fakeHost();
+  await callConfiguredTextModel(ctx, cfg, [
+    { role: 'user', content: '问' },
+    { role: 'assistant', content: '答' },
+  ]);
+  assert.deepEqual(captured.payload.messages, [
+    { role: 'user', content: '问' },
+    { role: 'assistant', content: [{ type: 'text', text: '答' }] },
+  ]);
+});
+
+test('宿主通道：assistant 传的已经是块数组时原样放行', async () => {
+  const { ctx, captured } = fakeHost();
+  const blocks = [{ type: 'text', text: '答' }];
+  await callConfiguredTextModel(ctx, cfg, [
+    { role: 'user', content: '问' },
+    { role: 'assistant', content: blocks },
+  ]);
+  assert.deepEqual(captured.payload.messages[1].content, blocks);
+});
+
 test('宿主通道：拿到正文时 ok=true 且带回 via', async () => {
   const { ctx } = fakeHost('{"has_emotion":true}');
   const result = await callConfiguredTextModel(ctx, cfg, [{ role: 'user', content: 'x' }]);
