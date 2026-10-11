@@ -103,3 +103,27 @@ test('向量批次全失败时返回错误且不改写现有索引账本', async
   assert.match(result.data.note, /现有索引未改动/);
   assert.equal(fs.readFileSync(path.join(dataDir, 'vectors.json'), 'utf8'), JSON.stringify(originalVectors, null, 2));
 });
+
+test('老图库缺识图时间的条目会被回填，补过的不再算未识图', async () => {
+  const shared = await import('../lib/shared.js');
+  const stickersFile = path.join(dataDir, 'stickers.json');
+  const before = JSON.parse(fs.readFileSync(stickersFile, 'utf8'));
+  assert.deepEqual(before.filter((s) => s.tagged_at).map((s) => s.id), ['stk_1'], '起点：只有 stk_1 有时间');
+
+  const filled = shared.backfillTaggedAt();
+  assert.equal(filled, 2, 'stk_2 / stk_3 有标签数据却没有时间，应该被补上');
+
+  const after = JSON.parse(fs.readFileSync(stickersFile, 'utf8'));
+  const byId = new Map(after.map((s) => [s.id, s]));
+  assert.equal(byId.get('stk_1').tagged_at, '2026-10-01T00:00:00.000Z', '已经有时间的条目不能被改动');
+  assert.ok(byId.get('stk_2').tagged_at, 'stk_2 应该被补上时间');
+  assert.ok(byId.get('stk_3').tagged_at, 'stk_3 应该被补上时间');
+
+  assert.equal(shared.backfillTaggedAt(), 0, '再补一次不该有任何改动（否则每次启动都白写盘）');
+  assert.deepEqual(selectUntaggedForBatch(after, []).ids, [], '补过时间的条目不能再算未识图');
+});
+
+test('启动流程里真的调了 tagged_at 回填（防止接线再次断开）', () => {
+  const entry = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  assert.match(entry, /backfillTaggedAt\(\)/, 'index.js 启动时应调用 backfillTaggedAt');
+});

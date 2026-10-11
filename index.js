@@ -94,6 +94,19 @@ export default defineApp(async (sdk) => {
     record(`meta-failed ${e?.code || ""} ${e?.message || e}`);
   }
 
+  // ── 老图库补识图时间（v0.2.8）──
+  //   早期版本识过图、但账本里没有 tagged_at 字段的条目，会被「一键补齐识图」
+  //   当成从没识过，白排一次任务、白花一次识图模型的钱。启动时扫一遍补上：
+  //   只补「有标签数据却没有时间」的那种，已有时间的、和压根没识过的都不动。
+  //   （lib/shared.js 里 backfillTaggedAt 一直躺着没人调，2026-10-11 审查时发现。）
+  try {
+    const { backfillTaggedAt } = await import("./lib/shared.js");
+    const filled = backfillTaggedAt();
+    record(`tagged-at 回填 ${filled} 条`);
+  } catch (e) {
+    record(`tagged-at 回填失败 ${e?.code || ""} ${e?.message || e}`);
+  }
+
   // ── v0.1.47：把宿主 resources 通道注入人格文件读写层 ──
   //   方言的「人格文件部分」（写/删 agents/<id>/AGENTS.md 里的方言块）靠这条通道落地。
   //   宿主给 App 子进程的 --allow-fs-read 只有三条，agents 目录不在其中，裸 fs 必被拒；
