@@ -94,19 +94,6 @@ export default defineApp(async (sdk) => {
     record(`meta-failed ${e?.code || ""} ${e?.message || e}`);
   }
 
-  // ── 老图库补识图时间（v0.2.8）──
-  //   早期版本识过图、但账本里没有 tagged_at 字段的条目，会被「一键补齐识图」
-  //   当成从没识过，白排一次任务、白花一次识图模型的钱。启动时扫一遍补上：
-  //   只补「有标签数据却没有时间」的那种，已有时间的、和压根没识过的都不动。
-  //   （lib/shared.js 里 backfillTaggedAt 一直躺着没人调，2026-10-11 审查时发现。）
-  try {
-    const { backfillTaggedAt } = await import("./lib/shared.js");
-    const filled = backfillTaggedAt();
-    record(`tagged-at 回填 ${filled} 条`);
-  } catch (e) {
-    record(`tagged-at 回填失败 ${e?.code || ""} ${e?.message || e}`);
-  }
-
   // ── v0.1.47：把宿主 resources 通道注入人格文件读写层 ──
   //   方言的「人格文件部分」（写/删 agents/<id>/AGENTS.md 里的方言块）靠这条通道落地。
   //   宿主给 App 子进程的 --allow-fs-read 只有三条，agents 目录不在其中，裸 fs 必被拒；
@@ -414,6 +401,25 @@ export default defineApp(async (sdk) => {
     record("routes-registered api.js + /api/boot");
   } catch (e) {
     record(`routes-register-error ${e?.code || ""} ${e?.message || e}`);
+  }
+
+  // ── 老图库补识图时间（v0.2.8）──
+  //   早期版本识过图、但账本里没有 tagged_at 字段的条目，会被「一键补齐识图」
+  //   当成从没识过，白排一次任务、白花一次识图模型的钱。启动时扫一遍补上：
+  //   只补「有标签数据却没有时间」的那种，已有时间的、和压根没识过的都不动。
+  //   （lib/shared.js 里 backfillTaggedAt 一直躺着没人调，2026-10-11 审查时发现。）
+  //
+  //   ⚠ 必须落在路由注册之后：批量任务账本里有个一次性迁移
+  //   （server/_batch-tasks.js 的 migrateAppliedState）要拿 tagged_at 跟任务的
+  //   created_at 比，判断「这批识图算不算已经应用过」。回填补的时间戳比老任务新，
+  //   抢在迁移之前落盘就会把那批其实没应用的结果静默标成已应用。
+  //   顺序摆在这儿，老迁移先按原样跑完，两边都读不到对方改动后的值。
+  try {
+    const { backfillTaggedAt } = await import("./lib/shared.js");
+    const filled = backfillTaggedAt();
+    record(`tagged-at 回填 ${filled} 条`);
+  } catch (e) {
+    record(`tagged-at 回填失败 ${e?.code || ""} ${e?.message || e}`);
   }
 
   await sdk.logger.info("biaoqingbao-app ready");

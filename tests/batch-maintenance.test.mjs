@@ -81,7 +81,7 @@ test('一键识图只选未识图图片，并阻止重复任务和未应用结�
 test('图库页快捷入口连接一键识图任务，索引失败分支读取后端错误', () => {
   const panel = fs.readFileSync(new URL('../ui/panel.html', import.meta.url), 'utf8');
   const ui = fs.readFileSync(new URL('../ui/assets/sticker-manager.js', import.meta.url), 'utf8');
-  assert.match(panel, /id="batch-tag-untagged-btn"[^>]*>一键补齐识图<\/button>/);
+  assert.match(panel, /id="batch-tag-untagged-btn" title="把图库里所有还没识过图的图片排成一次识图任务">一键补齐识图<\/button>/);
   assert.match(ui, /quickUntaggedButton\.addEventListener\('click', batchTagUntagged\)/);
   assert.match(ui, /API \+ '\/api\/batch-auto-tag-untagged'/);
   assert.match(ui, /Number\(d\.failed\) > 0/);
@@ -123,7 +123,14 @@ test('老图库缺识图时间的条目会被回填，补过的不再算未识�
   assert.deepEqual(selectUntaggedForBatch(after, []).ids, [], '补过时间的条目不能再算未识图');
 });
 
-test('启动流程里真的调了 tagged_at 回填（防止接线再次断开）', () => {
+test('回填接在启动流程里，且落在路由注册之后（防接线断开，也防被老账本迁移误读）', () => {
   const entry = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8');
-  assert.match(entry, /backfillTaggedAt\(\)/, 'index.js 启动时应调用 backfillTaggedAt');
+  const registerAt = entry.indexOf('sdk.routes.register');
+  const backfillAt = entry.indexOf('backfillTaggedAt()');
+  assert.ok(registerAt > 0, 'index.js 里应有路由注册');
+  assert.ok(backfillAt > 0, 'index.js 启动时应调用 backfillTaggedAt');
+  assert.ok(
+    backfillAt > registerAt,
+    'backfillTaggedAt 必须排在路由注册之后：批量任务账本的一次性迁移先按原样跑完，回填后落盘，否则那批没应用的识图结果会被误标为已应用',
+  );
 });
