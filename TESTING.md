@@ -1,5 +1,16 @@
 # 自动测试
 
+## v0.2.6 未识图一键入口与索引失败保护（2026-10-11）
+
+```powershell
+node --test tests/batch-maintenance.test.mjs
+node --check server/api.js
+node --check server/_batch-tasks.js
+node --check ui/assets/sticker-manager.js
+```
+
+定向测试 3 项通过：未识图集合过滤、运行中任务/未应用结果保护、图库页按钮与 API 接线，以及向量服务全失败时返回真实错误且不改写原索引。网络响应使用模拟 HTTP 503，没有调用真实模型/API。`validate-app.mjs` 静态校验 0 error、1 项动态依赖提示；未运行全应用回归。App Manager 已重载，按钮真实点击与模型连通待验收。
+
 ## v0.2.5 发布前全量验证（2026-10-11）
 
 ```powershell
