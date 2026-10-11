@@ -81,7 +81,7 @@ test('一键识图只选未识图图片，并阻止重复任务和未应用结�
 test('图库页快捷入口连接一键识图任务，索引失败分支读取后端错误', () => {
   const panel = fs.readFileSync(new URL('../ui/panel.html', import.meta.url), 'utf8');
   const ui = fs.readFileSync(new URL('../ui/assets/sticker-manager.js', import.meta.url), 'utf8');
-  assert.match(panel, /id="batch-tag-untagged-btn"[^>]*>AI识图未标记<\/button>/);
+  assert.match(panel, /id="batch-tag-untagged-btn"[^>]*>一键补齐识图<\/button>/);
   assert.match(ui, /quickUntaggedButton\.addEventListener\('click', batchTagUntagged\)/);
   assert.match(ui, /API \+ '\/api\/batch-auto-tag-untagged'/);
   assert.match(ui, /Number\(d\.failed\) > 0/);

@@ -5214,7 +5214,7 @@ function formatUserstyleTime(iso) {
       toast('开始未识图任务失败：' + error.message, true);
     } finally {
       button.disabled = false;
-      button.textContent = 'AI识图未标记';
+      button.textContent = '一键补齐识图';
     }
   }
 
