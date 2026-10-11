@@ -61,7 +61,7 @@ export default defineApp(async (sdk) => {
 
   // 数据目录定下来之后才能碰 lib 层（原因见文件顶部那段注释）
   const { registerMessageCardRoutes } = await import("./lib/ball-message-card.js");
-  const { extractSelectedSticker, deliverStickerToSession } = await import("./lib/sticker-delivery.js");
+  const { extractSelectedSticker, createStickerToolCard, deliverStickerToSession } = await import("./lib/sticker-delivery.js");
   // v0.1.38 - 图不在这轮的半路上投，先排队，等这条回复定稿、会话静下来再投
   // （边回话边投会让宿主必然再叫一轮，理由见 lib/sticker-after-turn.js 顶部）
   const { queueStickerDelivery, flushStickerDelivery, hasPendingSticker } = await import("./lib/sticker-after-turn.js");
@@ -272,10 +272,10 @@ export default defineApp(async (sdk) => {
 
   // 工具返回值里别再带 base64 像素。App 环境里 express 拿不到 stageFile，
   // 会把整张图 base64 塞进 JSON 文本返回（实测单次 2.9MB），宿主只能截断，
-  // 上下文和历史都被搞脏。图已经由投递通道送出去了，这里把那个字段去掉。
+  // 上下文和历史都被搞脏。图片由业务记录支撑图卡，所有大小的 data URL 都剥离。
   const stripInlineBase64 = (result) => {
     const text = result?.content?.[0]?.text;
-    if (typeof text !== "string" || text.length < 4096) return result;
+    if (typeof text !== "string") return result;
     try {
       const obj = JSON.parse(text);
       const sticker = obj?.data?.sticker;
@@ -321,35 +321,24 @@ export default defineApp(async (sdk) => {
         parameters: t.parameters,
         execute: async (input) => {
           const result = await t.execute(input, legacyToolCtx(input));
-          // express 在 App 里会降级成 base64 文本返回（没有 ctx.stageFile，
-          // details 又会被桥接层换成 {bridgedTool}）。这里补一程：
-          // 把选中的那张图真的送进对话流（走纸飞机那条 session:send-custom）。
+          // 当前宿主保留 details 并追加 bridgedTool。直接返工具卡，避免回合结束后
+          // custom content_block 新建没有持久来源身份的临时回复；不把像素塞回模型。
           if (t.name === "express") {
-            try {
-              const sticker = extractSelectedSticker(result);
-              if (sticker) {
-                const sessionPath = input?.context?.sessionPath || "";
-                // v0.1.38 - 不在这轮的半路上投：那时会话还在生成中，宿主必然会为这条消息
-                // 再叫一轮。先排队，等这条回复定稿再投，triggerTurn: false 那时才真的生效。
-                const queued = queueStickerDelivery({
-                  sdk,
-                  dataDir: sdk.dataDir,
-                  sessionPath,
-                  sticker,
-                  text: sticker.description || "",
-                  // 配图当时是什么情绪，卡片上的「应景」靠它入账；丢掉就只剩喜欢/不喜欢。
-                  emotion: typeof input?.emotion === "string" ? input.emotion : "",
-                });
-                record(`sticker-queued ${queued?.ok ? "ok" : "fail"} ${queued?.error || ""}`);
-                // 图已选定、只等本轮说完，所以这里就记「本轮发过图」，
-                // 免得 post-assistant 那段伪标记兜底以为没发、又补一张。
-                if (queued?.ok) markInjectionDelivered(sessionPath);
-              }
-            } catch (e) {
-              // 排队出问题不能弄挂工具调用：记一笔，把原始结果照样交回去
-              record(`sticker-queue-error ${e?.message || e}`);
-            }
-            return stripInlineBase64(result);
+            const clean = stripInlineBase64(result);
+            const sticker = extractSelectedSticker(result);
+            if (!sticker) return clean;
+            const sessionPath = input?.context?.sessionPath || "";
+            const prepared = await createStickerToolCard({ sdk, dataDir: sdk.dataDir,
+              sessionPath, sticker, text: sticker.description || "",
+              emotion: typeof input?.emotion === "string" ? input.emotion : "" });
+            record(`sticker-tool-card ${prepared.ok ? "prepared" : "fail"} ${prepared.error || ""}`);
+            if (!prepared.ok) return { content: [{ type: "text", text: JSON.stringify({
+              ok: false, error: "选中了图片，但图卡没接上：" + prepared.error,
+              data: { action: "delivery_failed", stickerId: sticker.id },
+            }) }] };
+            // 工具已有图卡；定稿的伪标记兜底不能再另投同一张图。
+            markInjectionDelivered(sessionPath);
+            return { ...clean, details: { ...clean.details, card: prepared.card } };
           }
           return result;
         },
