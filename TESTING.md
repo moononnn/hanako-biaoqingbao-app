@@ -1,5 +1,65 @@
 # 自动测试
 
+## v0.2.16 express 会话文件附件（2026-10-12）
+
+```powershell
+node --test tests/sticker-bridge-media.test.mjs tests/sticker-delivery.test.mjs tests/sticker-after-turn.test.mjs tests/sticker-tool-card.test.mjs
+node --check index.js
+node --check lib/sticker-delivery.js
+node --check tests/sticker-bridge-media.test.mjs
+node --check tests/sticker-delivery.test.mjs
+```
+
+结果：定向测试 **30 项通过**，四份语法检查通过。`express` 统一使用当前工具 `callToken` 登记 SessionFile；Bridge 与普通 Hana 路径都保留本地图卡并返回 `details.media.items`；登记失败仍保留本地图卡、明确记录失败。自动用例使用模拟 Bus，未替代真实权限与 QQ 验收。
+
+### 真实 QQ Bridge 复测（2026-10-12，v0.2.16，通过）
+
+用户批准新增能力并重新安装后，App Manager 列表显示 0.2.16。用户在原 QQ Bridge 对话触发新表情，确认手机 QQ 只收到一张，没有重复；App `probe.log` 记录 `session-file-staged`。此实测只覆盖当前 Windows Hana 1.0.16-beta + QQ Bridge 会话；不外推到 Linux 或其他宿主。未运行全量测试或 App 静态校验；未由助手代发 QQ 测试消息、未调用模型/API。
+
+## v0.2.15 QQ Bridge 配图媒体附件（2026-10-12）
+
+```powershell
+node --test tests/sticker-bridge-media.test.mjs tests/sticker-delivery.test.mjs tests/sticker-after-turn.test.mjs tests/sticker-tool-card.test.mjs
+node --check index.js
+node --check lib/sticker-delivery.js
+node --check tests/sticker-bridge-media.test.mjs
+node --check tests/sticker-delivery.test.mjs
+```
+
+结果：相关定向测试 **30 项通过**，四份语法检查通过。新增用例覆盖 Bridge 路径识别后的 `session:stage-file` 参数、`callToken`、SessionFile → `details.media.items` 映射；普通 Hana 会话不登记 Bridge 附件；登记失败保留本地卡并明确暴露失败。模拟测试未验证真实 capability grant/SessionFile 注册，也未运行全量测试或 App 静态校验。
+
+### 真实 QQ Bridge 复测（2026-10-12，v0.2.15，失败）
+
+用户在 QQ Bridge 回合手动触发图片后，桌面仍能看到本地卡，手机 QQ 仍无图。App 日志只有 `sticker-tool-card prepared`，没有 `bridge-media-staged` 或 `bridge-media-stage-fail`，当前无法确认登记分支被触发。Host 1.0.16-beta 的 App tool context 不向 v2 App 暴露 `bridgeContext`；旧 probe 还记录 `app/session.stage-file` 未授权。重启不能替代授权，也不能修正路由判定；真实投递尚未解决，等待确认权限范围与后续改法。未由助手向 QQ 发消息、未调用模型/API。
+
+## v0.2.14 桥接会话编号解析回退（2026-10-12）
+
+```powershell
+node --test tests/sticker-delivery.test.mjs tests/sticker-after-turn.test.mjs
+node --check lib/sticker-delivery.js
+node --check tests/sticker-delivery.test.mjs
+```
+
+结果：定向测试 **15 项通过**，两份语法检查通过。新增用例验证 `session:list` 没列出目标会话时，会请求 `session:get` 并传 `scope: all` 与 `legacySessionPath`，只接受 `sess_` 稳定编号，再继续投递。宿主调用使用模拟返回，未连接真实 Hana 桥接会话、未向 QQ 发图、未调用模型/API；桥接投递仍待实机验收，未运行全量测试或 App 静态校验。
+
+## v0.2.13 情绪方向与向量兜底门槛（2026-10-12）
+
+```powershell
+node --test tests/express-emotion-direction.test.mjs
+node --test tests/entry-syntax.test.mjs tests/sticker-after-turn.test.mjs tests/sticker-delivery.test.mjs tests/sticker-tool-card.test.mjs tests/same-turn.test.mjs
+node --check tools/express.js
+node --check lib/emotion-groups.js
+```
+
+结果：新增 `tests/express-emotion-direction.test.mjs` **7 项全部通过**；直接相关回归 **37 项通过**；三处（含测试文件）语法检查通过。
+
+改动两点：
+
+- `lib/emotion-groups.js` 新增「安慰」类（关切/关心/想抱抱你…，只收给予侧词，求安慰/卖惨故意不收）；`tools/express.js` 的 scene 通道也参与组匹配，于是「关切」能命中 scene=安慰 的图，而 scene=求安慰 的图不被命中。
+- `tools/express.js` 的向量兜底分档：标签通道 0 命中（纯语义兜底）时门槛由 0.35 抬到 0.45，且情绪词有归类时只收落在同类情绪组的图；同类也没有时退回高阈值纯向量。有标签候选时的原通道门槛保持 0.35 不变。
+
+**未完成/待验证**：`VECTOR_STRICT_MIN_SIM = 0.45` 是推测值。本地无法复现「关切」的词向量（要调真实 embedding API，未授权），所以「这个阈值能否真的把 stk_524 挡在外面」只能用实机发一次「关切」来验。未运行全量回归。
+
 ## v0.2.12 图库排序（2026-10-12）
 
 ```powershell
