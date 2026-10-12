@@ -73,8 +73,41 @@ async function readVectorsCached() {
 // ⚠️ 副作用契约：原地修改 scored 数组（叠加 _score、补充新项）并返回同一个数组；
 // 调用方依赖此行为，改动返回值语义前必须先改 execute。
 // v0.25.0 - 新增 prefs 参数：向量补充通道同样应用偏好惩罚（修复 veto/不喜欢绕道向量通道钻回来的漏洞）
-export function applyVectorBonus(scored, allStickers, emotionVec, vectorMap, excludeIds, prefs, groupConfig = null, knownGroupIds = null) {
+// v0.2.13 - 向量兜底分两档：标签通道 0 命中（纯语义兜底）时收紧，避免把「方向反」的图捞进来。
+//   实测起因：「关切」在 315 张图的标签里 0 命中，全靠向量兜底，选中了标签为
+//   委屈/心碎/难过的 stk_524（它语义描述写的是「求安慰…忍不住想哄她」）。
+//   VECTOR_STRICT_MIN_SIM 是收紧后的相似度门槛，数值待实机校准（本地无法复现该词向量）。
+export const VECTOR_MIN_SIM = 0.35;
+export const VECTOR_STRICT_MIN_SIM = 0.45;
+
+// 情绪词 → 所属语义组（词不在同义词表里则返回空数组，表示没有分类信息）
+export function groupsOfEmotion(emotion) {
+  const list = Array.isArray(emotion) ? emotion : [emotion];
+  const groups = new Set();
+  for (const em of list) {
+    for (const g of (TAG_TO_GROUP[em] || [])) groups.add(g);
+  }
+  return [...groups];
+}
+
+// 图的标签是否落在指定情绪组里（emotion / scene / keywords 都看）
+export function stickerTouchesGroups(sticker, groups) {
+  const tags = sticker?.tags || {};
+  for (const key of ['emotion', 'scene', 'keywords']) {
+    for (const tag of (tags[key] || [])) {
+      const gs = TAG_TO_GROUP[tag];
+      if (gs && gs.some((g) => groups.has(g))) return true;
+    }
+  }
+  return false;
+}
+
+export function applyVectorBonus(scored, allStickers, emotionVec, vectorMap, excludeIds, prefs, groupConfig = null, knownGroupIds = null, opts = {}) {
   if (!emotionVec || !vectorMap || Object.keys(vectorMap).length === 0) return scored;
+
+  // v0.2.13 - 兜底门槛与限组：只在 tags 通道 0 命中时由调用方传入 opts
+  const minSim = Number.isFinite(opts.minSim) ? opts.minSim : VECTOR_MIN_SIM;
+  const allowedGroups = Array.isArray(opts.allowedGroups) && opts.allowedGroups.length ? new Set(opts.allowedGroups) : null;
 
   // 给已有打分的表情包加向量 bonus
   for (const sticker of scored) {
@@ -91,7 +124,9 @@ export function applyVectorBonus(scored, allStickers, emotionVec, vectorMap, exc
     const vec = vectorMap[sticker.id];
     if (vec) {
       const sim = cosineSimilarity(emotionVec, vec);
-      if (sim > 0.35) {
+      if (sim > minSim) {
+        // v0.2.13 - 收紧档：要求图的标签落在情绪同类里（无分类信息的词不受此限）
+        if (allowedGroups && !stickerTouchesGroups(sticker, allowedGroups)) continue;
         // v0.25.0 - 补充命中也要吃偏好惩罚：vetoed/不喜欢次数照常降权，避免绕道向量通道复出
         const baseScore = sim * 10 + prefsScoreBonus(sticker.id, prefs);
         const groupBonus = baseScore > 0 ? getGroupPreferenceBonus(sticker, groupConfig, knownGroupIds) : 0;
@@ -125,7 +160,21 @@ async function applyVectorScoring(scored, allStickers, emotion, excludeIds, pref
   }
   if (!emotionVec) return scored;
 
-  return applyVectorBonus(scored, allStickers, emotionVec, vectorsData.vectors, excludeIds, prefs, groupConfig, knownGroupIds);
+  // v0.2.13 - 标签通道 0 命中 → 纯向量兜底，收紧门槛：
+  //   1) 情绪词有归类时，只收落在同类情绪组里的图（「关切」不再把「求安慰」的图捞出来）
+  //   2) 同类图也没有时，退回高阈值且不限组的纯向量，宁缺毋滥
+  if (scored.length === 0) {
+    const groups = groupsOfEmotion(emotion);
+    applyVectorBonus(scored, allStickers, emotionVec, vectorsData.vectors, excludeIds, prefs, groupConfig, knownGroupIds,
+      { minSim: VECTOR_STRICT_MIN_SIM, allowedGroups: groups });
+    if (scored.length === 0 && groups.length > 0) {
+      applyVectorBonus(scored, allStickers, emotionVec, vectorsData.vectors, excludeIds, prefs, groupConfig, knownGroupIds,
+        { minSim: VECTOR_STRICT_MIN_SIM });
+    }
+    return scored;
+  }
+
+  return applyVectorBonus(scored, allStickers, emotionVec, vectorsData.vectors, excludeIds, prefs, groupConfig, knownGroupIds, {});
 }
 
 function reply(obj) {
@@ -483,6 +532,9 @@ export function scoreStickers(stickers, emotion, excludeIds, prefs, bias = null,
         for (const tag of (tags.scene || [])) {
           if (tag === em) { emotionScore += 5; emotionHitTags.push(tag); }
           else if (tag.includes(em) || em.includes(tag)) { emotionScore += 3; emotionHitTags.push(tag); }
+          // v0.2.13 - scene 也参与组匹配：库里「安慰 / 关心」这类给予侧信号写在 scene 上，
+          //   「关切」才能找到它们；「求安慰」不在表里，不会被误配。
+          else if (TAG_TO_GROUP[em]?.some(g => TAG_TO_GROUP[tag]?.includes(g))) { emotionScore += 2; emotionHitTags.push(tag); }
         }
         for (const tag of (tags.keywords || [])) {
           if (tag === em) { emotionScore += 4; emotionHitTags.push(tag); }
