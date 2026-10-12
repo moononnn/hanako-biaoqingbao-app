@@ -19,11 +19,16 @@ import { execFileSync } from 'node:child_process';
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 // 不进发布包的东西：运行时数据、备份、依赖、日志、缓存、打包产物
-const EXCLUDE_DIRS = new Set(['.git', '.github', '_backups', 'node_modules', '__pycache__', '.pytest_cache', '.cache', 'dist']);
-const EXCLUDE_FILES = new Set(['x.json', 'package-lock.json', 'PROJECT_LOG.md', 'data.json', 'preferences.json']);
-const EXCLUDE_EXT = new Set(['.log', '.zip', '.bak', '.pyc']);
-// 开发期留下的现场文件（名字里带这些词的一律不进包）
-const EXCLUDE_NAME_HINT = [/debug/i, /^probe\./i];
+// 这份名单要往宽里列，宁可多排。原名单是“当初想到哪几个列哪几个”，靠“今天目录里
+// 恰好没有那些东西”才干净——v0.1.41 就因为 PROJECT_LOG.md / x.json 漏排进了市场包（108 次下载）。
+// 下面 data/stickers/.env/*.pem/虚拟环境 这几类是审查时补的（2026-10-12），防的是万一本地多出来。
+const EXCLUDE_DIRS = new Set(['.git', '.github', '_backups', 'node_modules', '__pycache__', '.pytest_cache', '.cache', 'dist',
+  'coverage', 'data', 'stickers', '.venv', 'venv', 'site-packages', '.idea', '.vscode']);
+const EXCLUDE_FILES = new Set(['x.json', 'package-lock.json', 'PROJECT_LOG.md', 'data.json', 'preferences.json',
+  '.env', '.env.local', 'credentials.json', 'api-key.json', '.DS_Store', 'Thumbs.db']);
+const EXCLUDE_EXT = new Set(['.log', '.zip', '.bak', '.pyc', '.pem', '.key', '.tmp', '.swp', '.db', '.sqlite']);
+// 开发期留下的现场文件（名字里带这些词的一律不进包）；.env 变体（.env.production 等）也在此兜住
+const EXCLUDE_NAME_HINT = [/debug/i, /^probe\./i, /\.env(\.|$)/i];
 
 // 必须从发布包里消失的字眼：剥完拿它们复查
 const FORBIDDEN_AFTER_STRIP = ['_dev/deliver-test', 'dev-deliver'];
