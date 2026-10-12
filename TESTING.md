@@ -1,5 +1,15 @@
 # 自动测试
 
+## v0.2.9 识图模型通道路由修复（2026-10-12）
+
+```powershell
+node --test tests/vision-model-host.test.mjs
+node --check lib/shared.js
+node --check tests/vision-model-host.test.mjs
+```
+
+结果：定向测试 **3 项通过**，两份语法检查通过。覆盖 Hana 模型在宿主通道可用但读不到 Provider 凭据时仍能识图、无宿主通道且缺凭据时继续明确报未配置、自定义 API 不被宿主通道截走（含残留 Hana 模型选择）。模型流与自定义 API 请求均由桩拦截，没有调用真实模型/API。未运行全量测试、应用静态校验或实机验收。
+
 ## v0.2.8 发布前全量验证（2026-10-11）
 
 ```powershell
