@@ -60,6 +60,16 @@ test('Hana 视觉模型：没有宿主通道且没有 API 凭据时仍明确提�
   assert.equal(result.error, '未配置视觉模型，请先在设置里选择或填写模型');
 });
 
+test('思考型视觉模型的输出预算不得再被思考吃光（2026-10-12 实测 2500 不够）', async () => {
+  writeVisionConfig({ source: 'hana', providerId: 'test-provider', modelId: 'test-thinking-model' });
+  const { ctx, captured } = fakeHost();
+
+  const result = await tagImage(imageBase64, 'test.png', { ctx });
+
+  assert.equal(result.ok, true, result.error);
+  assert.equal(captured.payload.maxTokens, 12000);
+});
+
 test('自定义视觉 API：即使宿主通道可用，也必须走用户填写的 API', async () => {
   writeVisionConfig({
     source: 'custom',

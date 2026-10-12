@@ -1,5 +1,17 @@
 # 自动测试
 
+## v0.2.10 思考型视觉模型输出预算修复（2026-10-12）
+
+```powershell
+node --test tests/vision-model-host.test.mjs
+node --check lib/shared.js
+node --check tests/vision-model-host.test.mjs
+```
+
+结果：定向测试 **4 项通过**（原 3 项 + 新增 1 项预算断言），两处语法检查通过。覆盖：思考型视觉模型经宿主通道调用时 maxTokens 为 12000。不调用真实模型/API，未运行全量测试与应用静态校验。
+
+未解决（本次未改，另记）：宿主通道只回 `content`，拿不到 reasoning 内容，`shared.js` 末尾那道「正文空则从 reasoning_content 捞 JSON」的退路在宿主路径上用不了；`finishReason` 在该路径上也恒为空，错误信息不带真实原因。
+
 ## v0.2.9 识图模型通道路由修复（2026-10-12）
 
 ```powershell
