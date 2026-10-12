@@ -1,0 +1,12 @@
+/* beautify-select 的变量对照：组件用的是一套中性命名，表情包页面用的是自己那套。
+   只做映射，不改组件本体（组件文件保持与积木原版一致，便于日后比对升级）。 */
+:root {
+  --card: var(--surface);
+  --ink: var(--text);
+  --line: var(--border);
+  --accent: var(--primary);
+  --accent-deep: var(--primary-dark);
+  --accent-soft: var(--primary-light);
+  --dd-thumb: #c9dfd3;
+  --dd-thumb-hover: #5dae8e;
+}

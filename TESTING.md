@@ -1,5 +1,21 @@
 # 自动测试
 
+## v0.2.12 图库排序（2026-10-12）
+
+```powershell
+node --test tests/gallery-sort.test.mjs
+node --check ui/assets/gallery-sort.js
+node --check ui/assets/beautify-select.js
+node --check ui/assets/sticker-manager.js
+node --check server/api.js
+node --check server/boot.js
+node --check lib/sticker-transfer.js
+```
+
+结果：新增 `tests/gallery-sort.test.mjs` **9 项全部通过**，六处语法检查通过。排序逻辑是浏览器脚本，测试用 vm 沙箱加载真实源码（不另写一份假逻辑）；覆盖六个档位的顺序、未识图与空描述的沉底规则、未知档位回退默认、时间相同时按 id 兜底不跳序、不改原数组，以及服务端 `GALLERY_SORT_MODES` / `panel.html` 选项 / `gallery-sort.js` 三处档位清单一致。组件 CSS 变量映射在 `ui/assets/dd-vars.css`（只做映射，未改积木本体）。
+
+未做实机验收：排序控件与 beautify-select 的真实观感、下拉在窄栏的表现、选择落盘后刷新是否保持，需使用者点一遍。未运行全量回归。
+
 ## v0.2.11 批量撞上宿主 RPC 并发上限（2026-10-12）
 
 ```powershell

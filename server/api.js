@@ -1895,8 +1895,11 @@ export default async function registerRoutes(app, ctx) {
   });
 
   // ═══ GET /api/display-config — 读取配图卡片显示配置 ═══
+// v0.2.12：图库排序档位。与 ui/assets/gallery-sort.js 的 SORT_MODES 一一对应，
+// 两边不同步会被 tests/gallery-sort.test.mjs 的对齐断言挡住。
+const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'description', 'untagged_first', 'group'];
   app.get('/api/display-config', (c) => {
-    let cfg = { smallImageFit: true, sizeMode: 'auto', agentSelfNote: true };
+    let cfg = { smallImageFit: true, sizeMode: 'auto', agentSelfNote: true, gallerySort: 'added_desc' };
     try {
       cfg = { ...cfg, ...JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'display-config.json'), 'utf-8')) };
     } catch {}
@@ -1920,6 +1923,8 @@ export default async function registerRoutes(app, ctx) {
         sizeMode: validModes.includes(body.sizeMode) ? body.sizeMode : (validModes.includes(old.sizeMode) ? old.sizeMode : 'auto'),
         // v0.34.57 - 伙伴配图自评总闸：默认开；关掉后自评既不产生也不生效，已记的账保留
         agentSelfNote: typeof body.agentSelfNote === 'boolean' ? body.agentSelfNote : (typeof old.agentSelfNote === 'boolean' ? old.agentSelfNote : true),
+        // v0.2.12 - 图库排序档位：added_desc/added_asc/tagged_desc/description/untagged_first/group
+        gallerySort: GALLERY_SORT_MODES.includes(body.gallerySort) ? body.gallerySort : (GALLERY_SORT_MODES.includes(old.gallerySort) ? old.gallerySort : 'added_desc'),
       };
       atomicWriteJson(path.join(DATA_DIR, 'display-config.json'), cfg);
       return json({ ok: true, data: cfg });

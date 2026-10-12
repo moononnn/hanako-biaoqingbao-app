@@ -65,6 +65,8 @@ export function buildBootData() {
       showFeedbackButtons: true,
       sizeMode: 'auto',
       agentSelfNote: true,
+      // v0.2.12：图库排序档位，新装/旧数据都落到「加入时间 新→旧」
+      gallerySort: 'added_desc',
     }),
     __DECISION_LOG__: readJson('decision-log.json', { version: 1, entries: [] }),
     __CONTEXT_FEEDBACK__: readContextFeedback({ dataDir: DATA_DIR }),

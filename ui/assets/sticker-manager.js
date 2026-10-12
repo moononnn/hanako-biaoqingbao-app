@@ -296,6 +296,45 @@
       toast('保存出错: ' + e.message, true);
     }
   }
+  // v0.2.12：图库排序。选择存在 display-config 里，刷新、换设备、重装后都还在。
+  function syncGallerySort() {
+    var sel = $('filter-sort');
+    if (!sel) return;
+    var norm = window.GallerySort && window.GallerySort.normalizeMode
+      ? window.GallerySort.normalizeMode
+      : function (v) { return v || 'added_desc'; };
+    var cfg = window.__DISPLAY_CONFIG__ || {};
+    sel.value = norm(cfg.gallerySort);
+    if (window.beautifySelect && sel.closest && sel.closest('.dd') && sel.closest('.dd')._ddRefresh) {
+      sel.closest('.dd')._ddRefresh();
+    }
+  }
+
+  async function changeGallerySort() {
+    var sel = $('filter-sort');
+    if (!sel) return;
+    var mode = sel.value;
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/display-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gallerySort: mode }),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        window.__DISPLAY_CONFIG__ = data.data;
+        applyFilter();
+        toast('图库排序已切换');
+      } else {
+        syncGallerySort();
+        toast('保存失败: ' + (data.error || '出错了'), true);
+      }
+    } catch (e) {
+      syncGallerySort();
+      toast('保存出错: ' + e.message, true);
+    }
+  }
+
   async function changeSizeMode() {
     var s = $('size-mode-select');
     if (!s) return;
@@ -952,6 +991,12 @@
       }).reduce(function (all, terms) { return all.concat(terms); }, []).join(' ').toLowerCase();
       return desc.includes(search) || kws.includes(search) || ems.includes(search) || scs.includes(search) || groups.includes(search);
     });
+    // v0.2.12：排序。默认「加入时间 新→旧」；没识图的图没有描述，描述排序会沉到最后。
+    var sortSel = $('filter-sort');
+    var sortMode = (sortSel && sortSel.value) || (window.__DISPLAY_CONFIG__ || {}).gallerySort || 'added_desc';
+    if (window.GallerySort && window.GallerySort.sortStickers) {
+      filtered = window.GallerySort.sortStickers(filtered, sortMode, { groupIds: getUiGroupIds });
+    }
     renderGrid(filtered);
   }
 
@@ -6369,6 +6414,18 @@ function formatUserstyleTime(iso) {
     var groupFilter = $('filter-group');
     if (groupFilter) groupFilter.addEventListener('change', applyFilter);
     $('filter-search').addEventListener('input', applyFilter);
+
+    // v0.2.12：图库排序选择器 + 统一把图库这一行的三个下拉换成 beautify-select
+    // （原生 select 在 Windows 上是系统面板，样式改不动、宽度也不受页面控制）
+    if (window.beautifySelect) {
+      ['filter-emotion', 'filter-group', 'filter-sort'].forEach(function (id) {
+        var el = $(id);
+        if (el) window.beautifySelect(el);
+      });
+    }
+    syncGallerySort();
+    var sortEl = $('filter-sort');
+    if (sortEl) sortEl.addEventListener('change', changeGallerySort);
 
     // v0.33.77 - 偏好设置页：图片尺寸档位选择器
     var sizeModeEl = $('size-mode-select');
