@@ -12,6 +12,7 @@ import {
   isAutoApplyEnabled, buildApplyItems, applyItemsToMeta, selectPendingApplyIds,
 } from '../lib/batch-apply.js';
 import { safeStickerPath } from '../lib/ball-core.js';
+import { withRpcBusyRetry } from '../lib/rpc-retry.js';
 import { collectBatchFailures } from '../lib/batch-failures.js';
 import {
   readGroupStore,
@@ -290,7 +291,16 @@ async function workerLoop(taskId, workerIdx) {
       // 每张图开始识别前重读分组，让重命名/别名设置能自然进入后续任务。
       const groupStore = readGroupStore();
       const recognitionHints = isGroupStoreReadable(groupStore) ? buildRecognitionGroupHints(groupStore) : '';
-      const tagResult = await tagImage(buf.toString('base64'), sticker.file, { recognitionHints, ctx: moduleCtx });
+      const tagResult = await withRpcBusyRetry(
+        () => tagImage(buf.toString('base64'), sticker.file, { recognitionHints, ctx: moduleCtx }),
+        {
+          onRetry: (err, attempt) => {
+            moduleCtx?.log?.warn?.(
+              `[batch worker ${taskId}/${workerIdx}] ${stickerId} 撞上宿主 RPC 并发上限，退避后重试（第 ${attempt} 次）: ${err.message}`,
+            );
+          },
+        },
+      );
       if (tagResult.ok) {
         result = { ok: true, data: tagResult.data };
         result.data.group_suggestions = suggestGroupsForTags(result.data, groupStore);
@@ -534,10 +544,20 @@ function resumeAllTasks() {
 }
 
 function emitBus(topic, data) {
+  let pending;
   try {
-    moduleCtx?.bus?.emit?.(topic, data);
+    pending = moduleCtx?.bus?.emit?.(topic, data);
   } catch (e) {
     moduleCtx?.log?.warn?.(`[batch] EventBus 推送失败 ${topic}:`, e.message);
+    return;
+  }
+  // v0.2.11：ctx.bus.emit 返回的是 Promise，原来那个 try/catch 只接同步抛错，接不住异步拒绝。
+  // 撞上宿主 RPC 并发上限时会变成 unhandled promise rejection（外部反馈里批量窗口内堆了上百条），
+  // 任务被静默判死。这里接住并记日志；进度事件不重试，避免同一张图重复推、界面进度多算。
+  if (pending && typeof pending.then === 'function') {
+    pending.catch((e) => {
+      moduleCtx?.log?.warn?.(`[batch] EventBus 推送失败 ${topic}:`, e?.message || String(e));
+    });
   }
 }
 

@@ -1,5 +1,18 @@
 # 自动测试
 
+## v0.2.11 批量撞上宿主 RPC 并发上限（2026-10-12）
+
+```powershell
+node --test tests/rpc-busy-retry.test.mjs tests/vision-model-host.test.mjs tests/batch-maintenance.test.mjs
+node --check lib/rpc-retry.js
+node --check server/_batch-tasks.js
+node --check tests/rpc-busy-retry.test.mjs
+```
+
+结果：定向测试 **15 项全部通过**（新增6 项 + 识图路由 4 项 + 批量维护 5 项），三处语法检查通过。覆盖：busy 错误的四种形态识别、抛错型退避重试与线性退避时长（400/800）、重试用尽后原样抛回、`{ ok:false }` 型重试后保持原形状、非 busy 错误零重试，以及 `emitBus` 接住了 Promise 拒绝且不对进度事件重试。不调用真实模型/API，未运行全量测试与应用静态校验。
+
+未解决：`APP_RPC_BUSY` 的真实调用源仍无本机证据（10-10 至 10-12 全部日志零命中），并发数字未改（保持默认 3、上限 8）；本次只保证撞上时不静默、能自愈一轮。
+
 ## v0.2.10 思考型视觉模型输出预算修复（2026-10-12）
 
 ```powershell
