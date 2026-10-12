@@ -321,24 +321,36 @@ export default defineApp(async (sdk) => {
         parameters: t.parameters,
         execute: async (input) => {
           const result = await t.execute(input, legacyToolCtx(input));
-          // 当前宿主保留 details 并追加 bridgedTool。直接返工具卡，避免回合结束后
-          // custom content_block 新建没有持久来源身份的临时回复；不把像素塞回模型。
+          // 当前宿主保留 details 并追加 bridgedTool。Hana 本地用工具卡；QQ Bridge 另带
+          // SessionFile mediaItem，BridgeManager 会在回复结束后交给 QQ 媒体适配器；不塞像素进模型。
           if (t.name === "express") {
             const clean = stripInlineBase64(result);
             const sticker = extractSelectedSticker(result);
             if (!sticker) return clean;
             const sessionPath = input?.context?.sessionPath || "";
             const prepared = await createStickerToolCard({ sdk, dataDir: sdk.dataDir,
-              sessionPath, sticker, text: sticker.description || "",
+              sessionPath, callToken: input?.context?.callToken || null,
+              sticker, text: sticker.description || "",
               emotion: typeof input?.emotion === "string" ? input.emotion : "" });
             record(`sticker-tool-card ${prepared.ok ? "prepared" : "fail"} ${prepared.error || ""}`);
+            if (prepared.media) record(`session-file-staged ${prepared.recordId || ""}`);
             if (!prepared.ok) return { content: [{ type: "text", text: JSON.stringify({
               ok: false, error: "选中了图片，但图卡没接上：" + prepared.error,
               data: { action: "delivery_failed", stickerId: sticker.id },
             }) }] };
             // 工具已有图卡；定稿的伪标记兜底不能再另投同一张图。
             markInjectionDelivered(sessionPath);
-            return { ...clean, details: { ...clean.details, card: prepared.card } };
+            const details = { ...clean.details, card: prepared.card,
+              ...(prepared.media ? { media: prepared.media } : {}) };
+            if (prepared.sessionFileError) {
+              record(`session-file-stage-fail ${prepared.sessionFileError}`);
+              return { ...clean,
+                content: [...(Array.isArray(clean.content) ? clean.content : []), { type: "text",
+                  text: "会话图片附件未能登记；本地图卡仍可见，但不能据此声称其他端已收到图片。" }],
+                details,
+              };
+            }
+            return { ...clean, details };
           }
           return result;
         },

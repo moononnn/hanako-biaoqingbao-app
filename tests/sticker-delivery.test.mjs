@@ -1,8 +1,7 @@
 // tests/sticker-delivery.test.mjs
 //
-// 伙伴配图投递（v0.1.13）。盯的是 App 里唯一活的那条发图通道：
-// 插件版靠 details.media / deferred 原生块，在 App 里都被桥接层吃掉，
-// 只能用 session:send-custom（纸飞机同款）。
+// 伙伴配图的 custom-session 补发与会话编号定位回归。
+// 普通 express 的本地卡和 QQ Bridge 的 details.media 路线另由 sticker-bridge-media.test.mjs 覆盖。
 
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -128,6 +127,34 @@ test('投递：宿主不确认时明确失败，不假装成功', async () => {
     sdk, dataDir, sessionPath: p, sticker: { id: 'stk_5', filePath: imgPath }, text: '',
   });
   assert.equal(r.ok, false);
+});
+
+test('桥接会话不在 session:list 时，用 session:get 的 legacySessionPath 尝试解析稳定编号', async () => {
+  const p = 'C:/x/agents/hanako/sessions/bridge/owner/qq.jsonl';
+  const calls = [];
+  const sdk = {
+    bus: {
+      request: async (type, payload) => {
+        calls.push({ type, payload });
+        if (type === 'session:list') return [{ path: 'C:/x/agents/hanako/sessions/native.jsonl', sessionId: 'sess_native' }];
+        if (type === 'session:get') return { session: { path: p, sessionId: 'sess_bridge_1' } };
+        if (type === 'session:send-custom') return { ok: true, entryId: 'e_bridge' };
+        return { ok: false };
+      },
+    },
+  };
+
+  const result = await deliverStickerToSession({
+    sdk, dataDir, sessionPath: p,
+    sticker: { id: 'stk_bridge', filePath: imgPath, description: '桥接测试图' },
+    text: '测试',
+  });
+
+  assert.equal(result.ok, true, result.error);
+  const lookup = calls.find((call) => call.type === 'session:get');
+  assert.deepEqual(lookup?.payload, { scope: 'all', legacySessionPath: p });
+  const send = calls.find((call) => call.type === 'session:send-custom');
+  assert.equal(send?.payload.sessionId, 'sess_bridge_1');
 });
 
 test('投递：清单里没有这段对话时明确失败，不瞎猜编号', async () => {
