@@ -97,6 +97,7 @@
    - 允许它在这台电脑上启动程序（`app/process.spawn`，悬浮球要用）；
    - 读取伙伴列表、模型列表（`app/agents.read`、`app/models.read`）；
    - 读取和操作对话（`app/sessions.*`，把图送进当前对话）；
+   - 登记会话图片附件（`app/session.stage-file`，v0.2.16 起需要；少了它配图就发不到手机等外部平台）；
    - 在伙伴回复前后各插一步（`app/hooks.agent-pre-step`，情绪观察器）。
 3. 装载成功后，左侧导航会出现「表情包」页面。
 

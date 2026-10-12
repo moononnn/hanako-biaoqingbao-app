@@ -57,7 +57,7 @@
 1. 读本文件、`TESTING.md`、plugin-dev-guide skill。
 2. 核对 manifest 版本、账本条目、与克隆的差异；补齐 CHANGELOG。
 3. 跑测试，全绿才继续：
-   - `node --test tests/*.test.mjs`（零依赖）
+   - `node --test "tests/*.test.mjs"`（零依赖。注意 glob 要加引号交给 Node 展开：PowerShell 不会替 `*.test.mjs` 展开，直接写 `tests/*.test.mjs` 会被当成路径参数报错）
    - 桌面悬浮球的 Python 离屏测试（需要本机 Python 3 + PyQt6，CI 里跑不了）
    - 应用静态校验：`node <Hana 安装目录>/artifacts/server/<版本>/scripts/validate-app.mjs --dir <本项目路径> --json`
 4. 打发布包：`node scripts/build-release.mjs --out <工作台>/_releases/biaoqingbao-app`（剥开发入口、复查残留、算 SHA-256）。脚本会自行排除 `.git`、`_backups`、`node_modules`、`dist`、日志、备份、运行时残留；`PROJECT_LOG.md` 是内部开发记录（含本机现场与私人称呼），**不进发布包**，只在本地留档。
