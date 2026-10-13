@@ -35,10 +35,10 @@
 
 ## 版本与账本
 
-- 每完成一个功能或修复且测试全绿，就往 `PENDING_CHANGES.md` 记一笔，并把 `manifest.json` 版本 patch +1；两个动作一次做完，半成品不升版本。
+- 每完成一个功能或修复且测试全绿，就往 `PENDING_CHANGES.md` 记一笔。**不碰 `manifest.json` 的版本号**（2026-10-12 重新定规矩，旧规矩「记一笔就 patch+1」已作废）。
 - 完整发布前，把账本内容整理进 `CHANGELOG.md`，确认没有遗漏后再清空账本（保留文件头）。
-- 跨窗口漏升时补升：账本攒的一波未发布改动整体算一个 minor 版本，之后从 patch +1 递增。
-- 发布时直接发当前 manifest 版本号，不额外跳号（首个公开版本是 `0.1.40`）。
+- 发布那一刻才定版本号，按这版实际有什么来：新能力/新玩法走 minor，只有修复优化走 patch，数据要迁移或对外接口大改走 major。一版既有新功能又有修复走 minor。别硬升，也别让 minor 停太久。
+- 发布时直接发这个定下来的版本号，不额外跳号（首个公开版本是 `0.1.40`）。
 - 本项目没有 `package.json`，所以「manifest 与 package 版本一致」那条检查在这里不适用；CI 只校验 manifest 本身能解析、关键字段齐全、卡片声明的页面文件存在。
 - 发布后核对 `TESTING.md` 里声明的测试项数与当次实跑输出一致（这项易腐，功能迭代后经常落后）。
 
@@ -57,7 +57,7 @@
 1. 读本文件、`TESTING.md`、plugin-dev-guide skill。
 2. 核对 manifest 版本、账本条目、与克隆的差异；补齐 CHANGELOG。
 3. 跑测试，全绿才继续：
-   - `node --test "tests/*.test.mjs"`（零依赖。注意 glob 要加引号交给 Node 展开：PowerShell 不会替 `*.test.mjs` 展开，直接写 `tests/*.test.mjs` 会被当成路径参数报错）
+   - `node --test tests/*.test.mjs`（零依赖）
    - 桌面悬浮球的 Python 离屏测试（需要本机 Python 3 + PyQt6，CI 里跑不了）
    - 应用静态校验：`node <Hana 安装目录>/artifacts/server/<版本>/scripts/validate-app.mjs --dir <本项目路径> --json`
 4. 打发布包：`node scripts/build-release.mjs --out <工作台>/_releases/biaoqingbao-app`（剥开发入口、复查残留、算 SHA-256）。脚本会自行排除 `.git`、`_backups`、`node_modules`、`dist`、日志、备份、运行时残留；`PROJECT_LOG.md` 是内部开发记录（含本机现场与私人称呼），**不进发布包**，只在本地留档。
