@@ -62,17 +62,19 @@ test('空闲探测同时带 sessionId 与 sessionPath，宿主认哪个都能用
   const asked = [];
   const sdk = {
     bus: {
-      request: async (_verb, payload) => {
-        asked.push(payload);
-        if (_verb === 'session:context') return { isStreaming: false };
+      request: async (verb, payload) => {
+        asked.push({ verb, payload });
+        if (verb === 'session:context') return { isStreaming: false };
         throw new Error('n/a');
       },
     },
   };
   assert.equal(queueStickerDelivery({ sdk, dataDir: 'C:/tmp/nope', sessionPath: 'C:/tmp/sess.jsonl', sticker, text: '', emotion: '' }).ok, true);
   const r = await flushStickerDelivery('C:/tmp/sess.jsonl', 'hook');
-  const ctx = asked.find((p) => p.scope === 'all' && p.sessionPath);
-  assert.ok(ctx, '应该真的去问了一次会话状态');
+  // 按动词找，不要把同一条链路上别的请求（如 session:get 的按路径探测）误当成本次空闲探测。
+  const call = asked.find((c) => c.verb === 'session:context');
+  assert.ok(call, '应该真的去问了一次会话状态');
+  const ctx = call.payload;
   assert.ok(!('legacySessionPath' in ctx), 'legacySessionPath 是宿主不认的那个字段，不能再发');
   assert.equal(ctx.sessionPath, 'C:/tmp/sess.jsonl', 'sessionPath 要带上');
   assert.equal(r.probed, true, '宿主认了参数就该标记为真的探测到了');

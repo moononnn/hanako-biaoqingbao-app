@@ -106,10 +106,26 @@ test('读不到图片时明确失败，不能偷偷回退到二次发图', async
   assert.deepEqual(calls, []);
 });
 
-test('没有会话编号时不给无归属卡片', async () => {
+// 编号只是图卡的门槛，不是投递的门槛；两样都没有时依旧不能造出无归属的卡片。
+// （issue #1 之后：没编号但能登记附件时，应当只出附件；这里连令牌也没有，才真失败。）
+test('没有会话编号也没有投递令牌时，不给无归属卡片', async () => {
   const out = await delivery.createStickerToolCard({ sdk: { bus: { request: async () => [] } }, dataDir, sessionPath: 'C:/missing.jsonl', sticker });
   assert.equal(out.ok, false);
-  assert.match(out.error, /编号/);
+  assert.equal(out.card, undefined);
+});
+
+test('没有会话编号但有投递令牌时，只出会话附件、不出图卡', async () => {
+  const staged = { mediaItem: { type: 'session_file', fileId: 'sf_x', mime: 'image/png' } };
+  const sdk = { bus: { request: async (type) => {
+    if (type === 'session:list') return [];
+    if (type === 'session:stage-file') return staged;
+    return { ok: false };
+  } } };
+  const out = await delivery.createStickerToolCard({ sdk, dataDir, sessionPath: 'C:/missing.jsonl', callToken: 'tok', sticker });
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.card, undefined);
+  assert.equal(out.noSessionId, true);
+  assert.deepEqual(out.media, { items: [staged.mediaItem] });
 });
 
 test('旧 custom 卡与旧 hash 身份仍能读取；非法业务编号不得抢优先级', () => {

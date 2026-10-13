@@ -332,7 +332,7 @@ export default defineApp(async (sdk) => {
               sessionPath, callToken: input?.context?.callToken || null,
               sticker, text: sticker.description || "",
               emotion: typeof input?.emotion === "string" ? input.emotion : "" });
-            record(`sticker-tool-card ${prepared.ok ? "prepared" : "fail"} ${prepared.error || ""}`);
+            record(`sticker-tool-card ${prepared.ok ? "prepared" : "fail"} ${prepared.noSessionId ? "(无会话编号)" : ""} ${prepared.error || ""}`);
             if (prepared.media) record(`session-file-staged ${prepared.recordId || ""}`);
             if (!prepared.ok) return { content: [{ type: "text", text: JSON.stringify({
               ok: false, error: "选中了图片，但图卡没接上：" + prepared.error,
@@ -340,7 +340,9 @@ export default defineApp(async (sdk) => {
             }) }] };
             // 工具已有图卡；定稿的伪标记兜底不能再另投同一张图。
             markInjectionDelivered(sessionPath);
-            const details = { ...clean.details, card: prepared.card,
+            // 图卡和会话附件各自可有可无：桥接会话拿不到编号时只有附件，桌面会话两者都有。
+            const details = { ...clean.details,
+              ...(prepared.card ? { card: prepared.card } : {}),
               ...(prepared.media ? { media: prepared.media } : {}) };
             if (prepared.sessionFileError) {
               record(`session-file-stage-fail ${prepared.sessionFileError}`);

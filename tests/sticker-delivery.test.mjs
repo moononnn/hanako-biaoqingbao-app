@@ -129,7 +129,7 @@ test('投递：宿主不确认时明确失败，不假装成功', async () => {
   assert.equal(r.ok, false);
 });
 
-test('桥接会话不在 session:list 时，用 session:get 的 legacySessionPath 尝试解析稳定编号', async () => {
+test('桥接会话不在 session:list 时，用 session:get 按路径尝试解析稳定编号（sessionPath 与 legacySessionPath 都带上）', async () => {
   const p = 'C:/x/agents/hanako/sessions/bridge/owner/qq.jsonl';
   const calls = [];
   const sdk = {
@@ -152,7 +152,9 @@ test('桥接会话不在 session:list 时，用 session:get 的 legacySessionPat
 
   assert.equal(result.ok, true, result.error);
   const lookup = calls.find((call) => call.type === 'session:get');
-  assert.deepEqual(lookup?.payload, { scope: 'all', legacySessionPath: p });
+  // 宿主解析器读 sessionPath / path；只传 legacySessionPath 会被忽略（issue #1 实测）。
+  assert.equal(lookup?.payload.sessionPath, p);
+  assert.equal(lookup?.payload.legacySessionPath, p);
   const send = calls.find((call) => call.type === 'session:send-custom');
   assert.equal(send?.payload.sessionId, 'sess_bridge_1');
 });

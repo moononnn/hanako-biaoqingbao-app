@@ -30,7 +30,7 @@ const STAGED_MEDIA_ITEM = {
   type: 'session_file', fileId: 'sf_bridge_test', sessionId: 'sess_bridge_test', mime: 'image/png',
 };
 
-function makeSdk({ stageResult, stageError } = {}) {
+function makeSdk({ stageResult, stageError, includeBridgeInList = true } = {}) {
   const calls = [];
   return {
     calls,
@@ -38,10 +38,12 @@ function makeSdk({ stageResult, stageError } = {}) {
       bus: {
         request: async (type, payload) => {
           calls.push({ type, payload });
-          if (type === 'session:list') return [
-            { path: bridgePath, sessionId: 'sess_bridge_test' },
-            { path: nativePath, sessionId: 'sess_native_test' },
-          ];
+          if (type === 'session:list') {
+            return includeBridgeInList
+              ? [{ path: bridgePath, sessionId: 'sess_bridge_test' }, { path: nativePath, sessionId: 'sess_native_test' }]
+              : [{ path: nativePath, sessionId: 'sess_native_test' }];
+          }
+          if (type === 'session:get') return { session: null };
           if (type === 'session:stage-file') {
             if (stageError) throw stageError;
             return stageResult ?? { mediaItem: STAGED_MEDIA_ITEM };
@@ -98,4 +100,32 @@ test('会话文件登记失败时仍保留本地图卡并暴露失败，不伪�
   assert.equal(result.media, undefined);
   assert.match(result.sessionFileError, /未授权/);
   assert.equal(calls.some((call) => call.type === 'session:stage-file'), true);
+});
+
+// issue #1：桥接会话拿不到 sess_ 编号（session:list 过滤 domain !== desktop，session:get 也解析不出）。
+// 编号只服务本地图卡，不该拦会话附件登记——拿不到编号时也要把图交给桥接通道。
+test('拿不到会话编号时，仍靠 callToken 登记会话附件（图卡让位，不整条失败）', async () => {
+  const { sdk, calls } = makeSdk({ includeBridgeInList: false });
+  const result = await createStickerToolCard({
+    sdk, dataDir, sessionPath: bridgePath, callToken: 'call_token_current_tool', sticker: sticker(), text: '桥接图',
+  });
+
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.card, undefined, '拿不到编号就建不了本地图卡');
+  assert.equal(result.noSessionId, true);
+  assert.deepEqual(result.media, { items: [STAGED_MEDIA_ITEM] }, '桥接通道要的 SessionFile 必须照旧送出');
+  const stage = calls.find((call) => call.type === 'session:stage-file');
+  assert.equal(stage?.payload.callToken, 'call_token_current_tool');
+  assert.ok(stage?.payload.path.startsWith(dataDir), '登记路径必须落在 App dataDir 内');
+});
+
+// 编号拿不到 + 附件也登记不上：这时才该真失败。
+test('编号与附件都没有时才算失败', async () => {
+  const { sdk } = makeSdk({ includeBridgeInList: false, stageError: new Error('app/session.stage-file 未授权') });
+  const result = await createStickerToolCard({
+    sdk, dataDir, sessionPath: bridgePath, callToken: 'call_token_current_tool', sticker: sticker(), text: '桥接图',
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /未授权|没能建立/);
 });
