@@ -134,7 +134,7 @@ function genTaskId() {
 
 // ═══ 任务创建 ═══
 
-function createBatchTask(stickerIds, concurrency = 3) {
+function createBatchTask(stickerIds, concurrency = DEFAULT_BATCH_CONCURRENCY) {
   // 去重
   const uniqueIds = Array.from(new Set(stickerIds));
   const task = {
@@ -697,7 +697,9 @@ export function registerBatchTasksRoutes(app, ctx) {
       }
       const skipped = stickerIds.length - validIds.length;
 
-      const concurrency = body.concurrency || 3;
+      // 前端每次都会带 concurrency；这里的兵底取用户设置，别写死字面量，
+      // 否则默认值一改、或哪条路径忘了带参数，就与用户设置静默分叉。
+      const concurrency = body.concurrency || getBatchConcurrency();
       const task = createBatchTask(validIds, concurrency);
       moduleCtx?.log?.info?.('[batch-create] task created', { taskId: task.id, total: task.total });
 

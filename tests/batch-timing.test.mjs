@@ -76,6 +76,30 @@ test('没有历史时退回每张 30 秒的保守默认', () => {
   assert.equal(got.msTotal, 300 * DEFAULT_MS_PER_IMAGE / 3);
 });
 
+test('快模型 + 高并发不该被误杀（曾被摊薄值那道下限卡掉）', () => {
+  // 单张纯耗时 5 秒、并发 5 → 墙钟摊薄 1 秒/张。以前区间施加在摊薄值上，
+  // 1 秒被判成「压根没调模型」而丢弃，估算退回 30 秒/张，比实际慢好几倍。
+  const fast = avgMsPerImage([{ status: 'completed', duration_ms: 6000, completed: 6, concurrency: 5 }]);
+  assert.equal(fast.source, 'history');
+  assert.equal(fast.msPerImage, 5000);
+
+  const got = estimateTagTiming({
+    tasks: [{ status: 'completed', duration_ms: 6000, completed: 6, concurrency: 5 }],
+    count: 300,
+    concurrency: 5,
+  });
+  assert.equal(got.msTotal, 300 * 5000 / 5); // 5 分钟，不是默认的 30 分钟
+});
+
+test('真没调模型的账（单张纯耗时太小）仍然要丢', () => {
+  // 并发 1、单张纯耗时 1 秒：单张本身就不像真调过模型
+  assert.equal(avgMsPerImage([{ status: 'completed', duration_ms: 1000, completed: 1, concurrency: 1 }]).source, 'default');
+  // 并发 8、摊薄 0.2 秒/张 → 单张纯耗时 1.6 秒，仍然太小，丢掉
+  assert.equal(avgMsPerImage([{ status: 'completed', duration_ms: 1280, completed: 8, concurrency: 8 }]).source, 'default');
+  // 同样并发 8，但单张纯耗时 16 秒（摊薄 2 秒/张）就正常采纳
+  assert.equal(avgMsPerImage([{ status: 'completed', duration_ms: 16000, completed: 8, concurrency: 8 }]).msPerImage, 16000);
+});
+
 test('并发被夹在 1~8，脏输入不炸', () => {
   assert.equal(estimateTagTiming({ count: 10, concurrency: 0 }).concurrency, 5);
   assert.equal(estimateTagTiming({ count: 10, concurrency: 'x' }).concurrency, 5);
