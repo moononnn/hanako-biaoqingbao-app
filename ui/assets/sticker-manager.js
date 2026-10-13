@@ -1080,11 +1080,21 @@
     options = options || {};
     var ids = Array.from(new Set(stickerIds || [])).filter(Boolean);
     if (ids.length === 0) { toast('没有需要识图的图片', true); return null; }
+    var concurrency = Math.min(ids.length, BATCH_CONCURRENCY);
+    // 达到阈值先算一笔账再开跑：先把「多久、花多少」摆出来
+    if (ids.length >= BIG_TAG_THRESHOLD && !options.skipConfirm) {
+      var picked = await confirmLargeTagTask(ids.length, concurrency);
+      if (!picked.go) { toast('已取消批量识图'); return null; }
+      if (picked.concurrency && picked.concurrency !== concurrency) {
+        concurrency = picked.concurrency;
+        rememberBatchConcurrency(concurrency);
+      }
+    }
     try {
       var resp = await apiFetch(withAuth(API + '/api/batch-auto-tag'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sticker_ids: ids, concurrency: Math.min(ids.length, 5) }),
+        body: JSON.stringify({ sticker_ids: ids, concurrency: concurrency }),
       });
       var data = await resp.json();
       if (!data.ok) { toast('创建任务失败: ' + (data.error || ''), true); return null; }
@@ -2234,15 +2244,78 @@
   }
 
   async function loadBatchAutoApplyState() {
-    var el = $('batch-auto-apply');
-    if (!el) return;
     try {
       var resp = await apiFetch(withAuth(API + '/api/batch-config'), { cache: 'no-store' });
       var data = await resp.json();
-      if (data.ok && data.data) el.checked = data.data.autoApply !== false;
+      if (data.ok && data.data) {
+        var el = $('batch-auto-apply');
+        if (el) el.checked = data.data.autoApply !== false;
+        applyBatchConcurrency(data.data.concurrency);
+      }
     } catch (e) {
       console.warn('[batch] load auto-apply state error:', e.message);
     }
+  }
+
+  // 并发数 = 一次同时识别几张图。用户在设置里选，范围 1~8，服务端也会再夹一次。
+  var BATCH_CONCURRENCY_MIN = 1;
+  var BATCH_CONCURRENCY_MAX = 8;
+  var BATCH_CONCURRENCY_DEFAULT = 3;
+
+  function normalizeBatchConcurrency(value) {
+    // null/undefined/空串是「没给」，不是「用户想要 0」
+    if (value === null || value === undefined || value === '') return BATCH_CONCURRENCY_DEFAULT;
+    var n = Math.round(Number(value));
+    if (!isFinite(n)) return BATCH_CONCURRENCY_DEFAULT;
+    return Math.min(Math.max(n, BATCH_CONCURRENCY_MIN), BATCH_CONCURRENCY_MAX);
+  }
+
+  function applyBatchConcurrency(value) {
+    BATCH_CONCURRENCY = normalizeBatchConcurrency(value);
+    var slider = $('batch-concurrency');
+    if (!slider) return;
+    var label = $('batch-concurrency-val');
+    function paint(n) {
+      if (label) label.textContent = '一次同时识别 ' + n + ' 张'
+        + (n === BATCH_CONCURRENCY_DEFAULT ? '（默认）' : '')
+        + (n >= 6 ? ' · 比较容易超时' : '');
+    }
+    if (!slider.__bound) {
+      slider.__bound = true;
+      slider.addEventListener('change', async function () {
+        var next = normalizeBatchConcurrency(slider.value);
+        slider.disabled = true;
+        try {
+          var resp = await apiFetch(withAuth(API + '/api/batch-config'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ concurrency: next }),
+          });
+          var data = await resp.json();
+          if (data.ok) {
+            BATCH_CONCURRENCY = normalizeBatchConcurrency(data.data && data.data.concurrency);
+            slider.value = String(BATCH_CONCURRENCY);
+            paint(BATCH_CONCURRENCY);
+            toast('并发已设为 ' + BATCH_CONCURRENCY + ' 张');
+          } else {
+            slider.value = String(BATCH_CONCURRENCY);
+            paint(BATCH_CONCURRENCY);
+            toast('保存失败：' + (data.error || ''), true);
+          }
+        } catch (e) {
+          slider.value = String(BATCH_CONCURRENCY);
+          paint(BATCH_CONCURRENCY);
+          toast('保存出错：' + e.message, true);
+        } finally {
+          slider.disabled = false;
+        }
+      });
+      slider.addEventListener('input', function () {
+        paint(normalizeBatchConcurrency(slider.value));
+      });
+    }
+    slider.value = String(BATCH_CONCURRENCY);
+    paint(BATCH_CONCURRENCY);
   }
 
   function toggleVisionBlocks() {
@@ -5243,6 +5316,23 @@ function formatUserstyleTime(iso) {
     button.disabled = true;
     button.textContent = '正在创建任务…';
     try {
+      // 先探一次有多少张要跑，大批量就弹确认再真建任务
+      var previewResp = await apiFetch(withAuth(API + '/api/batch-auto-tag-untagged'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dry_run: true }),
+      });
+      var preview = await previewResp.json();
+      if (previewResp.ok && preview.ok && preview.data && preview.timing) batchTiming = preview.timing;
+      var previewTotal = (preview.data && preview.data.total) || 0;
+      if (previewTotal >= BIG_TAG_THRESHOLD) {
+        var picked2 = await confirmLargeTagTask(previewTotal, BATCH_CONCURRENCY);
+        if (!picked2.go) { toast('已取消批量识图'); return; }
+        if (picked2.concurrency && picked2.concurrency !== BATCH_CONCURRENCY) {
+          BATCH_CONCURRENCY = picked2.concurrency;
+          rememberBatchConcurrency(BATCH_CONCURRENCY);
+        }
+      }
       var resp = await apiFetch(withAuth(API + '/api/batch-auto-tag-untagged'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5341,6 +5431,88 @@ function formatUserstyleTime(iso) {
   var currentBatchTaskId = null;
   var batchTaskNotified = {};
   var batchTasksData = [];
+  // 单张均摊耗时（毫秒，已含并发），由 /api/batch-tasks 顺带回给前端，用于起批量前的提示
+  var batchTiming = null;
+  // 并发的兜底值与 server/_batch-tasks.js 的 DEFAULT_BATCH_CONCURRENCY 一致；
+  // 用户在设置里改过之后，以 /api/batch-config 为准。
+  var BATCH_CONCURRENCY = 3;
+  // 批量识图的确认阈值：超过 5 张就先把耗时和花费说清楚。
+  // 定 5 而不是更大的数：调门相就这几张，正好是「不提醒就开跑、事后才知道要等多久」的体量。
+  var BIG_TAG_THRESHOLD = 5;
+  var DEFAULT_MS_PER_IMAGE = 30000;
+
+  function formatWaitText(ms) {
+    // 小批量常算出来只有十几秒，硬报「1 分钟」会显得在吓人
+    if (ms < 60000) return Math.max(5, Math.round(ms / 1000)) + ' 秒';
+    var min = Math.max(1, Math.round(ms / 60000));
+    if (min < 60) return min + ' 分钟';
+    var h = Math.floor(min / 60), m = min % 60;
+    return h + ' 小时' + (m ? ' ' + m + ' 分钟' : '');
+  }
+
+  // 大批量前把「多久、要调多少次模型」说清楚。
+  // 作者自己一次几张，但「一晚上跑不完、中途关掉白花钱」这个坑是真实存在的，
+  // 拿到应用的新用户更可能一次导几百张铺库。说清楚之后再开始，钱和等待由用户自己决定。
+  function confirmLargeTagTask(count, concurrency) {
+    return new Promise(function (resolve) {
+      var cur = normalizeBatchConcurrency(concurrency);
+      var message = '这次要识别 ' + count + ' 张图片。\n'
+        + '识图在后台跑，关掉页面也不丢，下次打开会接着跑剩下的。';
+      var overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.style.zIndex = '100000';
+      overlay.style.display = 'flex';
+      overlay.innerHTML = ''
+        + '<div class="modal-box" style="max-width:380px;position:relative">'
+        + '<h2 style="margin-top:0;font-size:16px">批量识图要花点时间</h2>'
+        + '<div style="font-size:13px;color:var(--text-muted);margin:14px 0 4px;line-height:1.75;white-space:pre-wrap">' + escHtml(message) + '</div>'
+        + '<div style="display:flex;align-items:center;gap:10px;margin-top:12px;font-size:13px">'
+        + '<span style="white-space:nowrap">一次识别</span>'
+        + '<input type="range" id="bgt-concurrency" min="1" max="8" step="1" value="' + cur + '" style="flex:1;accent-color:var(--primary)">'
+        + '<b id="bgt-concurrency-num" style="min-width:56px;text-align:right;white-space:nowrap">' + cur + ' 张</b>'
+        + '</div>'
+        + '<div id="bgt-estimate" style="font-size:12px;color:var(--text-muted);margin-top:6px;line-height:1.6"></div>'
+        + '<div style="font-size:11.5px;color:var(--text-muted);margin-top:6px;line-height:1.6">数字越大跑得越快，但也更容易撞上模型超时。这里的选择会记下来，下次批量直接沿用。</div>'
+        + '<div class="modal-actions" style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">'
+        + '<button class="btn btn-secondary" id="bgt-cancel">先不跑了</button>'
+        + '<button class="btn btn-primary" id="bgt-ok" style="width:auto">开始识别</button>'
+        + '</div></div>';
+      document.body.appendChild(overlay);
+      var settled = false;
+      function close(answer, picked) {
+        if (settled) return;
+        settled = true;
+        overlay.remove();
+        resolve({ go: answer, concurrency: picked });
+      }
+      // 耗时随并发重算：并发越大越快，调用次数（= 张数）不变
+      function paintEstimate() {
+        var perImage = (batchTiming && batchTiming.msPerImage > 0) ? batchTiming.msPerImage : DEFAULT_MS_PER_IMAGE;
+        var fromHistory = batchTiming && batchTiming.source === 'history';
+        var n = normalizeBatchConcurrency($('bgt-concurrency').value);
+        $('bgt-concurrency-num').textContent = n + ' 张';
+        var wait = formatWaitText(count * perImage / n);
+        $('bgt-estimate').textContent = '大概需要 ' + wait
+          + '（' + (fromHistory ? '按你最近一次的速度估算' : '按常见速度估算') + '），会调用模型 ' + count + ' 次。';
+      }
+      $('bgt-concurrency').addEventListener('input', paintEstimate);
+      paintEstimate();
+      overlay.querySelector('#bgt-ok').onclick = function () { close(true, cur); };
+      overlay.querySelector('#bgt-cancel').onclick = function () { close(false, cur); };
+      overlay.addEventListener('click', function (e) { if (e.target === overlay) close(false, cur); });
+      overlay.querySelector('#bgt-ok').focus();
+    });
+  }
+
+  // 记住并发选择，下次批量直接沿用（失败不阻塞本次识图）
+  function rememberBatchConcurrency(value) {
+    var n = normalizeBatchConcurrency(value);
+    apiFetch(withAuth(API + '/api/batch-config'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ concurrency: n }),
+    }).catch(function (e) { console.warn('[batch] 保存并发失败:', e.message); });
+  }
   var batchFailuresData = { total: 0, items: [] };
   var batchFailureView = false;
   var batchFailureRetryBusy = false;
@@ -5370,7 +5542,7 @@ function formatUserstyleTime(iso) {
       var resp = await apiFetch(withAuth(API + '/api/batch-auto-tag'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sticker_ids: ids, concurrency: 5 }),
+        body: JSON.stringify({ sticker_ids: ids, concurrency: BATCH_CONCURRENCY }),
       });
       var data = await resp.json();
       if (data.ok) {
@@ -5415,6 +5587,12 @@ function formatUserstyleTime(iso) {
         renderBatchProgress(t);
         return;
       }
+      if (t.status === 'paused') {
+        // 暂停是静止态：不轮询了，等用户点「继续」再起
+        stopBatchPolling();
+        renderBatchPaused(t);
+        return;
+      }
       // 结束态：拉完整数据渲染结果视图
       stopBatchPolling();
       await loadFullBatchResult(taskId);
@@ -5442,6 +5620,16 @@ function formatUserstyleTime(iso) {
     }
   }
 
+  // 用历史实测速度算「还要多久」。msPerImage 是单张纯耗时（不含并发），要除以并发。
+  // 没有实测数据就不显示：宁可空着，也别拿拍脑袋的数字跟用户承诺。
+  function remainingWaitText(remainingImages, concurrency) {
+    if (!remainingImages || remainingImages <= 0) return '';
+    var perImage = batchTiming && batchTiming.msPerImage > 0 ? batchTiming.msPerImage : 0;
+    if (!perImage) return '';
+    var c = normalizeBatchConcurrency(concurrency);
+    return ' · 大概还要 ' + formatWaitText(remainingImages * perImage / c);
+  }
+
   // ═══ 进度视图（任务进行中）：一条大进度条 + 正在处理的几张图，不渲染全部 ═══
   function renderBatchProgress(t) {
     var processed = t.completed_count + t.failed_count;
@@ -5449,7 +5637,8 @@ function formatUserstyleTime(iso) {
     var html = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">';
     html += '<div style="flex:1;min-width:200px">';
     html += '<div style="font-size:13px;color:var(--primary-dark);margin-bottom:6px">';
-    html += '已完成 <b style="color:var(--primary);font-size:16px">' + processed + '</b> / ' + t.total + ' 张';
+    html += '已完成 <b style="color:var(--primary);font-size:16px">' + processed + '</b> / ' + t.total + ' 张'
+      + escHtml(remainingWaitText(t.total - processed, t.concurrency));
     if (t.completed_count > 0) html += ' · 成功 <b style="color:var(--success)">' + t.completed_count + '</b>';
     if (t.failed_count > 0) html += ' · 失败 <b style="color:var(--danger)">' + t.failed_count + '</b>';
     html += '</div>';
@@ -5459,6 +5648,7 @@ function formatUserstyleTime(iso) {
     if (t.failed_count > 0) {
       html += '<button class="btn btn-secondary" id="batch-retry-failed-live" data-task-id="' + escHtml(t.id) + '" style="font-size:12px;width:100%;border-color:var(--danger);color:var(--danger)">重试失败 (' + t.failed_count + ')</button>';
     }
+    html += '<button class="btn btn-secondary" id="batch-pause-task" data-task-id="' + escHtml(t.id) + '" style="font-size:12px;width:100%">暂停</button>';
     html += '<button class="btn btn-secondary" id="batch-cancel-task" data-task-id="' + escHtml(t.id) + '" style="font-size:12px;width:100%">取消任务</button>';
     html += '</div></div>';
     $('batch-summary').innerHTML = html;
@@ -5478,6 +5668,26 @@ function formatUserstyleTime(iso) {
     $('batch-list').innerHTML = listHtml || '<div class="batch-progress-tip">就绪</div>';
   }
 
+  // 暂停是静止态：不动数据，只把「停在哪」和「怎么接回去」说清楚
+  function renderBatchPaused(t) {
+    var processed = t.completed_count + t.failed_count;
+    var left = t.pending_count;
+    var pct = t.total > 0 ? Math.round(processed / t.total * 100) : 0;
+    var html = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">';
+    html += '<div style="flex:1;min-width:200px">';
+    html += '<div style="font-size:13px;color:var(--primary-dark);margin-bottom:6px">已暂停 · 还剩 <b style="color:var(--primary);font-size:16px">' + left + '</b> / ' + t.total + ' 张'
+      + escHtml(remainingWaitText(left, t.concurrency)) + '</div>';
+    html += '<div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:var(--text-muted);transition:width .3s"></div></div>';
+    html += '<div style="font-size:12px;color:var(--text-muted);margin-top:8px">已经识别的 ' + processed + ' 张不会丢，点「继续跑」从剩下的接着来。</div>';
+    html += '</div>';
+    html += '<div style="display:flex;flex-direction:column;gap:8px;align-items:stretch;min-width:92px;margin-left:auto;flex-shrink:0">';
+    html += '<button class="btn btn-primary" id="batch-resume-task" data-task-id="' + escHtml(t.id) + '" style="font-size:12px;width:100%">继续跑</button>';
+    html += '<button class="btn btn-secondary" id="batch-cancel-task" data-task-id="' + escHtml(t.id) + '" style="font-size:12px;width:100%">取消任务</button>';
+    html += '</div></div>';
+    $('batch-summary').innerHTML = html;
+    $('batch-list').innerHTML = '<div class="batch-progress-tip">队列保留着，随时可以接回去。</div>';
+  }
+
   // ═══ 结果视图（任务结束）：统计 + 一键全部应用 + 结果网格 ═══
   var currentResultTask = null; // 当前结果视图对应的完整任务数据
 
@@ -5487,7 +5697,7 @@ function formatUserstyleTime(iso) {
     var pendingApply = (task.completed || []).filter(function (id) { return !appliedSet.has(id); });
     var failedList = task.failed || [];
     var cancelled = task.status === 'cancelled';
-    var statusLabel = cancelled ? '已取消' : (task.status === 'failed' ? '失败' : '已完成');
+    var statusLabel = cancelled ? '已取消' : (task.status === 'failed' ? '失败' : (task.status === 'paused' ? '已暂停' : '已完成'));
     var statusColor = cancelled ? 'var(--text-muted)' : (task.status === 'failed' ? 'var(--danger)' : 'var(--success)');
     // v0.34.37 - 整批都应用完（手动或自动）时保留结果展示，并给一句明确的去向交代
     var appliedCount = appliedSet.size;
@@ -5816,6 +6026,37 @@ function formatUserstyleTime(iso) {
     } catch (e) { toast('取消出错: ' + e.message, true); }
   }
 
+  // 暂停不需要二次确认：它不丢东西，误点一下再点继续就行，加个确认框反而绕
+  async function pauseBatchTask(taskId) {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-task/' + encodeURIComponent(taskId) + '/pause'), { method: 'POST' });
+      var data = await resp.json();
+      if (data.ok) {
+        toast(data.pending > 0 ? ('已暂停，还剩 ' + data.pending + ' 张') : '已暂停');
+        await checkBatchTasks();
+        var fresh = await apiFetch(withAuth(API + '/api/batch-task/' + encodeURIComponent(taskId)), { cache: 'no-store' });
+        var freshData = await fresh.json();
+        if (freshData.ok && freshData.data && freshData.data.status === 'paused') renderBatchPaused(freshData.data);
+      } else {
+        toast('暂停失败: ' + (data.error || ''), true);
+      }
+    } catch (e) { toast('暂停出错: ' + e.message, true); }
+  }
+
+  async function resumeBatchTask(taskId) {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/batch-task/' + encodeURIComponent(taskId) + '/resume'), { method: 'POST' });
+      var data = await resp.json();
+      if (data.ok) {
+        toast('继续跑，还剩 ' + data.pending + ' 张');
+        await checkBatchTasks();
+        pollBatchTask(taskId);
+      } else {
+        toast('继续失败: ' + (data.error || ''), true);
+      }
+    } catch (e) { toast('继续出错: ' + e.message, true); }
+  }
+
   // v0.25.1 - 全部重试：从当前结果视图的任务数据里收集失败项，成功后清旧任务失败记录
   async function retryAllFailedBatchResult() {
     var task = currentResultTask;
@@ -5836,6 +6077,7 @@ function formatUserstyleTime(iso) {
       if (requestGeneration !== batchTasksRequestGeneration) return;
       if (!resp.ok || !data.ok || !Array.isArray(data.data) || !data.failures) return;
       batchTasksData = data.data;
+      if (data.timing) batchTiming = data.timing;
       var failuresChanged = JSON.stringify(batchFailuresData) !== JSON.stringify(data.failures);
       batchFailuresData = data.failures;
       renderBatchTasksBadge(data.data, data.failures);
@@ -5843,7 +6085,7 @@ function formatUserstyleTime(iso) {
 
       for (var i = 0; i < data.data.length; i++) {
         var t = data.data[i];
-        if (t.status !== 'running' && t.status !== 'cancelled' && !batchTaskNotified[t.id]) {
+        if (t.status !== 'running' && t.status !== 'cancelled' && t.status !== 'paused' && !batchTaskNotified[t.id]) {
           batchTaskNotified[t.id] = true;
           if (t.status === 'completed') {
             var notApplied = t.completed - t.applied;
@@ -5881,6 +6123,15 @@ function formatUserstyleTime(iso) {
         badge.style.color = 'var(--primary-dark)';
         return;
       }
+      if (t.status === 'paused') {
+        // 暂停中也要有角标：不然这个任务就「消失了」，用户想继续都找不着入口
+        badge.hidden = false;
+        badge.className = 'badge-btn';
+        badge.innerHTML = '识图已暂停 ' + t.completed + '/' + t.total;
+        badge.style.borderColor = 'var(--border)';
+        badge.style.color = 'var(--text-muted)';
+        return;
+      }
     }
     // v0.26.0 - 聚合所有任务的待应用数（多任务时角标显示总数，不再只显示第一个任务）
     var pendingTotal = 0;
@@ -5914,7 +6165,7 @@ function formatUserstyleTime(iso) {
   // v0.25.1 - 角标点击直达：正在跑的任务 → 进度弹窗；有结果待应用 → 结果弹窗；
   // 有失败项 → 失败结果弹窗。
   function openBatchTasksModal() {
-    var running = batchTasksData.filter(function (t) { return t.status === 'running'; });
+    var running = batchTasksData.filter(function (t) { return t.status === 'running' || t.status === 'paused'; });
     if (running.length > 0) { openBatchTaskDetail(running[0].id); return; }
     var pendingApply = batchTasksData.filter(function (t) { return t.status === 'completed' && t.applied < t.completed; });
     if (pendingApply.length > 0) { openBatchTaskDetail(pendingApply[0].id); return; }
@@ -6372,6 +6623,8 @@ function formatUserstyleTime(iso) {
         if (btn.id === 'batch-apply-all' && !btn.disabled) applyAllBatchResult();
         else if (btn.id === 'batch-retry-failed') retryAllFailedBatchResult();
         else if (btn.id === 'batch-retry-failed-live') retryFailedLive(btn.getAttribute('data-task-id'));
+        else if (btn.id === 'batch-pause-task') pauseBatchTask(btn.getAttribute('data-task-id'));
+        else if (btn.id === 'batch-resume-task') resumeBatchTask(btn.getAttribute('data-task-id'));
         else if (btn.id === 'batch-cancel-task') {
           var tid = btn.getAttribute('data-task-id');
           customConfirm('确定取消这个批量识图任务吗？', function () { cancelBatchTask(tid); });
