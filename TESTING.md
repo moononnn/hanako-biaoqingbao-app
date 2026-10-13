@@ -1,5 +1,23 @@
 # 自动测试
 
+## v0.3.0 发布前全量回归（2026-10-13）
+
+```powershell
+node --test "tests/*.test.mjs"
+node --check <全项目 118 个 js/mjs 逐个>
+python tests/test_ball_target.py
+python tests/test_ball_wait_state.py
+node <宿主>/scripts/validate-app.mjs --dir <解压后按 id 命名的安装模拟目录> --json
+```
+
+结果：全量 **308 项全部通过，0 失败**（源码树、解压副本、每一笔提交的中间快照各跑一次，均 0 失败）；JS 语法检查 0 失败（源码树与解压副本各一次）；Python 离屏测试 `test_ball_target.py`、`test_ball_wait_state.py` 各 1 项通过；宿主静态校验 0 错 1 警（常驻的动态依赖未证明警告）。未调用真实付费模型/API。
+
+本版新增四个测试文件：`tests/batch-timing.test.mjs`（12 项，耗时估算，含一条拿「15 张并发 5 实跑 152 秒」当基准的断言，以及「快模型高并发不被误杀」）、`tests/batch-pause.test.mjs`（5 项）、`tests/batch-concurrency.test.mjs`（7 项）、`tests/secret-mask-guard.test.mjs`（7 项）；`tests/rpc-busy-retry.test.mjs` 扩充 6 项。
+
+本版实机走通：暂停/继续、并发滑块、耗时预估、API Key 占位符防护。**未实机验证**：识图超时重试与 90 秒阈值（需真撞上超时才验得到）。
+
+发布前交叉审查由只读审查伙伴独立跑过一轮，提出并已修：Codex 系分支超时未同步到 90 秒（文档与代码不符）、耗时估算的合理区间错施加在含并发的摊薄值上（快模型高并发被误杀）、批量并发兜底写成硬编码字面量而非读用户设置、`lib/batch-apply.js` 文件头指向不存在的 `routes/` 路径、README 漏写本版三项新能力、TESTING.md 声明项数过期。
+
 ## v0.2.13~v0.2.16 发布前全量回归（2026-10-12）
 
 ```powershell
