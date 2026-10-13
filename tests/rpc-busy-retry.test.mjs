@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
-import { isRpcBusyError, withRpcBusyRetry } from '../lib/rpc-retry.js';
+import { isRpcBusyError, withRpcBusyRetry, withTransientRetry, isTransientRetryableError } from '../lib/rpc-retry.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const BUSY_TEXT = 'App RPC concurrency limit reached';
@@ -83,6 +83,76 @@ test('批量进度事件接住了 Promise 拒绝，不留 unhandled rejection', 
   assert.match(emitBus, /pending\.catch\(/);
   // 判据二：进度事件不重试，避免同一张图重复推、界面进度多算
   assert.doesNotMatch(emitBus, /withRpcBusyRetry/);
-  // 判据三：识图调用才走退避重试
-  assert.match(src, /withRpcBusyRetry\(\s*\(\)\s*=>\s*tagImage\(/);
+  // 判据三：识图调用才走退避重试，而且走的是包含「超时」的那一档
+  assert.match(src, /withTransientRetry\(\s*\(\)\s*=>\s*tagImage\(/);
+});
+
+// 超时也值得重试一次：以前识图只认「并发槽满」，超时一来直接判死，
+// 用户点一次重试就再抛一次超时，看着像「这张图有问题」，其实是在掷骰子。
+test('认出超时类错误，但不把确定性错误当瞬时的', () => {
+  assert.equal(isTransientRetryableError(new Error('模型调用超时')), true);
+  assert.equal(isTransientRetryableError({ code: 'MODEL_TIMEOUT', message: 'xx' }), true);
+  assert.equal(isTransientRetryableError({ error: '请求超时' }), true);
+  assert.equal(isTransientRetryableError('App RPC concurrency limit reached'), true);
+  assert.equal(isTransientRetryableError('401 Unauthorized'), false);
+  assert.equal(isTransientRetryableError('thinking 模型未输出 JSON'), false);
+  assert.equal(isTransientRetryableError(null), false);
+});
+
+test('超时重试一次就收手（批量里还有别的 worker 在等着）', async () => {
+  let calls = 0;
+  const value = await withTransientRetry(async () => {
+    calls += 1;
+    return { ok: false, error: '模型调用超时' };
+  }, { sleep: noSleep });
+  assert.equal(calls, 2, '跑一次 + 重试一次');
+  assert.equal(value.ok, false);
+  assert.equal(value.error, '模型调用超时', '重试用尽后原样返回，原因不丢');
+});
+
+test('第一次就成功就不重试', async () => {
+  let calls = 0;
+  const value = await withTransientRetry(async () => {
+    calls += 1;
+    return { ok: true, data: { emotion: ['开心'] } };
+  }, { sleep: noSleep });
+  assert.equal(calls, 1);
+  assert.equal(value.ok, true);
+});
+
+test('抛出来的超时也重试', async () => {
+  let calls = 0;
+  const result = await withTransientRetry(async () => {
+    calls += 1;
+    if (calls === 1) throw new Error('模型调用超时');
+    return { ok: true, data: {} };
+  }, { sleep: noSleep });
+  assert.equal(calls, 2);
+  assert.equal(result.ok, true);
+});
+
+test('确定性错误不重试（不白烧钱）', async () => {
+  let calls = 0;
+  const value = await withTransientRetry(async () => {
+    calls += 1;
+    return { ok: false, error: '401 Unauthorized' };
+  }, { sleep: noSleep });
+  assert.equal(calls, 1);
+  assert.equal(value.ok, false);
+});
+
+test('原来的 only-busy 语义没变：超时对它不重试', async () => {
+  let calls = 0;
+  await withRpcBusyRetry(async () => {
+    calls += 1;
+    return { ok: false, error: '模型调用超时' };
+  }, { sleep: noSleep });
+  assert.equal(calls, 1);
+
+  let busyCalls = 0;
+  await withRpcBusyRetry(async () => {
+    busyCalls += 1;
+    return { ok: false, error: 'App RPC concurrency limit reached' };
+  }, { sleep: noSleep });
+  assert.equal(busyCalls, 3, 'busy 默认重试 2 次');
 });

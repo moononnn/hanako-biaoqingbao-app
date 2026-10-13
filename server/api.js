@@ -1876,7 +1876,8 @@ export default async function registerRoutes(app, ctx) {
     }
   });
 
-  // v0.34.37 - 批量识图设置：识别完成后是否自动把标签/标题写进图库（默认开）
+  // v0.34.37 - 批量识图设置：识别完成后是否自动把标签/标题写进图库（默认开），
+  // 以及并发数（同时识别几张图）
   app.get('/api/batch-config', () => {
     return json({ ok: true, data: readBatchConfig() });
   });
@@ -1884,11 +1885,18 @@ export default async function registerRoutes(app, ctx) {
   app.post('/api/batch-config', async (c) => {
     try {
       const body = await c.req.json().catch(() => ({}));
-      if (body && typeof body.autoApply !== 'boolean') {
+      if (body && typeof body.autoApply !== 'boolean' && body.autoApply !== undefined) {
         return json({ ok: false, error: 'autoApply 必须是布尔值' }, 400);
       }
-      const next = writeBatchConfig({ autoApply: body.autoApply });
-      return json({ ok: true, data: next, message: next.autoApply ? '识别完会自动应用' : '识别完先预览，等你点「全部应用」' });
+      const patch = {};
+      if (typeof body?.autoApply === 'boolean') patch.autoApply = body.autoApply;
+      if (body?.concurrency !== undefined) patch.concurrency = body.concurrency;
+      const next = writeBatchConfig(patch);
+      return json({
+        ok: true,
+        data: next,
+        message: next.autoApply ? '识别完会自动应用' : '识别完先预览，等你点「全部应用」',
+      });
     } catch (error) {
       return json({ ok: false, error: error.message || '保存失败' }, 500);
     }

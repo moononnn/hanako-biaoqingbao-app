@@ -10,10 +10,12 @@ import {
 // v0.34.37 - 识别结果落盘逻辑与批量识图设置（与手动「全部应用」共用同一套写入规则）
 import {
   isAutoApplyEnabled, buildApplyItems, applyItemsToMeta, selectPendingApplyIds,
+  getBatchConcurrency, MAX_BATCH_CONCURRENCY,
 } from '../lib/batch-apply.js';
 import { safeStickerPath } from '../lib/ball-core.js';
-import { withRpcBusyRetry } from '../lib/rpc-retry.js';
+import { withTransientRetry } from '../lib/rpc-retry.js';
 import { collectBatchFailures } from '../lib/batch-failures.js';
+import { avgMsPerImage } from '../lib/batch-timing.js';
 import {
   readGroupStore,
   isGroupStoreReadable,
@@ -23,11 +25,19 @@ import {
 
 const BATCH_TASKS_FILE = path.join(DATA_DIR, 'batch-tasks.json');
 
+// 批量识图的并发数（同时在识别几张图）。
+// 默认值在 lib/batch-apply.js 的 DEFAULT_BATCH_CONFIG，用户可在设置里改，这里只当兜底。
+// 2026-10-13：5 → 3。5 并发打 MiniMax 思考型视觉模型，一批 6 张集体超时；
+// 并发一高，慢思考与限流叠加就容易撞天花板。宁可慢，不要成片地失败。
+export const DEFAULT_BATCH_CONCURRENCY = 3;
+
 let moduleCtx = null;  // 在 registerBatchTasksRoutes 里注入
 
 export function selectUntaggedForBatch(meta, tasks) {
   const taskList = Array.isArray(tasks) ? tasks : [];
-  if (taskList.some(task => task?.status === 'running')) {
+  // 暂停中的任务也算「还有没跑完的」：它在 pending 里占着那些图，
+  // 再开一个任务去跑同一批，会让它们被重复识别、结果互相覆盖。
+  if (taskList.some(task => task?.status === 'running' || task?.status === 'paused')) {
     return { ok: false, reason: 'running', ids: [] };
   }
   const hasUnapplied = taskList.some(task => {
@@ -132,7 +142,7 @@ function createBatchTask(stickerIds, concurrency = 3) {
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     status: 'running',
-    concurrency: Math.min(Math.max(concurrency || 5, 1), 8),
+    concurrency: Math.min(Math.max(Number(concurrency) || DEFAULT_BATCH_CONCURRENCY, 1), MAX_BATCH_CONCURRENCY),
     total: uniqueIds.length,
     sticker_ids: uniqueIds,
     pending: uniqueIds,
@@ -238,12 +248,19 @@ async function runWorkerPool(taskId) {
   }
   await Promise.allSettled(workers);
 
-  // 全部 worker 退出后，检查是否真的完成
+  // 全部 worker 退出后，检查是否真的完成。
+  // 判定放宽到「非取消且 pending 已空」：暂停刚好发生在最后一张跑完时，
+  // status 停在 paused 但队列空了，任务不能永远卡在暂停态。
   const finalTask = getTask(taskId);
-  if (finalTask && finalTask.status === 'running' && finalTask.pending.length === 0) {
+  if (finalTask && finalTask.status !== 'cancelled' && finalTask.status !== 'completed'
+    && finalTask.pending.length === 0) {
     finalTask.status = 'completed';
     finalTask.completed_at = new Date().toISOString();
     finalTask.updated_at = finalTask.completed_at;
+    // 记下这次跑完全程的耗时：列表接口据此给新用户报一个「大概要等多久」，
+    // 比拍脑袋给固定数字准（不同模型、不同图片差异很大）。
+    const createdAt = Date.parse(finalTask.created_at || '') || 0;
+    if (createdAt > 0) finalTask.duration_ms = Date.parse(finalTask.completed_at) - createdAt;
     saveTask(finalTask);
     // v0.34.37 - 先落盘再自动应用：应用失败也不会弄坏任务状态
     const autoApplied = await autoApplyTaskResults(taskId);
@@ -291,12 +308,12 @@ async function workerLoop(taskId, workerIdx) {
       // 每张图开始识别前重读分组，让重命名/别名设置能自然进入后续任务。
       const groupStore = readGroupStore();
       const recognitionHints = isGroupStoreReadable(groupStore) ? buildRecognitionGroupHints(groupStore) : '';
-      const tagResult = await withRpcBusyRetry(
+      const tagResult = await withTransientRetry(
         () => tagImage(buf.toString('base64'), sticker.file, { recognitionHints, ctx: moduleCtx }),
         {
           onRetry: (err, attempt) => {
             moduleCtx?.log?.warn?.(
-              `[batch worker ${taskId}/${workerIdx}] ${stickerId} 撞上宿主 RPC 并发上限，退避后重试（第 ${attempt} 次）: ${err.message}`,
+              `[batch worker ${taskId}/${workerIdx}] ${stickerId} ${err.message.includes('超时') ? '模型超时' : '撞上宿主 RPC 并发上限'}，退避后重试（第 ${attempt} 次）: ${err.message}`,
             );
           },
         },
@@ -313,8 +330,10 @@ async function workerLoop(taskId, workerIdx) {
     }
 
     // 写回结果（v0.19.5 - 走串行队列，mutator 执行前重新读最新任务，避免多 worker 覆盖彼此更新）
+    // 暂停也要写回：worker 抢到的那几张已经把模型钱花出去了，
+    // 这时候把 status 改成 paused 就丢弃结果等于白烧钱重跑。只有取消才真丢。
     await queuedSave(taskId, (t) => {
-      if (t.status !== 'running') return; // 任务已取消/完成，不再写回
+      if (t.status !== 'running' && t.status !== 'paused') return; // 任务已取消/完成，不再写回
       t.results[stickerId] = { ...result, attempted_at: new Date().toISOString() };
       if (result.ok) {
         t.completed.push(stickerId);
@@ -344,6 +363,53 @@ async function workerLoop(taskId, workerIdx) {
 }
 
 // ═══ 任务控制 ═══
+
+// 暂停与取消的区别：取消是终态，队列作废；暂停是可逆的，pending 原封不动留着，
+// 下次点「继续」从断的地方接着跑。重启后 resumeAllTasks 只管 running 的，暂停状态跨重启保留。
+export function canPauseTask(task) {
+  if (!task) return { ok: false, error: '任务不存在' };
+  if (task.status !== 'running') return { ok: false, error: `任务状态为 ${task.status}，无需暂停` };
+  if ((task.pending || []).length === 0 && (task.current_ids || []).length === 0) {
+    return { ok: false, error: '任务已经跑完了' };
+  }
+  return { ok: true };
+}
+
+export function canResumeTask(task) {
+  if (!task) return { ok: false, error: '任务不存在' };
+  if (task.status !== 'paused') return { ok: false, error: `任务状态为 ${task.status}，无需继续` };
+  if ((task.pending || []).length === 0) return { ok: false, error: '没有剩余的待识别图片' };
+  return { ok: true };
+}
+
+function pauseTask(taskId) {
+  const task = getTask(taskId);
+  const check = canPauseTask(task);
+  if (!check.ok) return check;
+  task.status = 'paused';
+  task.paused_at = new Date().toISOString();
+  task.updated_at = task.paused_at;
+  saveTask(task);
+  // 已经在跑的 worker 会跑完手里那几张再自然退出（写回仍然保留），
+  // 没抢到图的那些直接停下。所以这里不用去杀池子。
+  moduleCtx?.log?.info?.(`[batch] 任务 ${taskId} 已暂停，剩余 ${task.pending.length} 张`);
+  emitBus('biaoqingbao:batch-task-paused', { taskId, pending: task.pending.length });
+  return { ok: true, pending: task.pending.length };
+}
+
+function resumeTask(taskId) {
+  const task = getTask(taskId);
+  const check = canResumeTask(task);
+  if (!check.ok) return check;
+  task.status = 'running';
+  task.resumed_at = new Date().toISOString();
+  task.updated_at = task.resumed_at;
+  saveTask(task);
+  ensureWorkerPool(taskId);
+  moduleCtx?.log?.info?.(`[batch] 任务 ${taskId} 继续，剩余 ${task.pending.length} 张`);
+  emitBus('biaoqingbao:batch-task-resumed', { taskId, pending: task.pending.length });
+  return { ok: true, pending: task.pending.length };
+}
 
 function cancelTask(taskId) {
   const task = getTask(taskId);
@@ -457,6 +523,8 @@ function listTasks(filter = {}, all = readBatchTasks()) {
     pending: t.pending.length,
     current: t.current,
     current_ids: t.current_ids || [],
+    duration_ms: Number(t.duration_ms) || 0,
+    concurrency: Number(t.concurrency) || 1,
   }));
 }
 
@@ -570,7 +638,7 @@ export function registerBatchTasksRoutes(app, ctx) {
   moduleCtx?.log?.info?.('[biaoqingbao] 注册 batch-tasks 路由');
 
   // POST /api/batch-auto-tag-untagged — 一键把未识图图片加入批量任务
-  app.post('/api/batch-auto-tag-untagged', async () => {
+  app.post('/api/batch-auto-tag-untagged', async (c) => {
     try {
       const all = readBatchTasks(true);
       const tasks = (all.order || []).map(id => all.tasks[id]).filter(Boolean);
@@ -584,7 +652,16 @@ export function registerBatchTasksRoutes(app, ctx) {
       if (selection.ids.length === 0) {
         return jsonResp({ ok: true, data: { taskId: null, total: 0 }, message: '图库里没有未识图的图片' });
       }
-      const task = createBatchTask(selection.ids, 5);
+      // dry_run：只报「将要识别多少张、大概要多久」，不建任务。
+      // 前端拿它弹确认——新用户一次导几百张再点这个按钮是最典型的踩坑路径，
+      // 提示必须拦在建任务之前。
+      let dryRun = false;
+      try { dryRun = Boolean((await c.req.json())?.dry_run); } catch { /* 没 body 就算真跑 */ }
+      if (dryRun) {
+        const timing = avgMsPerImage(listTasks({}, all));
+        return jsonResp({ ok: true, data: { taskId: null, total: selection.ids.length }, timing });
+      }
+      const task = createBatchTask(selection.ids, getBatchConcurrency());
       return jsonResp({
         ok: true,
         data: { taskId: task.id, total: task.total, concurrency: task.concurrency, status: task.status },
@@ -647,7 +724,10 @@ export function registerBatchTasksRoutes(app, ctx) {
       const all = readBatchTasks(true);
       const tasks = listTasks(status ? { status } : {}, all);
       const failures = readCurrentFailures(all);
-      return jsonResp({ ok: true, data: tasks, failures });
+      // 顺带回一个单张均摊速度，前端起大批量任务前拿它算预计耗时。
+      // 用未过滤的全量任务算：即使本次只看 running，历史速度也得能用。
+      const timing = avgMsPerImage(listTasks({}, all));
+      return jsonResp({ ok: true, data: tasks, failures, timing });
     } catch (error) {
       return jsonResp({ ok: false, error: '读取识图任务失败：' + error.message }, 500);
     }
@@ -705,8 +785,21 @@ export function registerBatchTasksRoutes(app, ctx) {
       pending_count: (task.pending || []).length,
       applied_count: Array.isArray(task.applied) ? task.applied.length : 0,
       current_ids: task.current_ids || [],
+      concurrency: Number(task.concurrency) || 1,
       error: task.error || null,
     } });
+  });
+
+  // POST /api/batch-task/:id/pause — 暂停运行中的任务（可逆，队列留着）
+  app.post('/api/batch-task/:id/pause', async (c) => {
+    const id = c.req.param('id');
+    return jsonResp(pauseTask(id));
+  });
+
+  // POST /api/batch-task/:id/resume — 从暂停处继续跑
+  app.post('/api/batch-task/:id/resume', async (c) => {
+    const id = c.req.param('id');
+    return jsonResp(resumeTask(id));
   });
 
   // POST /api/batch-task/:id/cancel — 取消运行中的任务
