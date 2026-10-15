@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "project": {
+    "id": "biaoqingbao-app",
+    "name": "表情包",
+    "kind": "app",
+    "version": "0.3.1",
+    "repoUrl": "moononnn/hanako-biaoqingbao-app"
+  },
+  "publisher": "moononnn & 小花",
+  "source": {
+    "roots": [
+      "."
+    ]
+  },
+  "checks": {
+    "testCommands": [],
+    "deferredTo": "existing-ci + local precise verify"
+  },
+  "package": {
+    "topLevel": "biaoqingbao-app",
+    "entry": "index.js",
+    "include": [
+      "manifest.json",
+      "index.js",
+      "README.md",
+      "CHANGELOG.md",
+      "LICENSE",
+      "NOTICE",
+      "COMMERCIAL-LICENSE.md",
+      "THIRD_PARTY_NOTICES.md",
+      "assets",
+      "lib",
+      "python",
+      "server",
+      "tools",
+      "ui",
+      "sdk/app-bus-contract.js",
+      "sdk/app-contract/bus-requests.js",
+      "sdk/app-contract/model-stream.js",
+      "sdk/app-contract/rpc-error.js",
+      "sdk/app-contract/sdk-error.js",
+      "sdk/app-contract/server-client.js"
+    ],
+    "excludeDirs": [
+      "tests",
+      "scripts",
+      ".git",
+      ".github",
+      "_backups",
+      "node_modules",
+      "__pycache__",
+      ".pytest_cache",
+      ".cache",
+      "dist",
+      "coverage",
+      "data",
+      "stickers",
+      ".venv",
+      "venv",
+      "site-packages",
+      ".idea",
+      ".vscode",
+      ".cloud-build",
+      "out"
+    ],
+    "excludeFiles": [
+      "PENDING_CHANGES.md",
+      "PUBLISHING.md",
+      "PROJECT_LOG.md",
+      "TESTING.md",
+      "x.json",
+      "package-lock.json",
+      "data.json",
+      "preferences.json",
+      "probe-result.json",
+      ".installed-by.json",
+      ".env",
+      ".env.local",
+      "credentials.json",
+      "api-key.json",
+      ".DS_Store",
+      "Thumbs.db"
+    ],
+    "excludeGlobs": [
+      "*.log",
+      "*.zip",
+      "*.bak",
+      "*.pyc",
+      "*.pem",
+      "*.key",
+      "*.tmp",
+      "*.swp",
+      "*.db",
+      "*.sqlite",
+      "*.corrupt-*"
+    ]
+  },
+  "devOnly": {
+    "targets": [
+      "index.js"
+    ],
+    "startMark": "/* #release-strip-start 构建发布包时这段会被删掉，见 scripts/build-release.mjs */",
+    "endMark": "/* #release-strip-end */",
+    "residue": [
+      "/api/_dev/deliver-test",
+      "dev-deliver",
+      "dev-diag"
+    ],
+    "replacements": []
+  },
+  "privacy": {
+    "redlineSource": "local-only（云端不持有词表；本机用 projects/<id>.json 的 redline 扫）",
+    "textExtensions": [
+      ".js",
+      ".mjs",
+      ".cjs",
+      ".json",
+      ".md",
+      ".html",
+      ".css",
+      ".txt",
+      ".yml",
+      ".yaml",
+      ".ps1"
+    ],
+    "allowedNames": [
+      "小花",
+      "moononnn",
+      "Hanako",
+      "Moonon"
+    ]
+  },
+  "resources": {
+    "manifestFile": "manifest.json",
+    "bases": [
+      "",
+      "ui/"
+    ],
+    "pointers": [
+      "icon",
+      "contributes.cards[].face.image",
+      "contributes.cards[].pageIcon",
+      "contributes.cards[].route"
+    ]
+  },
+  "output": {
+    "archiveBaseName": "app-biaoqingbao-app-{version}",
+    "zipExtension": ".zip"
+  },
+  "toolchain": {
+    "packScript": "scripts/extension-pack.mjs",
+    "pin": {
+      "channel": "beta",
+      "channelManifest": "https://dl.openhanako.com/channels/beta.json",
+      "version": "1.1.7-beta",
+      "platform": "win32-x64",
+      "file": "server-1.1.7-beta-win32-x64.tar.gz",
+      "sha256": "4460b4c2a6bae210c19b93bb95a9f08cd1cf94dc7cf1cb2f21cc2e9c2df9182b",
+      "size": 241464173,
+      "mirrors": [
+        "https://github.com/liliMozi/openhanako/releases/download/train-beta-38",
+        "https://dl.openhanako.com",
+        "https://github.com/liliMozi/openhanako/releases/download/train-beta-37"
+      ]
+    }
+  }
+}

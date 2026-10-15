@@ -1,0 +1,20 @@
+{
+  "installedAt": "2026-10-15T12:16:56.223Z",
+  "source": "cloud/install-workflow.mjs",
+  "repo": ".",
+  "files": [
+    ".github\\workflows\\cloud-build-app-package.yml",
+    ".cloud-build\\pack.mjs",
+    ".cloud-build\\lib\\zip.mjs",
+    ".cloud-build\\lib\\ps.mjs",
+    ".cloud-build\\lib\\config.mjs",
+    ".cloud-build\\lib\\select.mjs",
+    ".cloud-build\\lib\\strip.mjs",
+    ".cloud-build\\lib\\privacy.mjs",
+    ".cloud-build\\lib\\resources.mjs",
+    ".cloud-build\\lib\\toolchain.mjs",
+    ".cloud-build\\lib\\verify.mjs",
+    ".cloud-build\\config.json"
+  ],
+  "remove": "node cloud/install-workflow.mjs -Repo <path> -Remove -Confirm"
+}

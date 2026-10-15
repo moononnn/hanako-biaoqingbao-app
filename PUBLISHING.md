@@ -2,36 +2,40 @@
 
 这份文件只约束本项目发布，不替代 Hana 应用开发规范。每次发布前先读本文件，再动手。
 
+## 当前发布契约（2026-10-14）
+
+本节与小工坊 `WORKFLOW.md` 的新规则优先；本文件更早的 Builder review/install/upgrade 强制门槛、README 强制改写或重复全量测试要求均属历史，不再适用于普通发布。项目分档与文件边界仍有效。
+
+规范顺序：定版、CHANGELOG 与便携 cloud 配置 → `notes` → `preflight` → 最终 `verify` → 准确 `commit`/`push`、CI 与云候选 → `import` → 最终 ZIP/entry 机器核验 + 独立伙伴 `packageReview` → `freeze` → tag/Release/回下载 hash/市场登记。`verify` 可自动执行 preflight，但云发布在提交或上传前仍须显式跑一次，检查本地隐私、Git 字节漂移、云配置及 `.cloud-build`/`.github` 工作流和 payload 是否跟踪或纳入准确提交，并批量列出全部问题。当前 CLI 已支持 `preflight` 与 `record kind=packageReview`；审包记录的 pass 必须绑定最终 ZIP/entry，并填写 `reviewer`、`independent=true`，详细字段见 `WORKFLOW.md`。
+
+审包仅针对最终官方 ZIP 与对应 entry。主会话可先做机械检查，独立伙伴须只读核查实物入口、资源引用、依赖，以及数据写入/升级代码风险；不得碰生产数据，不要求 Builder 实测。`packageReview` 必须由独立伙伴判定，证据含 `kind=packageReview`、`status`、`method`、`scope`、`actual`、`time`、`reviewer`、`independent=true`，并绑定最终 `zipSha256` 与 `entrySha256`。一轮收齐意见；阻断问题修复后对新指纹重核，非阻断建议不扩改。派出审查或满篇未核验不算通过。
+
+普通发布不强制 Builder review/install/upgrade，也不要求卸载重装或真实数据迁移。功能声明以本人实机已测场景为限：有验收时捕获的 `files` 指纹就按指纹核验；无指纹时须有本人原会话 `reference` 且 `observedVersion` 等于本版，才可记录该场景通过并标记 `reuse=reported-scenario-only`。该记录不得跨后续代码改动复用或冒称全应用通过；完整安装/迁移无证据不得宣称通过。副本内容变换仍须对应 `releaseTests`；验证复用仅限源码、测试、依赖、检查命令、相关验证器及运行环境完全一致。Notes 或审批策略脚本变更不触发业务重测；官方打包器/发布规则变化只重核包。README 全文与 `manifest.description` 未获明确授权保持原文；实质安装/权限差异如实记录，不因此自动改稿。唯一发布包仍为官方 ZIP + entry。
+
+本项目应用内更新器硬编码 `biaoqingbao-app-v<version>.zip`，由 `package.compatibilityAliases` 生成与官方 ZIP 字节相同的兼容别名；别名不是第二种包，官方名与别名的 SHA-256 必须相同。
+
 ## 发布类型
 
-- **小改动**（纯美化、小修复、没有用户流程变化）：push 代码并打 git tag，不创建 Release；`PENDING_CHANGES.md` 继续积累。
+- **小改动**（经核实为纯美化、小修复且没有用户流程变化）：按本项目既定轻量档 push 并打 git tag，不创建 Release；`PENDING_CHANGES.md` 继续积累。
 - **功能级改动**（新功能、用户在等的修复、交互流程变化）：走完整发布流程，创建带安装包的 GitHub Release。
-- 拿不准档位时先停在本地问一句，不擅自创建 Release。
+- 按可核实的变更事实自行定档；信息可查证就先查，不为普通技术取舍询问。确属作者个人决定才另行确认；无法明确判为小改动时按完整发布路径。
 - tag 每版都打，不省；已发布历史漏打的补上。
 
 自带「检查更新」的应用，每次发 Release 用户都会收到提醒，所以小改动逐发 Release 等于频繁打扰。这是分档的原因。
 
 ## 发布工作区
 
-### 市场安装包必须手工过一遍（2026-10-10 踩到的坑）
+当前正式 App 目录 `<HANA_HOME>/apps/biaoqingbao-app` 同时是 `moononnn/hanako-biaoqingbao-app` 的 Git 工作区；配置中的 `src` 与 `repo` 相同，流水线因此跳过目录复制。旧文档所写的工作台独立克隆当前不存在，不要再按旧路径同步或覆盖目录。仓库中的 `.github/`、测试与 `.cloud-build/` 可以留在仓库，但不得进入 App 包。
 
-市场的 `app-biaoqingbao-app-<version>.zip` 用**官方打包器**产出（宿主 `artifacts/server/<版本>/scripts/extension-pack.mjs`），它**不认识**本项目的构建约定，会把两样不该外发的东西打进包里：
+### 官方市场包与项目剥离规则
 
-1. `PROJECT_LOG.md`——内部开发记录，含私人称呼与本机路径。红线内容。
-2. `index.js` 里 `#release-strip-start/end` 包着的开发期验证入口——`scripts/build-release.mjs` 会剥，官方打包器不会剥，包里留着一条能往任意会话投递图的接口。
+官方市场 ZIP 必须使用 Hana 官方 `extension-pack.mjs`，并且输入只能是小工坊生成的干净 stage；不可对开发目录直接打包。官方打包器不会理解项目哨兵，当前项目配置会先在 stage 中按完整独占行剥掉 `index.js` 的 `#release-strip-start/end` 区间，再做残留扫描和包验收。改了哨兵格式时，先更新配置并验证剥离结果，不能手工删正式源码。
 
-正确做法：先从正式目录复制一份到临时暂存目录（排除 `PROJECT_LOG.md`、`x.json`、`_backups`、`data`、`*.log`、`__pycache__` 等），暂存目录名必须是 id（`biaoqingbao-app`），在暂存目录里手工删掉 strip 标记区间，再用官方打包器对着暂存目录打包。
+历史 v0.1.41 附件曾含 `PROJECT_LOG.md` 与 `x.json`；已发布附件不得替换，本配置只保证之后的新包按白名单排除这些文件。
 
-> v0.1.41 的市场安装包已经带上了 `PROJECT_LOG.md` 和 `x.json`（`PROJECT_LOG.md` 有 108 次下载）。替换附件会让市场按 sha256 校验安装失败，所以不能动，只能从下一版开始保证干净。
+### 应用内更新器的兼容附件名
 
-### 本地目录
-
-本地正式目录（`<HANA_HOME>/apps/biaoqingbao-app`）是唯一开发位置，改完直接改它，不走 Builder、不走 dev slot。公开内容从独立克隆推送：
-
-- 发布仓库克隆：`<工作台>/hanako-biaoqingbao-app`（remote 指向 `moononnn/hanako-biaoqingbao-app`）
-- 同步方式：从正式目录整树复制到克隆，排除 `.git`、`_backups`、`node_modules`、`data`、`stickers`、`__pycache__`、`.pytest_cache`、`*.pyc`、`*.zip`、`*.log`、`*.bak`、`x.json`、`PROJECT_LOG.md`（内部开发记录，不公开）
-- 克隆里独有的 `.github/` 不能被正式目录覆盖掉，复制方向始终是 正式目录 → 克隆
-- 打包不要手工压：一律用 `node scripts/build-release.mjs`（见下）
+`server/api.js` 的更新链接仍请求 `biaoqingbao-app-v<version>.zip`。小工坊在 `package.compatibilityAliases` 中为官方 ZIP 生成该旧文件名；它与 `app-biaoqingbao-app-<version>.zip` 必须字节完全相同、SHA-256 完全相同，不另建第二种内容包。`scripts/build-release.mjs` 不再作为本版 Release 打包入口；不得单独重打一个内容不同的旧包。
 
 ## 版本与账本
 
@@ -40,33 +44,29 @@
 - 发布那一刻才定版本号，按这版实际有什么来：新能力/新玩法走 minor，只有修复优化走 patch，数据要迁移或对外接口大改走 major。一版既有新功能又有修复走 minor。别硬升，也别让 minor 停太久。
 - 发布时直接发这个定下来的版本号，不额外跳号（首个公开版本是 `0.1.40`）。
 - 本项目没有 `package.json`，所以「manifest 与 package 版本一致」那条检查在这里不适用；CI 只校验 manifest 本身能解析、关键字段齐全、卡片声明的页面文件存在。
-- 发布后核对 `TESTING.md` 里声明的测试项数与当次实跑输出一致（这项易腐，功能迭代后经常落后）。
+- 核对 `TESTING.md` 声明与本版实际有效的验证记录一致；指纹完全匹配时可复用既有测试结果，不为更新测试项数或 Notes/审批策略变化强制重跑全量业务测试。
 
 ## 发布前必须做的事
 
-1. **剥掉开发期入口。** `index.js` 里带 `#release-strip-start` / `#release-strip-end` 标记的块（目前是 `/api/_dev/deliver-test`）只存在于本地，构建脚本会把它从发布副本里删掉，并复查残留。本地正式目录保留不动。
+1. **剥掉开发期入口。** `index.js` 里带 `#release-strip-start` / `#release-strip-end` 标记的块（目前是 `/api/_dev/deliver-test`）只从本地发布 stage 删除，并复查残留；正式源码保留不动。不得手工编辑源码来替代 stage 转换。
 2. **核对仓库地址。** 应用内的检查更新读的是 `server/api.js` 顶部的 `REPO` 常量，`NOTICE` 和 `README.md` 的反馈链接也各写了一次。仓库名一旦定下来，三处一起改，别留下指向早期插件版仓库的地址。
 3. **核对网络放行名单。** `manifest.json` 的 `network.allowedHosts` 决定应用能访问哪些域名。用户自己填的模型地址如果不在名单里，请求会被宿主拦下——改动模型接入方式时记得同步这一项。
 4. **核对文件名里的红线。** 打包前按 plugin-dev-guide skill 里的「命名红线」清单全库 grep 一遍（对外内容里不出现作者本机路径、真实称呼、以及其他伙伴的名字，审查记录一律写「审查伙伴」）。
 5. **核对清单里的资源路径。** 同一个 `assets/` 前缀在两处指向不同目录：顶层 `icon` 以**包根**为基址（`assets/icon.png`），而 `cards[].face.image` 与 `pageIcon` 以 **`ui/`** 为基址（清单里写 `assets/cover.png`，实指 `ui/assets/cover.png`）。核对某张图是否落盘时两个基址都要查；只查一个就断言「文件丢了」，会把本来正常的资源当成缺陷去「修」。拿解压后的 zip 对着 manifest 逐条核对卡片声明的页面与图标是否都在包里。
-5. **走一遍发布前交叉审查。** 对着打好的 zip 实物查三层：包内容审查、用户安装模拟、外部红线复查。清单在 plugin-dev-guide skill 的 `references/17-release-cross-review.md`。A/B 两组必须做实机核验，**派只读审查伙伴不够**——它解压不了、跑不了测试、算不了哈希，回你一份满篇「未核验」那是没做成检查，不是通过也不是不通过。要么给审查伙伴可执行权限并约束它只读，要么自己对着 zip 实物跑完（解压清单、条目名检查、解压副本跑 `node --check` + `node --test`、逐文件 sha256 对账、宿主静态校验），把实测结果表喂给它做独立判断。审查记录里要写清哪几项谁跑的、哪几项压根没做。
-6. **改动打包脚本后重新核。** 审查意见里只要动了打包脚本，就必须重新打包并重跑审查——审查的是实物，实物变了就得重核，记录里的 SHA-256 换成最后那次的值。
+5. **最终包机器核验与独立审包。** 主会话先核对最终 ZIP/entry 指纹、包内真实入口、资源引用、依赖、隐私/残留与官方静态校验；有副本内容变换时，对最终解包副本执行对应 `releaseTests`。再交独立伙伴只读检查同一 ZIP/entry 的实物与数据写入/升级代码风险，不碰生产数据、不要求 Builder 实测。证据须 `kind=packageReview`，填写 `status`、`method`、`scope`、`actual`、`time`、`reviewer`、`independent=true` 并绑定 `zipSha256`、`entrySha256`；只有独立伙伴可判 pass。意见一轮收齐，只修阻断项；ZIP/entry 变化后重做受影响包核验与审包，非阻断建议不扩改。
+6. **打包器/发布规则变更。** 官方打包器或发布规则变更只重核最终包及受影响包检查，不自动触发业务全量重测；若新包内容有变换，`releaseTests` 仍必须通过。
 
 ## 固定顺序
 
-1. 读本文件、`TESTING.md`、plugin-dev-guide skill。
-2. 核对 manifest 版本、账本条目、与克隆的差异；补齐 CHANGELOG。
-3. 跑测试，全绿才继续：
-   - `node --test tests/*.test.mjs`（零依赖）
-   - 桌面悬浮球的 Python 离屏测试（需要本机 Python 3 + PyQt6，CI 里跑不了）
-   - 应用静态校验：`node <Hana 安装目录>/artifacts/server/<版本>/scripts/validate-app.mjs --dir <本项目路径> --json`
-4. 打发布包：`node scripts/build-release.mjs --out <工作台>/_releases/biaoqingbao-app`（剥开发入口、复查残留、算 SHA-256）。脚本会自行排除 `.git`、`_backups`、`node_modules`、`dist`、日志、备份、运行时残留；`PROJECT_LOG.md` 是内部开发记录（含本机现场与私人称呼），**不进发布包**，只在本地留档。
-5. 对着 zip 走发布前交叉审查（见上一节第 5 条）。
-6. push → 等 CI 全绿；红了先修，别发。
-7. 建 GitHub Release：标题带上这一版的主要内容（例如 `v0.1.40 — 首个公开版本`），附上 zip 和它的 SHA-256。**附件名固定为 `biaoqingbao-app-<tag>.zip`**（tag 是 `v0.1.40` → 附件就是 `biaoqingbao-app-v0.1.40.zip`）：应用里的「检查更新」直接按这个名字拼下载地址，改名会让链接失效。
-8. 提醒项目作者确认。
+1. 读本文件、`TESTING.md`、`PENDING_CHANGES.md`；核对 App Manager、manifest ID/版本、Git remote、tag/Release 和本版账目。开发期命名/隐私红线仍按适用规范核查；发布门禁以本文件与小工坊 `WORKFLOW.md` 为准。
+2. 整理真实待发条目进 `CHANGELOG.md`，按项目契约定版本；README 版本行不作为阻断项，也不自动编辑。
+3. 定版并稳定便携 cloud 配置，部署 workflow，执行 `notes` → `preflight` → 最终 `verify`。preflight 批量核本地隐私、Git 字节漂移、云配置与 `.cloud-build`/`.github` workflow/payload 跟踪；云上传前须显式执行一次。随后 commit/push 准确源码与 workflow/config，等待准确 CI 和候选构建，下载并 `import`。Cloud 模块未部署/不可用时才本地 `pack` 备用。
+4. 对最终官方 ZIP + entry 做机器核验，再由独立伙伴完成并记录 `packageReview`，绑定 ZIP/entry 指纹并填写 `status`、`method`、`scope`、`actual`、`time`、`reviewer`、`independent=true`；不要求 Builder review/install/upgrade 或卸载重装。功能只按本人实机已测场景记述；副本内容变换仍须 `releaseTests`。迁移风险先静态核与合成数据测试，真实数据操作另行授权。
+5. 达到 freeze 门槛后打 tag、创建 GitHub Release，上传官方 ZIP + entry 及 `biaoqingbao-app-v<version>.zip` 字节相同的兼容别名；回下载每个 ZIP 并确认 SHA-256 相同且与 entry 一致，再登记市场。
+
+完整阶段与 Cloud Runner 校验见小工坊 `WORKFLOW.md`。用户说“推送表情包应用”按已核实变更事实和项目分档执行：功能级改动走完整 Release + 市场登记；经核实的纯小改动按轻量档 push+tag，不再为普通档位选择重复确认。
 
 ## 发布后
 
 - 把 `PENDING_CHANGES.md` 清空（保留文件头），从下一版重新记账。
-- 若这版改了用法（界面位置、配置项、依赖），同步更新 `README.md`；README 里引用的截图若有变化，一并替换 `assets/release-screenshots/`。
+- README 不因版本号或每项功能更新而自动改写；若安装/使用事实发生实质变化，先取得单独授权再更新。确需替换 README 截图时，同时核对 `assets/release-screenshots/` 的公开内容。
