@@ -1,5 +1,17 @@
 # 自动测试
 
+## v0.3.1 发布前完整验证（2026-10-15）
+
+发布小工坊 `release.ps1 -Project biaoqingbao-app -Phase verify` 在隔离副本运行：**Node 312 项通过，0 失败**；Python 离屏测试 `test_ball_target.py`、`test_ball_wait_state.py` 各 1 项通过；**118 份 JS/MJS 语法检查通过**。没有调用真实付费模型/API。源码完整验证已通过，最终包核验、准确提交 CI 与独立交叉审包仍以本次发布证据为准。
+
+Hana 1.1.7-beta + Windows 11 的出图、三键反馈与切窗恢复已由使用者实机确认。QQ 实收、macOS/Linux、全新安装和真实数据迁移未在本轮重新验证。README 与应用简介原文保持不变。
+
+## 2026-10-15 Hana 1.1.7-beta 配图兼容（出图、按钮与切窗实机通过）
+
+命令：`node --test tests/sticker-tool-card.test.mjs tests/sticker-bridge-media.test.mjs tests/ball-message-card.test.mjs tests/ball-message-card-ui.test.mjs tests/sticker-after-turn.test.mjs tests/sticker-delivery.test.mjs`。
+
+定向 **93 项通过，0 失败**；`index.js`、`lib/sticker-delivery.js`、`lib/sticker-after-turn.js` 语法检查通过。覆盖工具不返回 iframe 卡、附件保留、定稿队列透传独立业务记录、跨回合同图可再次显示、accepted/unknown 不重复投递、长回复仍忙时重新排队、三键反馈与渲染认领。模拟 Bus，不调用真实付费模型/API；未运行全应用回归。本地重载后调用 express 指定 stk_586，使用者确认图片显示恢复，并明确补充按钮与切窗均已验证、没有问题；出图、三键反馈与切窗恢复实机通过。使用者反馈喜欢、应景等点击响应很快，未做延迟测量，不归因于具体代码变化。QQ 实收及全部历史窗口未验证。
+
 ## v0.3.0 发布前全量回归（2026-10-13）
 
 ```powershell

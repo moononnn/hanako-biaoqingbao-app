@@ -22,6 +22,7 @@ function fixtureSdk() {
   return { calls, sdk: { dataDir, bus: { request: async (type) => {
     calls.push(type);
     if (type === 'session:list') return [{ sessionId: 'sess_fixture', path: sessionPath }];
+    if (type === 'session:send-custom') return { ok: true, entryId: 'entry_fixture' };
     throw new Error('不允许二次投递或调用模型：' + type);
   } } } };
 }
@@ -39,7 +40,7 @@ function registeredExpress(sdk, result, delivered) {
     extractSelectedSticker: delivery.extractSelectedSticker,
     createStickerToolCard: delivery.createStickerToolCard,
     markInjectionDelivered: value => delivered.push(value),
-    queueStickerDelivery: () => { throw new Error('不能再排队送 custom 图'); },
+    queueStickerDelivery: entry => { assert.ok(entry.preparedRecord); return { ok: true }; },
     record() {},
   });
 }
@@ -51,7 +52,7 @@ function candidates(search, context, hash = '') {
   return Array.from(fn(context));
 }
 
-test('模型配图提供工具图卡构造入口，不再要求 custom 二次投递', () => {
+test('模型配图提供兼容投递入口', () => {
   assert.equal(typeof delivery.createStickerToolCard, 'function');
 });
 
@@ -64,12 +65,8 @@ test('工具卡准备保留图片、会话、伙伴与情绪，宿主身份和�
   const { sdk, calls } = fixtureSdk();
   const out = await delivery.createStickerToolCard({ sdk, dataDir, sessionPath, sticker, text: '测试图', emotion: '开心' });
   assert.equal(out.ok, true);
-  assert.equal(out.card.pluginId, 'biaoqingbao-app');
-  assert.equal(out.card.sessionId, 'sess_fixture');
-  assert.equal(out.card.type, 'iframe');
-  assert.equal(Object.hasOwn(out.card, 'cardInstanceId'), false);
-  assert.equal(Object.hasOwn(out.card, 'hanaAppCardSource'), false);
-  assert.equal(new URL(out.card.route, 'https://fixture.invalid').searchParams.get('recordId'), out.recordId);
+  assert.equal(out.card, undefined, '不再经工具结果返回需来源验签的 iframe 卡');
+  assert.equal(out.preparedRecord.id, out.recordId);
   const stored = readMessageCard(dataDir, out.recordId);
   assert.equal(stored.sender, 'partner');
   assert.equal(stored.triggerTurn, false);
@@ -135,13 +132,13 @@ test('旧 custom 卡与旧 hash 身份仍能读取；非法业务编号不得抢
   assert.equal(candidates('', {}, '#id=' + id)[0], id);
 });
 
-test('真实注册回调返回 details.card，保留附加信息并阻止定稿重复补发', async () => {
+test('真实注册回调投递 custom 消息且不返回 details.card，阻止定稿重复补发', async () => {
   const { sdk, calls } = fixtureSdk(), delivered = [];
   const result = { content: [{ type: 'text', text: JSON.stringify({ ok: true, data: { action: 'selected', sticker } }) }], details: { preserved: true } };
   const execute = registeredExpress(sdk, result, delivered);
   const out = await execute({ context: { sessionPath }, emotion: '开心' });
   assert.equal(out.details.preserved, true);
-  assert.match(out.details.card.route, /recordId=a_/);
+  assert.equal(out.details.card, undefined);
   assert.equal(out.content[0].text, result.content[0].text);
   assert.deepEqual(delivered, [sessionPath]);
   assert.deepEqual(calls, ['session:list']);
@@ -165,7 +162,85 @@ test('小于旧阈值的 data URL 也剥离，图卡与记录仍正常返回', a
   const returned = JSON.parse(out.content[0].text);
   assert.equal(returned.data.sticker.url, undefined);
   assert.equal(payload.data.sticker.url.startsWith('data:'), true);
-  assert.ok(out.details.card);
+  assert.equal(out.details.card, undefined);
+});
+
+test('长回复超过兜底等待仍在生成时保留队列，不把图塞回模型', async () => {
+  const { queueStickerDelivery, flushStickerDelivery, hasPendingSticker, __resetStickerQueueForTests } = await import('../lib/sticker-after-turn.js');
+  let sends = 0;
+  const sdk = { bus: { request: async type => {
+    if (type === 'session:list') return [{ sessionId: 'sess_fixture', path: sessionPath }];
+    if (type === 'session:context') return { isStreaming: true };
+    if (type === 'session:send-custom') sends++;
+    return { ok: true };
+  } } };
+  try {
+    queueStickerDelivery({ sdk, dataDir, sessionPath, sticker });
+    const out = await flushStickerDelivery(sessionPath, 'timeout');
+    assert.equal(out.deferred, true);
+    assert.equal(hasPendingSticker(sessionPath), true);
+    assert.equal(sends, 0);
+  } finally { __resetStickerQueueForTests(); }
+});
+
+test('定稿队列透传独立记录，等空闲才投递且跨回合同图仍能显示', async () => {
+  const { queueStickerDelivery, flushStickerDelivery } = await import('../lib/sticker-after-turn.js');
+  const payloads = [];
+  const sdk = { bus: { request: async (type, payload) => {
+    if (type === 'session:list') return [{ sessionId: 'sess_fixture', path: sessionPath }];
+    if (type === 'session:context') return { isStreaming: false };
+    if (type === 'session:send-custom') { payloads.push(payload); return { ok: true, entryId: 'entry_queue' }; }
+    throw new Error(type);
+  } } };
+  for (const requestId of ['turn-one', 'turn-two']) {
+    const prepared = await delivery.createStickerToolCard({ sdk, dataDir, sessionPath, sticker, requestId });
+    queueStickerDelivery({ sdk, dataDir, sessionPath, sticker, preparedRecord: prepared.preparedRecord });
+    const out = await flushStickerDelivery(sessionPath);
+    assert.equal(out.ok, true, out.error);
+    assert.equal(payloads.at(-1).details.cardInstanceId, prepared.recordId);
+  }
+  assert.equal(payloads.length, 2);
+  assert.notEqual(payloads[0].details.cardInstanceId, payloads[1].details.cardInstanceId);
+});
+
+test('自定义消息只投递一次、不启动新回合、不回灌像素，并保留三键所需记录', async () => {
+  const sent = [];
+  const sdk = { bus: { request: async (type, payload) => {
+    if (type === 'session:list') return [{ sessionId: 'sess_fixture', path: sessionPath }];
+    if (type === 'session:send-custom') { sent.push(payload); return { ok: true, entryId: 'entry_once' }; }
+    throw new Error(type);
+  } } };
+  const args = { sdk, dataDir, sessionPath, sticker, requestId: 'custom-once' };
+  const first = await delivery.createStickerToolCard(args);
+  assert.equal(sent.length, 0, '工具中不直接向正在生成的回合注入');
+  const flushArgs = { ...args, preparedRecord: first.preparedRecord };
+  const delivered = await delivery.deliverStickerToSession(flushArgs);
+  const second = await delivery.deliverStickerToSession(flushArgs);
+  assert.equal(delivered.ok && second.ok, true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].customType, 'partner-sticker');
+  assert.equal(sent[0].triggerTurn, false);
+  assert.equal(sent[0].details.cardInstanceId, first.recordId);
+  assert.equal(sent[0].content.some(item => item.type === 'image'), false);
+  assert.equal(readMessageCard(dataDir, first.recordId).stickerId, sticker.id);
+});
+
+test('自定义投递超时不盲重试，不伪称本地图卡成功', async () => {
+  let sends = 0;
+  const sdk = { bus: { request: async type => {
+    if (type === 'session:list') return [{ sessionId: 'sess_fixture', path: sessionPath }];
+    if (type === 'session:send-custom') { sends++; throw new Error('timeout'); }
+    throw new Error(type);
+  } } };
+  const args = { sdk, dataDir, sessionPath, sticker, requestId: 'custom-timeout' };
+  const prepared = await delivery.createStickerToolCard(args);
+  const flushArgs = { ...args, preparedRecord: prepared.preparedRecord };
+  const first = await delivery.deliverStickerToSession(flushArgs);
+  const second = await delivery.deliverStickerToSession(flushArgs);
+  assert.equal(first.ok, false);
+  assert.equal(second.ok, false);
+  assert.equal(sends, 1);
+  assert.match(first.error, /未确认/);
 });
 
 test('未选中图片的工具结果原样返回，不造卡、不标记送达', async () => {

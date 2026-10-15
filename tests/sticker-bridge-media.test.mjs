@@ -44,6 +44,7 @@ function makeSdk({ stageResult, stageError, includeBridgeInList = true } = {}) {
               : [{ path: nativePath, sessionId: 'sess_native_test' }];
           }
           if (type === 'session:get') return { session: null };
+          if (type === 'session:send-custom') return { ok: true, entryId: 'entry_test' };
           if (type === 'session:stage-file') {
             if (stageError) throw stageError;
             return stageResult ?? { mediaItem: STAGED_MEDIA_ITEM };
@@ -66,7 +67,8 @@ test('QQ Bridge 工具卡同时准备 SessionFile mediaItem，使用当前工具
   });
 
   assert.equal(result.ok, true, result.error);
-  assert.ok(result.card, '桌面 Hana 的本地卡片仍保留');
+  assert.ok(result.preparedRecord, '桌面 Hana 的图片消息已准备，等待定稿队列');
+  assert.equal(result.card, undefined);
   assert.deepEqual(result.media, { items: [STAGED_MEDIA_ITEM] });
   const stage = calls.find((call) => call.type === 'session:stage-file');
   assert.equal(stage?.payload.callToken, 'call_token_current_tool');
@@ -82,7 +84,8 @@ test('普通 Hana 会话也登记 SessionFile，同时保留本地图卡', async
   });
 
   assert.equal(result.ok, true, result.error);
-  assert.ok(result.card);
+  assert.ok(result.preparedRecord);
+  assert.equal(result.card, undefined);
   assert.deepEqual(result.media, { items: [STAGED_MEDIA_ITEM] });
   const stage = calls.find((call) => call.type === 'session:stage-file');
   assert.equal(stage?.payload.callToken, 'call_token_current_tool');
@@ -96,7 +99,8 @@ test('会话文件登记失败时仍保留本地图卡并暴露失败，不伪�
   });
 
   assert.equal(result.ok, true, result.error);
-  assert.ok(result.card);
+  assert.ok(result.preparedRecord);
+  assert.equal(result.card, undefined);
   assert.equal(result.media, undefined);
   assert.match(result.sessionFileError, /未授权/);
   assert.equal(calls.some((call) => call.type === 'session:stage-file'), true);

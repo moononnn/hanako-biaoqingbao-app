@@ -321,8 +321,8 @@ export default defineApp(async (sdk) => {
         parameters: t.parameters,
         execute: async (input) => {
           const result = await t.execute(input, legacyToolCtx(input));
-          // 当前宿主保留 details 并追加 bridgedTool。Hana 本地用工具卡；QQ Bridge 另带
-          // SessionFile mediaItem，BridgeManager 会在回复结束后交给 QQ 媒体适配器；不塞像素进模型。
+          // 本地图卡走 messageRenderer，由宿主按 customType 确定 App 归属。
+          // QQ Bridge 保留 SessionFile mediaItem；不返回第二张工具卡，不塞像素进模型。
           if (t.name === "express") {
             const clean = stripInlineBase64(result);
             const sticker = extractSelectedSticker(result);
@@ -330,6 +330,7 @@ export default defineApp(async (sdk) => {
             const sessionPath = input?.context?.sessionPath || "";
             const prepared = await createStickerToolCard({ sdk, dataDir: sdk.dataDir,
               sessionPath, callToken: input?.context?.callToken || null,
+              requestId: input?.context?.callToken || input?.context?.messageId || undefined,
               sticker, text: sticker.description || "",
               emotion: typeof input?.emotion === "string" ? input.emotion : "" });
             record(`sticker-tool-card ${prepared.ok ? "prepared" : "fail"} ${prepared.noSessionId ? "(无会话编号)" : ""} ${prepared.error || ""}`);
@@ -338,17 +339,30 @@ export default defineApp(async (sdk) => {
               ok: false, error: "选中了图片，但图卡没接上：" + prepared.error,
               data: { action: "delivery_failed", stickerId: sticker.id },
             }) }] };
-            // 工具已有图卡；定稿的伪标记兜底不能再另投同一张图。
+            // 自己选的图不塞回正在生成的模型输入，等本轮定稿、空闲后投。
+            if (prepared.preparedRecord) {
+              const queued = queueStickerDelivery({ sdk, dataDir: sdk.dataDir, sessionPath,
+                sticker, text: sticker.description || "",
+                emotion: typeof input?.emotion === "string" ? input.emotion : "",
+                preparedRecord: prepared.preparedRecord });
+              if (!queued.ok) return { content: [{ type: "text", text: JSON.stringify({
+                ok: false, error: "图片未能排进投递队列：" + queued.error,
+              }) }] };
+            }
+            // 已排队或提供桥接附件，定稿伪标记兜底不能重复配图。
             markInjectionDelivered(sessionPath);
-            // 图卡和会话附件各自可有可无：桥接会话拿不到编号时只有附件，桌面会话两者都有。
             const details = { ...clean.details,
-              ...(prepared.card ? { card: prepared.card } : {}),
               ...(prepared.media ? { media: prepared.media } : {}) };
+            if (prepared.messageError) {
+              record(`sticker-message-fail ${prepared.messageError}`);
+              return { ...clean, details, content: [...(Array.isArray(clean.content) ? clean.content : []),
+                { type: "text", text: "图片附件已登记，但本地交互图卡投递未确认：" + prepared.messageError }] };
+            }
             if (prepared.sessionFileError) {
               record(`session-file-stage-fail ${prepared.sessionFileError}`);
               return { ...clean,
                 content: [...(Array.isArray(clean.content) ? clean.content : []), { type: "text",
-                  text: "会话图片附件未能登记；本地图卡仍可见，但不能据此声称其他端已收到图片。" }],
+                  text: "会话图片附件未能登记；本地图片已排队等本轮结束后显示，其他端的图片未确认送达。" }],
                 details,
               };
             }
