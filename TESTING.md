@@ -1,10 +1,68 @@
 # 自动测试
 
+## 2026-10-16 使用者实机反馈：重启后旧会话恢复单卡与动态标题
+
+标题优化重新加载后，使用者再次进入先前异常会话，仍见双卡和默认标题；随后自行重启 Hana，再进入同一会话，确认变为单卡且标题正常。此结论来自使用者实机反馈，未自动重启或触发新配图。
+
+这证明该旧会话在重启后的当前显示可恢复；与运行中临时投影/视图绑定或旧页面状态有关的解释相容。尚未区分重启重建状态与新标题代码进入新页面的作用，不能归因为标题补丁已根治，也不能宣称双卡已解决。重启后新配图、再次切窗和长期稳定性未验收。本次只追加验证记录，不继续修改源码或扩大测试。
+
+## 2026-10-16 标题恢复：补宿主可见性通知（本地优化，版本保持 0.3.1）
+
+现场基线：同一业务/实例指纹曾返回 `CHROME-OK`，后续又见从 revision 1 开始的提交，约 10 秒后为 `APP_CHROME_UNAVAILABLE`。这只能支持页面重建/绑定不可用的可能，不能单凭实例指纹证明 Chrome generation、标题持续显示或故障根因。当前 SDK 的 Chrome 没有公开绑定订阅；重复 ready 不能据当前宿主处理器证明会重新发 Chrome challenge。后台 Chrome 正式接口契约存在，但当前项目 SDK 未暴露 surfaces；未扩大升级 SDK 或把后台写入接入生产。
+
+确定的 App 缺口：旧实现只听 document visibility/pageshow 与业务上下文；宿主将 iframe 暂停再激活而这些事件不变时，不会补交缓存标题。本轮使用公开 `hana.lifecycle.getSnapshot/subscribe` 补该触发，暂停时使票据/定时器失效但保留同业务标题；仅可用边沿补交一次，初始不可用不提交，pagehide 后仍须 pageshow 恢复。无 lifecycle 的环境保留原上下文恢复路径。不额外取图、不改反馈、不增加重试次数，不触碰 SDK/宿主/投递逻辑。
+
+修改前已备份 4 份相关源码/文档并核对 SHA-256。首批 5 个用例在优化前 **4 失败、1 通过**；之后加强 pagehide 下新业务边界并新增旧环境兼容用例。最终新增 6 项，使用同一组相关命令定向 **83 项通过，0 失败**（页面 51 项）：
+
+```powershell
+node --test tests/ball-message-card-ui.test.mjs tests/ball-message-card-chat.test.mjs tests/message-card-attribution.test.mjs tests/render-claim-diagnostics.test.mjs tests/message-card-chat-log.test.mjs
+node --check ui/assets/message-card-view.js
+git diff --check
+```
+
+独立只读复核未发现新增实质阻断；审查方未运行测试。未运行全量测试、未调用真实模型/API，版本/README/简介不变，未发布。真实宿主绑定不可用时仍可能无法更新标题，不能把单元测试通过当作现场已修好。已经由正式 App 管理入口重新加载当前源码，随后 inspect 为 host=on、agent=on；既有页面是否重建及真实切窗标题恢复仍待现场验收。
+
+## 2026-10-16 卡头标题恢复试修与双卡隔离试验（版本保持 0.3.1）
+
+修改前对 9 份相关源码/文档完成本地备份及哈希核对，保留同日图库安全改动。标题首批 3 个新增用例在修改前全部失败；修复后增加边界覆盖，以下定向 **77 项通过，0 失败**（页面测试 45 项）：
+
+```powershell
+node --test tests/ball-message-card-ui.test.mjs tests/message-card-attribution.test.mjs tests/render-claim-diagnostics.test.mjs tests/ball-message-card-chat.test.mjs tests/message-card-chat-log.test.mjs
+node --check ui/assets/message-card-view.js
+git diff --check
+```
+
+覆盖同业务/短暂空上下文补标题且不重复取图、旧业务迟到拒绝不重试覆盖、新业务缺会话归属不补旧标题、visibility/pageshow 恢复、pagehide 后失效、不可用有限重试耗尽、未确认回执不记成功及日志不含原始 surface 凭据。标题日志带仅供关联的实例指纹，不能充当授权身份。独立静态审查发现的新业务归属保护及实例诊断缺口均已修复并获窄复核；审查方未重复执行测试。
+
+双卡使用当前 1.1.7-beta renderer 的真实流缓冲类与 server 历史内容解析器作只读隔离试验，**8 个结果断言通过**：提前投卡时 1 行、0 个未绑定卡行；turn 结束后投卡时 2 行、1 个未绑定卡行；把 plugin_card 塞入 assistant 内容会被历史内容解析丢弃。消息集合、持久绑定和定稿是测试夹具；未验证完整历史合并、挂载 UI、真实签名或模型。该结果不能证明现场双卡已解决。提前投卡可能引入模型 followUp、额外正文及调用成本，尚未获得取舍决定，生产投递逻辑未改。
+
+未运行全应用回归、未调用真实模型/API、未编辑宿主或会话数据；未改版本、README、简介，未发布。标题代码已通过正式 App 管理入口重新加载，随后 inspect 为 host=on、agent=on；这仅确认当前源码已重新加载，既有页面是否重建以及真实 UI 标题恢复仍待现场验收。
+
+## 2026-10-16 图库索引异常与旧图保护（本地开发，版本保持 0.3.1）
+
+基线：源码提交 `550f4da`，修改前已备份涉及的源码；在独立临时图库运行首批 10 个保护断言，**10 项按预期失败**，复现损坏索引被当空库、继续上传/重写索引，以及偏好清理误删有效引用。真实图库未用于故障注入。
+
+```powershell
+node --test tests/gallery-integrity.test.mjs tests/batch-maintenance.test.mjs tests/batch-concurrency.test.mjs tests/batch-pause.test.mjs tests/ball-message-card.test.mjs tests/sticker-tool-card.test.mjs tests/secret-mask-guard.test.mjs tests/vision-model-host.test.mjs
+```
+
+最终定向 **88 项通过，0 失败**，其中 `gallery-integrity.test.mjs` 新增 **26 项**。7 份本次修改/新增的 JS/MJS 逐份 `node --check` 通过：`lib/shared.js`、`lib/ball.js`、`server/api.js`、`server/_batch-tasks.js`、`tools/add-sticker.js`、`tools/update-sticker-tags.js`、新测试文件。
+
+覆盖：损坏 JSON/非数组/权限异常拒绝；首装正常上传；缺索引但有图拒绝误建库；扫描磁盘避开孤儿图编号；单图及 ZIP 的排他创建与碰撞清理；图片部分写入、索引提交失败；偏好清理保留原账；工具标签更新共用队列；坏索引不影响批量路由注册；旧备份恢复的冲突预检、额外现存图片保护、失败回滚重试、索引最后提交与硬链接不支持时安全失败。首次测试扩展中，3 项用例曾因同图/未清理测试指纹缓存触发正常去重而失败；已使用不同内容图片并在临时图库重置时清缓存，最终用上述命令复验通过。
+
+独立静态交叉审查指出的恢复覆盖、半迁移和旧索引遗漏现存图片问题均已补保护并复核。已通过正式 App 管理入口重新加载当前磁盘源码；这只证明重新加载完成，不代表真实损坏图库、全部 UI 或跨平台验收。恢复索引的硬链接提交在本机临时目录通过；其他文件系统若不支持会拒绝自动恢复，不会降级覆盖。未运行全应用回归、未调用真实模型/API、未制造真实数据故障；未变更曝光统计、版本、README 或简介，未发布。
+
 ## v0.3.1 发布前完整验证（2026-10-15）
 
 发布小工坊 `release.ps1 -Project biaoqingbao-app -Phase verify` 在隔离副本运行：**Node 312 项通过，0 失败**；Python 离屏测试 `test_ball_target.py`、`test_ball_wait_state.py` 各 1 项通过；**118 份 JS/MJS 语法检查通过**。没有调用真实付费模型/API。源码完整验证已通过，最终包核验、准确提交 CI 与独立交叉审包仍以本次发布证据为准。
 
-Hana 1.1.7-beta + Windows 11 的出图、三键反馈与切窗恢复已由使用者实机确认。QQ 实收、macOS/Linux、全新安装和真实数据迁移未在本轮重新验证。README 与应用简介原文保持不变。
+Hana 1.1.7-beta + Windows 11 的出图、三键反馈与切窗恢复已由使用者实机确认。macOS/Linux、全新安装和真实数据迁移未在本轮重新验证。README 与应用简介原文保持不变。
+
+## QQ Bridge 实收复验（2026-10-15，v0.3.1，使用者确认通过）
+
+运行版本 0.3.1、宿主 Hana 1.1.7-beta。使用者在 QQ Bridge 会话中触发新表情，手机 QQ 确认收到图片。这是换宿主后的重新确认：该渠道在 v0.2.14、v0.2.15 两轮失败，v0.2.16 才在 1.0.16-beta 上首次通过。
+
+证据边界：结论来自使用者本人实机确认，本次桥接回合**没有**对应的 `probe.log` 桥接标记作旁证；不外推到 Linux/macOS、其他宿主版本或其他外部平台。助手未代发 QQ 测试消息、未调用模型/API。
 
 ## 2026-10-15 Hana 1.1.7-beta 配图兼容（出图、按钮与切窗实机通过）
 
