@@ -1,9 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import { atomicWriteJson, META_FILE } from '../lib/shared.js';
-
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
-const metaPath = META_FILE;
+import { readMeta, writeMeta, enqueueToolWrite } from '../lib/shared.js';
 
 function reply(obj) {
   return { content: [{ type: 'text', text: JSON.stringify(obj) }] };
@@ -27,34 +22,29 @@ export async function execute(input, ctx) {
   const { id, emotion, scene, keywords, description } = input || {};
   if (!id) return reply({ ok: false, error: '请提供表情包ID' });
 
-  let stickers = [];
-  try {
-    const raw = await readFile(metaPath, 'utf-8');
-    stickers = JSON.parse(raw);
-  } catch {
-    return reply({ ok: false, error: '表情包库为空' });
-  }
+  // 读改写进共用串行队列，和上传 / 删除 / 批量应用互斥，避免后写覆盖先写的更新。
+  // 索引读取走 readMeta：索引损坏时抛可读错误，不再谎报「表情包库为空」。
+  return await enqueueToolWrite(async () => {
+    try {
+      const stickers = readMeta();
+      const idx = stickers.findIndex(s => s.id === id);
+      if (idx === -1) return reply({ ok: false, error: `未找到ID为 "${id}" 的表情包` });
 
-  const idx = stickers.findIndex(s => s.id === id);
-  if (idx === -1) return reply({ ok: false, error: `未找到ID为 "${id}" 的表情包` });
+      const sticker = stickers[idx];
 
-  const sticker = stickers[idx];
+      if (emotion !== undefined) sticker.tags.emotion = emotion ? emotion.split(',').map(s => s.trim()).filter(Boolean) : [];
+      if (scene !== undefined) sticker.tags.scene = scene ? scene.split(',').map(s => s.trim()).filter(Boolean) : [];
+      if (keywords !== undefined) sticker.tags.keywords = keywords ? keywords.split(',').map(s => s.trim()).filter(Boolean) : [];
+      if (description !== undefined) sticker.description = description;
 
-  if (emotion !== undefined) {
-    sticker.tags.emotion = emotion ? emotion.split(',').map(s => s.trim()).filter(Boolean) : [];
-  }
-  if (scene !== undefined) {
-    sticker.tags.scene = scene ? scene.split(',').map(s => s.trim()).filter(Boolean) : [];
-  }
-  if (keywords !== undefined) {
-    sticker.tags.keywords = keywords ? keywords.split(',').map(s => s.trim()).filter(Boolean) : [];
-  }
-  if (description !== undefined) {
-    sticker.description = description;
-  }
+      // v0.19.5 - 原子写，避免崩溃留下半截图库文件
+      writeMeta(stickers);
 
-  // v0.19.5 - 原子写，避免崩溃留下半截图库文件
-  atomicWriteJson(metaPath, stickers);
-
-  return reply({ ok: true, data: sticker, message: `表情包「${sticker.description}」标签已更新` });
+      return reply({ ok: true, data: sticker, message: `表情包「${sticker.description}」标签已更新` });
+    } catch (error) {
+      const reason = error?.message || String(error);
+      ctx?.log?.warn?.('[biaoqingbao] update_sticker_tags 失败:', reason);
+      return reply({ ok: false, error: `更新标签失败：${reason}` });
+    }
+  });
 }

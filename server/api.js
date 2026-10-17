@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   STICKERS_DIR, DATA_DIR, PREFERENCES_FILE, BLOCKED_FILE,
   HANA_HOME, MIME_MAP,
-  readMeta, writeMeta, enqueueStickerDataWrite,
+  readMeta, writeMeta, enqueueStickerDataWrite, genId, writeNewStickerFile,
   readVisionConfig, writeVisionConfig, getProviderApiConfig,
   getAvailableVisionModels, getAvailableTextModels,
   callCodexVision, tagImage,
@@ -200,15 +200,9 @@ function buildStickerEntry(id, destFile, sourceName, fields = {}) {
 }
 
 function writeImportedStickerFile(destPath, data, writtenFiles) {
-  if (fs.existsSync(destPath)) throw new Error('目标图片文件已存在，已停止导入以避免覆盖');
-  const tempPath = `${destPath}.${process.pid}.${Date.now()}.part`;
+  writeNewStickerFile(destPath, data);
+  // 只有本轮已成功创建的文件才进入事务回滚清单。
   writtenFiles.push(destPath);
-  try {
-    fs.writeFileSync(tempPath, data, { flag: 'wx' });
-    fs.renameSync(tempPath, destPath);
-  } finally {
-    try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch {}
-  }
 }
 
 function normalizeOutputDir(value) {
@@ -413,7 +407,7 @@ export default async function registerRoutes(app, ctx) {
       ctx?.log?.warn?.(`[biaoqingbao] 路由异常: ${message}`);
     } catch {}
     return new Response(JSON.stringify({ ok: false, error: message }), {
-      status: 200,
+      status: error?.code === 'STICKER_META_UNREADABLE' ? 500 : 200,
       headers: { 'content-type': 'application/json; charset=utf-8' },
     });
   });
@@ -859,22 +853,24 @@ export default async function registerRoutes(app, ctx) {
           ctx?.log?.warn?.('[biaoqingbao] 图片查重失败，已按未重复处理:', error.message);
           incomingHash = '';
         }
-        const id = nextStickerId(meta);
+        const id = genId(meta);
         const destFile = id + '.' + realExt;
+        let createdPath = null;
         try {
           fs.mkdirSync(STICKERS_DIR, { recursive: true });
           const destPath = safeStickerPath(STICKERS_DIR, destFile);
           if (!destPath) return json({ ok: false, error: '图库目录路径不安全，无法写入图片' }, 500);
-          fs.writeFileSync(destPath, imageData);
+          writeNewStickerFile(destPath, imageData);
+          createdPath = destPath;
           const entry = buildStickerEntry(id, destFile, fileName, { emotion, scene, keywords, description });
           meta.push(entry); writeMeta(meta);
+          createdPath = null;
           if (incomingHash) {
             try { registerFingerprint(id, incomingHash); } catch {}
           }
           return json({ ok: true, data: entry, message: '已入库' });
         } catch (error) {
-          const cleanupPath = safeStickerPath(STICKERS_DIR, destFile);
-          try { if (cleanupPath) fs.unlinkSync(cleanupPath); } catch {}
+          try { if (createdPath) fs.unlinkSync(createdPath); } catch {}
           return json({ ok: false, error: error.message || '图片入库失败' }, 500);
         }
       });

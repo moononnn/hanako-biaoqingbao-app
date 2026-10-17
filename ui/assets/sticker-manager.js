@@ -2203,6 +2203,84 @@
     }
   }
 
+  // ─── 纸飞机说明（2026-10-17）───
+  // 新装用户不知道悬浮球能干什么，而且打开页面不再自动起飞，
+  // 所以在开关旁边放一个「?」入口，点开是一张说明卡。
+  function installBallHelp() {
+    var anchor = $('ball-status-top');
+    if (!anchor || $('ball-help-btn')) return;
+    var btn = document.createElement('button');
+    btn.id = 'ball-help-btn';
+    btn.type = 'button';
+    btn.textContent = '?';
+    btn.title = '纸飞机能做什么';
+    btn.setAttribute('aria-label', '纸飞机能做什么');
+    btn.style.cssText = 'margin-left:6px;width:20px;height:20px;border-radius:50%;border:1px solid var(--primary-light);background:var(--primary-light);color:var(--primary-dark);font-size:12px;font-weight:600;line-height:1;cursor:pointer;padding:0;flex:none;transition:background .15s,color .15s,border-color .15s;';
+    btn.addEventListener('mouseenter', function () { btn.style.background = 'var(--primary)'; btn.style.color = '#fff'; btn.style.borderColor = 'var(--primary)'; });
+    btn.addEventListener('mouseleave', function () { btn.style.background = 'var(--primary-light)'; btn.style.color = 'var(--primary-dark)'; btn.style.borderColor = 'var(--primary-light)'; });
+    btn.addEventListener('click', openBallHelp);
+    anchor.insertAdjacentElement('afterend', btn);
+  }
+
+  function openBallHelp() {
+    var id = 'ball-help-modal';
+    if ($(id)) { openModal(id); return; }
+    if (!$('ball-help-style')) {
+      var st = document.createElement('style');
+      st.id = 'ball-help-style';
+      st.textContent = [
+        '#ball-help-modal .modal-box{width:452px;max-width:calc(100vw - 32px);padding:0;border:1px solid var(--border-light);border-radius:22px;background:var(--surface);box-shadow:0 18px 48px rgba(45,58,53,.18);overflow:hidden}',
+        '#ball-help-modal .bh-head{position:relative;display:flex;align-items:center;gap:12px;padding:20px 54px 16px 20px;background:linear-gradient(135deg,#eaf6f0 0%,#fdf3f6 100%)}',
+        '#ball-help-modal .bh-badge{width:46px;height:46px;flex:none;border-radius:15px;background:var(--surface);display:grid;place-items:center;box-shadow:0 4px 12px rgba(93,174,142,.2);transform:rotate(-5deg)}',
+        '#ball-help-modal .bh-title{font-size:16px;font-weight:700;color:var(--text);letter-spacing:.2px;margin:0}',
+        '#ball-help-modal .bh-sub{font-size:12px;color:var(--text-muted);margin-top:4px;line-height:1.4}',
+        '#ball-help-modal .bh-close{position:absolute;top:14px;right:14px;width:26px;height:26px;padding:0;border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--text-muted);font-size:12px;line-height:1;cursor:pointer}',
+        '#ball-help-modal .bh-close:hover{color:var(--text);border-color:var(--primary)}',
+        '#ball-help-modal .bh-body{padding:14px 16px 2px;display:flex;flex-direction:column;gap:10px;max-height:min(56vh,380px);overflow-y:auto}',
+        '#ball-help-modal .bh-item{display:flex;gap:12px;align-items:flex-start;padding:13px 14px;background:var(--surface-alt);border:1px solid var(--border-light);border-radius:16px}',
+        '#ball-help-modal .bh-ico{width:34px;height:34px;flex:none;border-radius:11px;display:grid;place-items:center;background:#e6f3ed;transform:rotate(-3deg)}',
+        '#ball-help-modal .bh-ico.pink{background:#fce8ee;transform:rotate(3deg)}',
+        '#ball-help-modal .bh-ico.sand{background:#f3efe4;transform:rotate(-2deg)}',
+        '#ball-help-modal .bh-h{font-size:13.5px;font-weight:600;color:var(--text);margin:0 0 4px}',
+        '#ball-help-modal .bh-p{font-size:12px;line-height:1.6;color:var(--text-muted);margin:0}',
+        '#ball-help-modal .bh-note{margin:12px 16px 0;padding:9px 12px;border-radius:12px;background:var(--primary-light);color:var(--primary-dark);font-size:11.5px;line-height:1.55}',
+        '#ball-help-modal .bh-foot{display:flex;justify-content:flex-end;padding:14px 16px 16px}',
+        '#ball-help-modal .bh-ok{border:none;border-radius:999px;padding:9px 22px;background:var(--primary);color:#fff;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 6px 16px rgba(93,174,142,.28)}',
+        '#ball-help-modal .bh-ok:hover{background:var(--primary-dark)}'
+      ].join('\n');
+      document.head.appendChild(st);
+    }
+    var plane = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="#5dae8e" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3 3 10.5l7 2.5 2.5 7L21 3Z"/><path d="M10 13l4-4"/></svg>';
+    var pic = '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="#5dae8e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9.5" r="1.4"/><path d="M21 15.5 16.5 11 9 18.5"/></svg>';
+    var send = '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="#d97f97" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3 3 10.5l7 2.5 2.5 7L21 3Z"/><path d="M10 13l4-4"/></svg>';
+    var power = '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="#a08c5f" stroke-width="1.8" stroke-linecap="round"><path d="M12 4v7"/><path d="M7.5 7a7 7 0 1 0 9 0"/></svg>';
+    var wrap = document.createElement('div');
+    wrap.className = 'modal-overlay';
+    wrap.id = id;
+    wrap.hidden = true;
+    wrap.innerHTML =
+      '<div class="modal-box">'
+      + '<div class="bh-head">'
+      + '<span class="bh-badge">' + plane + '</span>'
+      + '<div><h2 class="bh-title">纸飞机能做什么</h2><div class="bh-sub">桌面上的小帮手，帮你的图飞进飞出</div></div>'
+      + '<button class="bh-close" type="button" data-ball-help-close="1" aria-label="关闭">✕</button>'
+      + '</div>'
+      + '<div class="bh-body">'
+      + '<div class="bh-item"><span class="bh-ico">' + pic + '</span><div><h3 class="bh-h">拖图入库</h3><p class="bh-p">把图片直接拖到纸飞机上，它会自己识图、打标签、收进图库，不用先打开这个页面。</p></div></div>'
+      + '<div class="bh-item"><span class="bh-ico pink">' + send + '</span><div><h3 class="bh-h">随手发图</h3><p class="bh-p">在图库里点「加入悬浮球」，把常用的图钉上去；聊天时点一下就能发给伙伴。</p></div></div>'
+      + '<div class="bh-item"><span class="bh-ico sand">' + power + '</span><div><h3 class="bh-h">起飞与降落</h3><p class="bh-p">首页开关控制它出现或收起，右键纸飞机也能关。需要本机装好 Python 和 PyQt6。</p></div></div>'
+      + '</div>'
+      + '<div class="bh-note">打开页面不会再自动起飞，想用的时候点一下开关就好。</div>'
+      + '<div class="bh-foot"><button class="bh-ok" type="button" data-ball-help-close="1">知道了</button></div>'
+      + '</div>';
+    document.body.appendChild(wrap);
+    wrap.querySelectorAll('[data-ball-help-close]').forEach(function (b) {
+      b.addEventListener('click', function () { closeModal(id); });
+    });
+    wrap.addEventListener('click', function (e) { if (e.target === wrap) closeModal(id); });
+    openModal(id);
+  }
+
   function updateVisionModelDropdown(providerId, selectedModel) {
     var modelSel = $('vision-model');
     modelSel.innerHTML = '<option value="">选择模型...</option>';
@@ -6280,7 +6358,7 @@ function formatUserstyleTime(iso) {
     checkBatchTasks();
     updateModelGuide();
     updateUploadBtnState();
-    autoBootBall(); // 打开插件页面自动启动悬浮球（半自动：手动关过则本次不再弹）
+    installBallHelp(); // 2026-10-17 - 打开页面不再自动起飞悬浮球，只挂一个说明入口
 
     // v0.34.18 - 导航：首页入口点击（主卡 / 右侧入口 / 底部提示），支持键盘 Enter/Space
     document.querySelectorAll('.home-hero[data-goto], .home-entry[data-goto], .home-preference-tip[data-goto]').forEach(function (card) {

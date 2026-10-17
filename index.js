@@ -15,7 +15,7 @@
 // 启动健康信息记在 app-data/biaoqingbao-app/probe.log（文件名沿用 PoC 期，内容现在只剩正式链路）。
 
 import { defineApp } from "./sdk/app-contract/server-client.js";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync, renameSync } from "node:fs";
 import { join } from "node:path";
 // ⚠ 不要在这里静态 import lib/ 下的任何模块（走通会连到 lib/shared.js）。
 // shared.js 在模块加载时就把 DATA_DIR 定死了，而顶部 import 在 apply 之前执行——
@@ -27,6 +27,14 @@ export const name = "biaoqingbao-app";
 
 export default defineApp(async (sdk) => {
   const probePath = join(sdk.dataDir, "probe.log");
+
+  // 这个文件只是诊断用，没必要长到几十 MB（实测跑到过 69MB，连写日志都变慢）。
+  // 启动时超过 8MB 就轮转一份，旧的直接被新的一份替掉，不堆历史。
+  try {
+    if (statSync(probePath).size > 8 * 1024 * 1024) {
+      renameSync(probePath, join(sdk.dataDir, "probe.log.1"));
+    }
+  } catch { /* 文件不存在或改名失败都直接继续 */ }
 
   const record = (line) => {
     try {
@@ -148,16 +156,33 @@ export default defineApp(async (sdk) => {
   // 接管插件版 observer 的职责：让 App 独立完成「发现该配图 → 提示模型调 express → 模型发图」。
   try {
     const { observeBeforeStep } = await import("./lib/observer.js");
+    const { resolveExpressToolName, getExpressToolNameDiag, pickExpressToolNameFromMessages } = await import("./lib/tool-name.js");
     sdk.hooks.onDecision("agent/pre-step", async (payload) => {
       try {
         const messages = payload?.messages;
         const count = Array.isArray(messages) ? messages.length : -1;
+        // 工具名优先从宿主写给模型的工具清单里拿（零额外请求），拿不到再问会话名单。
+        const toolName = pickExpressToolNameFromMessages(messages)
+          || await resolveExpressToolName(sdk, payload?.session?.sessionId);
+        // 扫不到名字时留一笔现场：消息里有没有那份清单、角色长得怎么样，别靠猜。
+        if (!toolName && Array.isArray(messages)) {
+          let appHits = 0, refHits = 0;
+          for (const m of messages) {
+            const c = m?.content;
+            const s = typeof c === "string"
+              ? c
+              : (Array.isArray(c) ? c.map((x) => (typeof x === "string" ? x : x?.text || "")).join("") : "");
+            if (s.includes("app__")) appHits++;
+            if (s.includes("[hana_reference]")) refHits++;
+          }
+          record(`probe-msg n=${messages.length} app=${appHits} ref=${refHits} roles=${messages.slice(0, 8).map((m) => m?.role || "?").join("/")}`);
+        }
         const decision = await observeBeforeStep({
           ctx: sdk,
           messages,
           session: payload?.session,
         });
-        record(`hook-pre-step session=${payload?.session?.sessionId ?? "?"} messages=${count} injected=${decision ? "yes" : "no"}`);
+        record(`hook-pre-step session=${payload?.session?.sessionId ?? "?"} messages=${count} tool=${toolName ?? "?"} diag=${getExpressToolNameDiag()} injected=${decision ? "yes" : "no"}`);
         return decision;
       } catch (e) {
         // 配图出问题不许影响聊天：记一笔，什么都不改

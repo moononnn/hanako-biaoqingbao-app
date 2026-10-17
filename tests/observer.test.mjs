@@ -20,6 +20,7 @@ process.env.BQB_DATA_DIR = path.join(os.tmpdir(), `bqb-observer-test-${process.p
 
 const observer = await import('../lib/observer.js');
 const analysis = await import('../lib/text-analysis.js');
+const toolName = await import('../lib/tool-name.js');
 const { buildAppRouteUrl } = await import('../lib/ball.js');
 
 // ── 频率抽样 ──────────────────────────────────────────────
@@ -91,7 +92,6 @@ test('注入文案：不再出现插件版的旧宿主拐杖（tool_search / bia
   const text = observer.buildHintText('开心', ['加班'], '刚聊到加班', { scene: '加班', tone: '自嘲', intensity: 'medium' });
   assert.doesNotMatch(text, /tool_search/);
   assert.doesNotMatch(text, /biaoqingbao_express/);
-  assert.doesNotMatch(text, /tool_call/);
 });
 
 test('注入文案：堵住「用文字写标记代替调工具」这条路（v0.1.25）', () => {
@@ -114,6 +114,83 @@ test('注入文案：没有附加信息时不留下空标签', () => {
   const text = observer.buildHintText('开心');
   assert.doesNotMatch(text, /关键词：/);
   assert.doesNotMatch(text, /场景：/);
+});
+
+// ── 工具名适配（宿主 1.1.x 起完整名）─────────────────────
+
+test('注入文案：传了宿主完整名就写清 tool_call 的两个参数，不再写裸短名', () => {
+  const full = 'app__biaoqingbao-app__express_f115371d1d37';
+  const text = observer.buildHintText('开心', [], '', {}, full);
+  assert.match(text, /app__biaoqingbao-app__express_f115371d1d37/);
+  assert.match(text, /server 填 `biaoqingbao-app`/);
+  assert.doesNotMatch(text, /调用 express 工具即可/);
+});
+
+test('工具名拆分：app__<appId>__<工具名>_<hash> 拆出 server，拆不出给 null', () => {
+  const full = 'app__biaoqingbao-app__express_f115371d1d37';
+  assert.deepEqual(toolName.splitExpressToolName(full), { server: 'biaoqingbao-app', tool: full });
+  assert.equal(toolName.splitExpressToolName('express'), null);
+  assert.equal(toolName.splitExpressToolName(''), null);
+  assert.equal(toolName.splitExpressToolName(null), null);
+});
+
+test('注入文案：宿主给的就是短名时沿用旧句式', () => {
+  const text = observer.buildHintText('开心', [], '', {}, 'express');
+  assert.match(text, /调用 express 工具即可/);
+});
+
+test('注入文案：查不到工具名时给 tool_call 的 server 与裸短名，不写“直接调 express”', () => {
+  const text = observer.buildHintText('开心', [], '', {}, '');
+  assert.match(text, /server 填 `biaoqingbao-app`/);
+  assert.match(text, /tool 填 `express`/);
+  assert.doesNotMatch(text, /调用 express 工具即可/);
+});
+
+test('工具名挑选：优先要带 biaoqingbao 的完整名，其次才是裸 express', () => {
+  const full = 'app__biaoqingbao-app__express_f115371d1d37';
+  assert.equal(toolName.pickExpressToolName(['read', full, 'express']), full);
+  assert.equal(toolName.pickExpressToolName(['read', 'express']), 'express');
+  assert.equal(toolName.pickExpressToolName(['read', 'write']), null);
+  assert.equal(toolName.pickExpressToolName(null), null);
+});
+
+test('工具名解析：宿主接口抛错时返回 null，不把异常抛进聊天', async () => {
+  toolName.resetExpressToolNameCache();
+  const sdk = { sessions: { tools: async () => { throw new Error('boom'); } } };
+  assert.equal(await toolName.resolveExpressToolName(sdk, 'sess_x'), null);
+  toolName.resetExpressToolNameCache();
+});
+
+test('工具名扫描：从宿主写给模型的工具清单里抠出完整名', () => {
+  const ref = 'biaoqingbao-app（8）\n- app__biaoqingbao-app__express_f115371d1d37 — 用表情包表达你自己'; 
+  assert.equal(toolName.pickExpressToolNameFromMessages([{ role: 'custom', content: ref }]),
+    'app__biaoqingbao-app__express_f115371d1d37');
+  assert.equal(toolName.pickExpressToolNameFromMessages([{ role: 'user', content: [{ type: 'text', text: ref }] }]),
+    'app__biaoqingbao-app__express_f115371d1d37');
+  assert.equal(toolName.pickExpressToolNameFromMessages([{ role: 'user', content: '中午好' }]), null);
+  assert.equal(toolName.pickExpressToolNameFromMessages(null), null);
+});
+
+test('工具名解析：查失败后短冷却内不反复去碰宿主', async () => {
+  toolName.resetExpressToolNameCache();
+  let calls = 0;
+  const sdk = { sessions: { tools: async () => { calls++; throw new Error('nope'); } } };
+  await toolName.resolveExpressToolName(sdk, 'sess_x');
+  await toolName.resolveExpressToolName(sdk, 'sess_x');
+  assert.equal(calls, 1);
+  toolName.resetExpressToolNameCache();
+});
+
+test('工具名解析：拿到名单后按缓存复用，不反复问宿主', async () => {
+  toolName.resetExpressToolNameCache();
+  let calls = 0;
+  const sdk = { sessions: { tools: async () => { calls++; return { toolNames: ['app__biaoqingbao-app__express_abc'] }; } } };
+  const first = await toolName.resolveExpressToolName(sdk, 'sess_x');
+  const second = await toolName.resolveExpressToolName(sdk, 'sess_x');
+  assert.equal(first, 'app__biaoqingbao-app__express_abc');
+  assert.equal(second, first);
+  assert.equal(calls, 1);
+  toolName.resetExpressToolNameCache();
 });
 
 // ── 注入动作 ──────────────────────────────────────────────

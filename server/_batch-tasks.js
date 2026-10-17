@@ -634,7 +634,12 @@ function emitBus(topic, data) {
 
 export function registerBatchTasksRoutes(app, ctx) {
   moduleCtx = ctx;
-  migrateAppliedState();
+  try { migrateAppliedState(); }
+  catch (error) {
+    if (error?.code !== 'STICKER_META_UNREADABLE') throw error;
+    // 保留原任务账本与全部路由，索引恢复后可重载再做迁移。
+    moduleCtx?.log?.warn?.(`[batch] 图库不可读，已跳过旧任务迁移：${error.message}`);
+  }
   moduleCtx?.log?.info?.('[biaoqingbao] 注册 batch-tasks 路由');
 
   // POST /api/batch-auto-tag-untagged — 一键把未识图图片加入批量任务

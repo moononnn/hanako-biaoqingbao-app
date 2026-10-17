@@ -297,42 +297,103 @@ export function mountMessageCard({ showCaption = false } = {}) {
     }, 400);
   }
 
-  // 卡头标题：宿主清单里那个静态标题只在页面交上来之前露一下。
-  // revision 在同一视图内必须严格递增，所以这里自己记一个计数。
-  // 2026-10-07 - 聊天流里的卡有时是「先挂上、后绑身份」（切窗口回来、App 重载后最常见），
-  // 交一次被拒就不再管的话，标题会一直停在清单里那句静态文案。这里只对「还没绑定」这一种
-  // 错误按 1.5 秒退避重试三次，成功即停；一直绑不上（宿主对消息流里的卡不给视图身份）
-  // 就老实收手，不刷日志。其余错误（负载不合法、身份过期）重试也没用，照旧记一笔。
+  // 标题是视图临时状态：同一业务恢复时也补交，不能只重报尺寸。
+  // 每次提交独立票据，阻止旧业务/旧请求的迟到回包或定时重试覆盖新标题。
   const CHROME_RETRY_LIMIT = 3;
   const CHROME_RETRY_DELAY_MS = 1500;
   let chromeRevision = 0;
+  let chromeTicket = 0;
   let chromeRetries = 0;
   let chromeRetryTimer = 0;
+  let currentHeader = null;
+  let chromePageHidden = false;
+  let chromeLifecycleActive = headerLifecycleIsActive(hana.lifecycle?.getSnapshot?.());
+
+  function headerLifecycleIsActive(snapshot) {
+    return snapshot?.visible !== false && snapshot?.active !== false;
+  }
+
+  function pauseHeader() {
+    chromeTicket++;
+    clearTimeout(chromeRetryTimer);
+    chromeRetryTimer = 0;
+    chromeRetries = 0;
+  }
+
+  function invalidateHeader() {
+    pauseHeader();
+    currentHeader = null;
+  }
+
+  function headerIsCurrent(ticket) {
+    return ticket === chromeTicket && currentHeader && currentHeader.id === recordId
+      && currentHeader.session === boundSessionId && !stoodDown && !document.hidden && !!window.innerWidth
+      && !chromePageHidden && chromeLifecycleActive;
+  }
 
   function setCardHeader(title) {
     if (!title) return;
-    if (!hana?.chrome || typeof hana.chrome.set !== 'function') return;
-    chromeRevision += 1;
-    try {
-      const out = hana.chrome.set({ revision: chromeRevision, title, titleMode: 'show' });
-      if (out && typeof out.then === 'function') {
-        out.then(() => { chromeRetries = 0; }).catch((error) => retryCardHeader(title, error));
-      }
-    } catch (error) {
-      retryCardHeader(title, error);
+    invalidateHeader();
+    currentHeader = { title, id: recordId, session: boundSessionId };
+    submitHeader(chromeTicket);
+  }
+
+  function restoreCardHeader() {
+    if (currentHeader && currentHeader.id === recordId && currentHeader.session === boundSessionId) {
+      setCardHeader(currentHeader.title);
     }
   }
 
-  function retryCardHeader(title, error) {
-    const code = String(error?.code || '');
-    if (code !== 'APP_CHROME_UNAVAILABLE') {
-      report('CHROME-FAIL ' + (error?.message || error));
+  function chromeInstanceTag() {
+    // 只作日志关联的双32位指纹，不是授权身份，也不输出原始凭据。
+    const key = surfaceKey(hana.surface.getContext());
+    let a = 2166136261, b = 5381;
+    for (let i = 0; i < key.length; i++) {
+      a = Math.imul(a ^ key.charCodeAt(i), 16777619);
+      b = Math.imul(b, 33) ^ key.charCodeAt(i);
+    }
+    return ' view=' + key.length + '-' + (a >>> 0).toString(16) + '-' + (b >>> 0).toString(16);
+  }
+
+  function submitHeader(ticket) {
+    if (!headerIsCurrent(ticket)) return;
+    if (!hana?.chrome || typeof hana.chrome.set !== 'function') {
+      report('CHROME-FAIL ' + recordId + chromeInstanceTag() + ' code=API_UNAVAILABLE');
       return;
     }
-    if (chromeRetries >= CHROME_RETRY_LIMIT) return;
-    chromeRetries += 1;
+    chromeRevision += 1;
+    const revision = chromeRevision;
+    report('CHROME-SEND ' + recordId + chromeInstanceTag() + ' revision=' + revision);
+    try {
+      Promise.resolve(hana.chrome.set({ revision, title: currentHeader.title, titleMode: 'show' }))
+        .then((receipt) => {
+          if (!headerIsCurrent(ticket)) return;
+          if (receipt?.ok !== true) {
+            retryCardHeader(ticket, revision, { code: receipt?.code || 'APP_CHROME_UNCONFIRMED' });
+            return;
+          }
+          chromeRetries = 0;
+          report('CHROME-OK ' + recordId + chromeInstanceTag() + ' revision=' + revision);
+        }).catch((error) => retryCardHeader(ticket, revision, error));
+    } catch (error) {
+      retryCardHeader(ticket, revision, error);
+    }
+  }
+
+  function retryCardHeader(ticket, revision, error) {
+    if (!headerIsCurrent(ticket)) return;
+    // 不记错误原文或 surface URL，避免把宿主凭据带进日志。
+    const raw = String(error?.code || 'UNKNOWN');
+    const code = /^[A-Z0-9_]{1,80}$/.test(raw) ? raw : 'UNKNOWN';
+    report('CHROME-FAIL ' + recordId + chromeInstanceTag() + ' revision=' + revision + ' code=' + code);
+    if (code !== 'APP_CHROME_UNAVAILABLE' && code !== 'APP_CHROME_VIEW_STALE' && !/TIMEOUT|TIMED_OUT/.test(code)) return;
+    if (chromeRetries >= CHROME_RETRY_LIMIT) {
+      report('CHROME-EXHAUSTED ' + recordId + chromeInstanceTag() + ' revision=' + revision + ' code=' + code);
+      return;
+    }
+    chromeRetries++;
     clearTimeout(chromeRetryTimer);
-    chromeRetryTimer = setTimeout(() => setCardHeader(title), CHROME_RETRY_DELAY_MS);
+    chromeRetryTimer = setTimeout(() => submitHeader(ticket), CHROME_RETRY_DELAY_MS);
   }
 
   function clearImage() {
@@ -870,6 +931,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
   // quiet=true 时不记现场日志 —— 等待期反复收放自己，那种记录只会污染排障日志。
   function collapseSelf(note, quiet = false) {
     stoodDown = true;
+    invalidateHeader();
     clearImage();
     if (caption) { caption.textContent = ''; caption.hidden = true; }
     if (fbCard) fbCard.hidden = true;
@@ -914,7 +976,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
     }
     // 工具路由先有业务编号，宿主的已验证归属可能晚到；不能凭 URL 先认领或取图。
     if (candidates.length && !incomingSession) {
-      if (recordId && boundSessionId) { resize(true); return; }
+      if (recordId && boundSessionId && candidates.includes(recordId)) { restoreCardHeader(); resize(true); return; }
       if (reviveTries === 0) report('WAIT-OWNER ' + candidates[0] + ' context=' + (context ? 'present' : 'null')
         + ' slot=' + String(hana.lifecycle?.getSnapshot?.()?.slot || '') );
       collapseSelf('等待宿主确认图卡归属', true);
@@ -926,7 +988,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
       if (reviveTries <= REVIVE_FAST_TRIES) report(describeContext(context, candidates, 'MISS'));
       // v0.1.20 - 宿主会在卡片已经显示图片之后又推一个空上下文（编号、会话、槽位全空），
       // 从前那样会把已经载入的图直接抹掉，表现就是「图一闪而过变成一句提示」。
-      if (recordId && (!incomingSession || incomingSession === boundSessionId)) { resize(true); return; }
+      if (recordId && (!incomingSession || incomingSession === boundSessionId)) { restoreCardHeader(); resize(true); return; }
       generation++; binding = ''; recordId = ''; boundSessionId = '';
       chatStickerId = '';
       resetChatState();
@@ -957,7 +1019,8 @@ export function mountMessageCard({ showCaption = false } = {}) {
     }
     const id = candidates[0];
     // 同一张卡重新出现在视图里（切走再切回来）：尺寸重新上报一次，别的都不动。
-    if (binding === id) { resize(true); return; }
+    if (binding === id) { restoreCardHeader(); resize(true); return; }
+    invalidateHeader();
     binding = id;
     recordId = id;
     chatStickerId = '';
@@ -1076,16 +1139,34 @@ export function mountMessageCard({ showCaption = false } = {}) {
   // v0.1.32 - 重新可见时如果还没认领记录（重载 App / 换对话回来常见的状态），
   // 直接重置重试次数并立刻重跑一次：宿主这时通常刚好把身份补上了。
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { generation++; releaseClaim(); clearImage(); return; }
+    if (document.hidden) { generation++; invalidateHeader(); releaseClaim(); clearImage(); return; }
     resumeClaim();
   });
-  window.addEventListener('pageshow', resumeClaim);
+  window.addEventListener('pageshow', () => {
+    chromePageHidden = false;
+    resumeClaim();
+  });
+  // 宿主切窗隐藏 iframe 时 document.hidden 可以不变；只在不可用→可用边沿补一次标题。
+  // 这是宿主可见性通知，不是 Chrome generation/binding 已就绪的证明。
+  hana.lifecycle?.subscribe?.((snapshot) => {
+    const active = headerLifecycleIsActive(snapshot);
+    if (active === chromeLifecycleActive) return;
+    chromeLifecycleActive = active;
+    if (!active) {
+      pauseHeader();
+      if (currentHeader) report('CHROME-PAUSE ' + recordId + chromeInstanceTag());
+    } else {
+      restoreCardHeader();
+    }
+  });
   hana.surface.onContextChanged(load);
   hana.ready();
   startClaimChecks();
   load(hana.surface.getContext());
   window.addEventListener('pagehide', () => {
+    chromePageHidden = true;
     generation++;
+    invalidateHeader();
     if (claimTimer != null) { clearInterval(claimTimer); claimTimer = null; }
     releaseClaim();
     clearImage();

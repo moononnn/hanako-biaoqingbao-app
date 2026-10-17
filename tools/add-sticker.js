@@ -1,8 +1,7 @@
-import { copyFile, readFile } from 'node:fs/promises';
-import { genId, atomicWriteJson, enqueueToolWrite, META_FILE, STICKERS_DIR } from '../lib/shared.js';
+import { mkdir, readFile, unlink } from 'node:fs/promises';
+import { genId, readMeta, writeMeta, writeNewStickerFile, enqueueToolWrite, STICKERS_DIR } from '../lib/shared.js';
 import { safeStickerPath } from '../lib/ball-core.js';
 
-const metaPath = META_FILE;
 const stickersDir = STICKERS_DIR;
 
 const ALLOWED_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
@@ -40,41 +39,60 @@ export async function execute(input, ctx) {
   }
 
   // v0.25.2 - 分配 id → 复制 → 写 meta 整体进串行队列：多会话并发调用时不会分配到同一个 id
+  // 索引读取走 readMeta：索引损坏或缺失时直接抛错，绝不再当成「空库」把整库元数据覆盖掉。
   return await enqueueToolWrite(async () => {
-    let stickers = [];
+    let destPath = '';
+    let created = false;
     try {
-      const raw = await readFile(metaPath, 'utf-8');
-      stickers = JSON.parse(raw);
-    } catch { /* 新库 */ }
+      const stickers = readMeta();
+      const id = genId(stickers);
+      const fileName = `${id}.${ext}`;
+      destPath = safeStickerPath(stickersDir, fileName);
+      if (!destPath) return reply({ ok: false, error: '图库目录路径不安全，无法写入图片' });
 
-    const id = genId();
-    const fileName = `${id}.${ext}`;
-    const destPath = safeStickerPath(stickersDir, fileName);
-    if (!destPath) return reply({ ok: false, error: '图库目录路径不安全，无法写入图片' });
+      let buffer;
+      try {
+        buffer = await readFile(sourcePath);
+      } catch (e) {
+        return reply({ ok: false, error: `读取源文件失败: ${e.message}` });
+      }
+      if (!buffer.length) return reply({ ok: false, error: `源文件是空的: ${originalFile}` });
 
-    try {
-      await copyFile(sourcePath, destPath);
-    } catch (e) {
-      return reply({ ok: false, error: `复制文件失败: ${e.message}` });
+      await mkdir(stickersDir, { recursive: true });
+      // 排他创建：编号已被磁盘上的旧图占用时直接失败，不会覆盖别人的图。
+      writeNewStickerFile(destPath, buffer);
+      created = true;
+
+      const entry = {
+        id,
+        file: fileName,
+        description: description || originalFile.replace(`.${ext}`, ''),
+        tags: {
+          emotion: emotion ? emotion.split(',').map(s => s.trim()).filter(Boolean) : [],
+          scene: scene ? scene.split(',').map(s => s.trim()).filter(Boolean) : [],
+          keywords: keywords ? keywords.split(',').map(s => s.trim()).filter(Boolean) : []
+        },
+        added_at: new Date().toISOString()
+      };
+
+      stickers.push(entry);
+      // v0.19.5 - 原子写，避免崩溃留下半截图库文件
+      writeMeta(stickers);
+      created = false;
+
+      ctx?.log?.info?.(`[biaoqingbao] add_sticker 入库: ${id} (${fileName})`);
+      return reply({ ok: true, data: entry, message: `已添加表情包 ${id}` });
+    } catch (error) {
+      // 只有本轮确实创建出来的文件才允许清理；元数据没落盘就不留半张孤儿图在库里。
+      if (created && destPath) {
+        try { await unlink(destPath); } catch {}
+      }
+      const reason = error?.message || String(error);
+      ctx?.log?.warn?.('[biaoqingbao] add_sticker 入库失败:', reason);
+      if (error?.code === 'EEXIST') {
+        return reply({ ok: false, error: `图库里已经有 ${error.path || destPath}，入库已中止，原图未被改动。` });
+      }
+      return reply({ ok: false, error: `入库失败：${reason}` });
     }
-
-    const entry = {
-      id,
-      file: fileName,
-      description: description || originalFile.replace(`.${ext}`, ''),
-      tags: {
-        emotion: emotion ? emotion.split(',').map(s => s.trim()).filter(Boolean) : [],
-        scene: scene ? scene.split(',').map(s => s.trim()).filter(Boolean) : [],
-        keywords: keywords ? keywords.split(',').map(s => s.trim()).filter(Boolean) : []
-      },
-      added_at: new Date().toISOString()
-    };
-
-    stickers.push(entry);
-    // v0.19.5 - 原子写，避免崩溃留下半截图库文件
-    atomicWriteJson(metaPath, stickers);
-
-    ctx?.log?.info?.(`[biaoqingbao] add_sticker 入库: ${id} (${fileName})`);
-    return reply({ ok: true, data: entry, message: `已添加表情包 ${id}` });
   });
 }

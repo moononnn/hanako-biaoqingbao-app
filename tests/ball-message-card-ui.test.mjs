@@ -30,11 +30,13 @@ function fakeElement(height = 0, natural = { naturalWidth: 600, naturalHeight: 4
   };
 }
 
-function ui(context, fetch, initialSearch = '', viewport = { width: 314, height: 51 }, pathname = '/paper-plane-message.html', timers = null, intervals = null) {
+function ui(context, fetch, initialSearch = '', viewport = { width: 314, height: 51 }, pathname = '/paper-plane-message.html', timers = null, intervals = null, chromeSet = null, initialLifecycle = { visible: true, active: true }) {
   const elements = Object.fromEntries(['image', 'caption', 'status', 'fb-card', 'fb-pos', 'fb-fit', 'fb-neg', 'fb-toast']
     .map(key => [key, fakeElement(key === 'message' ? 240 : 0)]));
   const message = fakeElement(240);
   let onContext;
+  let onLifecycle;
+  let lifecycleSnapshot = initialLifecycle;
   const calls = [];
   const resizeRequests = [];
   // v0.1.42 - 现场日志走自己的通道（不计入「卡片数据请求」），测试要单独拿到它。
@@ -65,8 +67,12 @@ function ui(context, fetch, initialSearch = '', viewport = { width: 314, height:
     URLSearchParams,
     hana: {
       ready() {},
+      lifecycle: initialLifecycle ? {
+        getSnapshot: () => lifecycleSnapshot,
+        subscribe(fn) { onLifecycle = fn; fn(lifecycleSnapshot); return () => { onLifecycle = null; }; },
+      } : undefined,
       ui: { resize(size) { resizeRequests.push(size); } },
-      chrome: { set(description) { chromeSets.push(description); return Promise.resolve({ ok: true }); } },
+      chrome: { set(description) { chromeSets.push(description); return chromeSet ? chromeSet(description) : Promise.resolve({ ok: true }); } },
       surface: { getContext: () => contextBox.value, onContextChanged(callback) { onContext = callback; } },
       api: { fetch: async (route, init) => {
         // 显示配置与认不出记录时的现场上报都是卡片自己的前置/诊断请求，不计入「卡片数据请求」的断言。
@@ -89,6 +95,7 @@ function ui(context, fetch, initialSearch = '', viewport = { width: 314, height:
   vm.runInNewContext(source, sandbox);
   return { elements, calls, resizeRequests, chromeSets, debugNotes, change: value => onContext(value),
     setSearch: value => { search.value = value; },
+    lifecycleChange: value => { lifecycleSnapshot = value; onLifecycle?.(value); },
     // 身份晚一拍才补上时，卡片得能靠“页面重新可见”自愈
     setContext: value => { contextBox.value = value; },
     visibilityChange: (hidden = false) => { doc.hidden = hidden; listeners.visibilitychange?.(); },
@@ -619,6 +626,187 @@ test('清单只注册两张卡，两个 customType 共用对话内那张', () =>
     assert.equal(renderer.cardId, 'paper-plane-message', `${renderer.customType} 应共用对话内那张卡`);
   }
   assert.ok(!fs.existsSync(new URL('../ui/partner-sticker-message.html', import.meta.url)), '拆掉的那张卡页面不该还在');
+});
+
+test('标题恢复：同业务上下文与短暂无上下文都补交标题，不重复取图', async () => {
+  const context = { cardInstanceId: idA, embeddedSessionId: 'session-one' };
+  const state = ui(context, () => response(idA));
+  await settle();
+  const calls = state.calls.length;
+  state.change(context);
+  await settle();
+  state.change(null);
+  await settle();
+  assert.equal(state.calls.length, calls);
+  assert.equal(state.chromeSets.length, 3);
+  assert.deepEqual(state.chromeSets.map(x => x.revision), [1, 2, 3]);
+  assert.ok(state.debugNotes.some(x => x.includes('CHROME-OK')));
+});
+
+test('标题恢复：旧业务的迟到拒绝不能安排重试覆盖新业务', async () => {
+  let rejectOld;
+  const timers = [];
+  let activeId = idA;
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' },
+    () => response(activeId), '', { width: 314, height: 51 }, '/paper-plane-message.html',
+    (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, null,
+    () => activeId === idA ? new Promise((_, reject) => { rejectOld = reject; }) : Promise.resolve({ ok: true }));
+  await settle();
+  activeId = idB;
+  state.change({ cardInstanceId: idB, embeddedSessionId: 'session-one' });
+  await settle();
+  rejectOld(Object.assign(new Error('not ready'), { code: 'APP_CHROME_UNAVAILABLE' }));
+  await settle();
+  assert.equal(timers.filter(x => x.ms === 1500).length, 0);
+  assert.equal(state.chromeSets.length, 2);
+});
+
+test('标题恢复：不可用的有限重试耗尽留诊断，不记录凭据', async () => {
+  const timers = [];
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA), '',
+    { width: 314, height: 51 }, '/paper-plane-message.html',
+    (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, null,
+    () => Promise.reject(Object.assign(new Error('not ready'), { code: 'APP_CHROME_UNAVAILABLE' })));
+  await settle();
+  for (let i = 0; i < 3; i++) {
+    const next = timers.find(x => x.ms === 1500 && !x.ran);
+    assert.ok(next); next.ran = true; next.fn(); await settle();
+  }
+  assert.equal(state.chromeSets.length, 4);
+  assert.ok(state.debugNotes.some(x => x.includes('CHROME-EXHAUSTED') && x.includes(idA)));
+});
+
+test('标题恢复：新业务缺归属时先清旧图旧标题，不向新视图补交旧标题', async () => {
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA), '',
+    { width: 314, height: 51 }, '/paper-plane-message.html', () => 0);
+  await settle();
+  state.change({ cardInstanceId: idB });
+  await settle();
+  assert.equal(state.chromeSets.length, 1);
+  assert.equal(state.elements.image.hidden, true);
+});
+
+test('标题恢复：visibility/pageshow重新载入后补标题，pagehide后旧拒绝不重试', async () => {
+  const timers = [];
+  let rejectLast;
+  let defer = false;
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA), '',
+    { width: 314, height: 51 }, '/paper-plane-message.html',
+    (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, null,
+    () => defer ? new Promise((_, reject) => { rejectLast = reject; }) : Promise.resolve({ ok: true }));
+  await settle();
+  state.visibilityChange(true); state.visibilityChange(false);
+  await settle();
+  assert.equal(state.chromeSets.length, 2);
+  defer = true;
+  state.windowEvent('pageshow'); await settle();
+  assert.equal(state.chromeSets.length, 3);
+  state.windowEvent('pagehide');
+  rejectLast(Object.assign(new Error('late'), { code: 'APP_CHROME_UNAVAILABLE' }));
+  await settle();
+  assert.equal(timers.filter(x => x.ms === 1500).length, 0);
+});
+
+test('标题恢复：空回执不记成功，日志只有实例指纹不含surface凭据', async () => {
+  const token = 'private-surface-token-for-test';
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA), '',
+    { width: 314, height: 51 }, '/_surface/' + token + '/paper-plane-message.html', () => 0, null,
+    () => Promise.resolve(undefined));
+  await settle();
+  const notes = state.debugNotes.filter(x => x.startsWith('CHROME-'));
+  assert.ok(notes.some(x => x.includes('APP_CHROME_UNCONFIRMED')));
+  assert.ok(notes.every(x => x.includes(' view=')));
+  assert.ok(notes.every(x => !x.includes(token)));
+  assert.equal(notes.some(x => x.startsWith('CHROME-OK')), false);
+});
+
+test('宿主标题恢复：仅宿主inactive→active补交一次，不重复取图', async () => {
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA));
+  await settle();
+  const calls = state.calls.length;
+  state.lifecycleChange({ visible: false, active: false });
+  state.lifecycleChange({ visible: true, active: true });
+  state.lifecycleChange({ visible: true, active: true, reason: 'another-notification' });
+  await settle();
+  assert.equal(state.chromeSets.length, 2);
+  assert.equal(state.chromeSets[1].revision, 2);
+  assert.equal(state.calls.length, calls);
+});
+
+test('宿主标题恢复：初始不可见时只缓存，真正可用后再交标题', async () => {
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA), '',
+    { width: 314, height: 51 }, '/paper-plane-message.html', null, null, null,
+    { visible: false, active: false });
+  await settle();
+  assert.equal(state.chromeSets.length, 0);
+  state.lifecycleChange({ visible: false, active: true });
+  assert.equal(state.chromeSets.length, 0, 'visible=false不能只凭active写标题');
+  state.lifecycleChange({ visible: true, active: true });
+  await settle();
+  assert.equal(state.chromeSets.length, 1);
+});
+
+test('宿主标题恢复：暂停后的旧拒绝不重试，恢复仍保留同业务缓存', async () => {
+  const timers = [];
+  let rejectOld;
+  let count = 0;
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA), '',
+    { width: 314, height: 51 }, '/paper-plane-message.html',
+    (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, null,
+    () => ++count === 1 ? new Promise((_, reject) => { rejectOld = reject; }) : Promise.resolve({ ok: true }));
+  await settle();
+  state.lifecycleChange({ visible: true, active: false });
+  rejectOld(Object.assign(new Error('late'), { code: 'APP_CHROME_UNAVAILABLE' }));
+  await settle();
+  assert.equal(timers.filter(x => x.ms === 1500).length, 0);
+  state.lifecycleChange({ visible: true, active: true });
+  await settle();
+  assert.equal(state.chromeSets.length, 2);
+});
+
+test('宿主标题恢复：pagehide强于active，pageshow后才允许恢复', async () => {
+  let activeId = idA;
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(activeId));
+  await settle();
+  state.windowEvent('pagehide');
+  state.lifecycleChange({ visible: false, active: false });
+  activeId = idB;
+  const context = { cardInstanceId: idB, embeddedSessionId: 'session-one' };
+  state.setContext(context); state.change(context);
+  await settle();
+  state.lifecycleChange({ visible: true, active: true });
+  await settle();
+  assert.equal(state.chromeSets.length, 1);
+  state.windowEvent('pageshow');
+  await settle();
+  assert.equal(state.chromeSets.length, 2);
+});
+
+test('宿主标题恢复：暂停期间切业务，只恢复新业务标题', async () => {
+  let activeId = idA;
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' },
+    () => response(activeId, '', 'session-one', { sender: 'partner', agentName: activeId === idA ? '伙伴A' : '伙伴B' }));
+  await settle();
+  state.lifecycleChange({ visible: false, active: false });
+  activeId = idB;
+  const context = { cardInstanceId: idB, embeddedSessionId: 'session-one' };
+  state.setContext(context); state.change(context);
+  await settle();
+  assert.equal(state.chromeSets.length, 1);
+  state.lifecycleChange({ visible: true, active: true });
+  await settle();
+  assert.equal(state.chromeSets.length, 2);
+  assert.match(state.chromeSets[1].title, /伙伴B/);
+});
+
+test('宿主标题恢复：缺少lifecycle API仍沿用上下文恢复', async () => {
+  const context = { cardInstanceId: idA, embeddedSessionId: 'session-one' };
+  const state = ui(context, () => response(idA), '', { width: 314, height: 51 },
+    '/paper-plane-message.html', null, null, null, null);
+  await settle();
+  state.change(context);
+  await settle();
+  assert.equal(state.chromeSets.length, 2);
 });
 
 test('卡头标题走页面自己交的那条路（显式 show、revision 递增）', () => {

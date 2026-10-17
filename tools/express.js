@@ -5,6 +5,7 @@
 // v0.32.3：加 stickerId 可选参数，有 stickerId 时跳过匹配直接发指定图；
 //          prefs.vetoed 仍生效；cooldown/pushRecent/logDecision 照常走。
 import { readFile, copyFile, mkdir, chmod, writeFile } from 'node:fs/promises';
+import { appendFileSync } from 'node:fs';
 import { join, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, tmpdir } from 'node:os';
@@ -41,6 +42,14 @@ const NATIVE_MEDIA_MIN_VERSION = [0, 679, 0];
 
 const recentlyUsedByAgent = new Map(); // v0.19.5 - 最近使用按助手隔离，避免不同助手互相影响去重
 const MAX_RECENT = 5;
+
+// 2026-10-17 - 分段耗时打点：宿主报过一次 30 秒工具超时，但不知道卡在哪一段。
+// 只写 probe.log，不影向任何分支，出错静默。
+function probeTiming(line) {
+  try {
+    appendFileSync(join(dataDir, 'probe.log'), `${new Date().toISOString()} [express] ${line}\n`, 'utf-8');
+  } catch { /* 日志写不进去不能影响发图 */ }
+}
 
 function getRecent(agentId) {
   return recentlyUsedByAgent.get(agentId) || [];
@@ -650,6 +659,9 @@ export const parameters = {
 export async function execute(input, ctx) {
   const { emotion, exclude_ids = [], stickerId, keywords, scene, tone, intensity } = input || {};
   if (!emotion) return reply({ ok: false, error: '请传入你想表达的情绪' });
+  const t0 = Date.now();
+  const lap = (label) => probeTiming(`${label} +${Date.now() - t0}ms`);
+  lap('start');
 
   // v0.34.51 - 情境关键词：字符串（逗号分隔）或数组都收，清洗后交给打分器
   const kwList = (Array.isArray(keywords) ? keywords : String(keywords || '').split(/[,，、]/))
@@ -714,6 +726,7 @@ export async function execute(input, ctx) {
     return reply({ ok: false, error: '表情包库是空的，请先添加一些表情包' });
   }
   stickers = filterStickersForAgent(stickers, agentId, groupStore);
+  lap(`lib ${stickers.length}`);
   if (stickers.length === 0) {
     return reply({ ok: true, data: { action: 'no_match', message: '当前伙伴的可用分组里没有表情包。可以到「伙伴配图频率」页调整分组白名单。' } });
   }
@@ -761,6 +774,7 @@ export async function execute(input, ctx) {
     // 导致永远走到 no_match。恢复原地修改语义，不回填。
     // v0.25.0 - applyVectorScoring 传入 prefs：向量补充通道同样应用偏好惩罚
     await applyVectorScoring(scored, stickers, emotion, allExclude, effectivePrefs, groupConfig, knownGroupIds);
+    lap(`vector ${scored.length}`);
 
     if (scored.length === 0) {
       return reply({
@@ -788,6 +802,7 @@ export async function execute(input, ctx) {
   }
 
   // 读取图片 -> 复制 -> stage
+  lap(`best ${best?.id || '?'}`);
   const srcPath = safeStickerPath(stickersDir, best.file);
   if (!srcPath) return reply({ ok: false, error: `图片文件 ${best.file} 路径不安全` });
   let buffer;
@@ -802,6 +817,7 @@ export async function execute(input, ctx) {
   const filePath = join(sentDir, best.file);
   try { await copyFile(srcPath, filePath); } catch {}
   await chmod(filePath, 0o666).catch(() => {});
+  lap('copied');
 
   const ext = best.file.split('.').pop().toLowerCase();
   const mime = MIME_MAP[ext] || 'image/png';
@@ -816,8 +832,10 @@ export async function execute(input, ctx) {
   try {
     mediaItem = await ctx.stageFile({ filePath, sessionPath: ctx.sessionPath, label: best.description });
     stageSuccess = true;
+    lap('staged');
   } catch (e) {
     ctx?.log?.warn?.('[biaoqingbao] stageFile 失败:', e.message);
+    lap('stage-fail');
   }
 
   // v0.19.5 - 记录移到发图确认之后：stage 成功或降级 base64 都算已发出
@@ -825,10 +843,12 @@ export async function execute(input, ctx) {
   markStickerSent(agentId, turnRef, { turnKey });
   await logDecision(emotion, best.id, ctx, { exploration: best._explorationKind || null });
   markAgentStickerCooldown(agentId);
+  lap('decided');
 
   if (stageSuccess && mediaItem) {
     // 当前公开 ToolContext 没有宿主版本字段，只读取 Hana 本机 server-info。
     const hostVersion = await readHanaAppVersion();
+    lap('hostver');
     // v0.33.67 - B 方案真正落地：0.686+ 宿主（media-only 假设证伪后）强制走纯 details.card iframe，
     // 完全不调 deferred（避免宿主把广播当追加媒体块 → 末尾重复图）。旧版宿主保持原逻辑。
     const isNewHost = isMediaOnlyHost(hostVersion);
