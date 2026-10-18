@@ -1,5 +1,18 @@
 # 自动测试
 
+## 2026-10-18 Hana 1.1.24-beta 回复内图卡恢复（本地，验证时版本 0.4.0，发布定版 0.4.1）
+
+```powershell
+node --test --test-concurrency=1 tests/sticker-tool-card.test.mjs tests/sticker-after-turn.test.mjs tests/sticker-delivery.test.mjs tests/sticker-bridge-media.test.mjs
+node --check index.js
+node --check lib/sticker-delivery.js
+node --check tests/sticker-tool-card.test.mjs
+node --check tests/sticker-bridge-media.test.mjs
+git diff --check
+```
+
+结果：四组定向测试 37 项通过，0 失败；4 份语法检查通过；`git diff --check` 无错误（Git 对现有工作树 CRLF 提示不影响检查）。覆盖 express 回复内卡片、回合末不再补投、Bridge `details.media.items` 保留、无会话编号与附件登记失败等边界。未跑全应用回归、未调用真实模型/API、未由助手代发 QQ 测试消息。之后经正式 App 管理入口重载，inspect 为 host=on、agent=on；应用列表仍显示 0.4.0。随后使用者实机确认电脑端与 QQ 均能正常收到图；该反馈仅覆盖本次电脑与 QQ 验收范围。
+
 ## 2026-10-16 使用者实机反馈：重启后旧会话恢复单卡与动态标题
 
 标题优化重新加载后，使用者再次进入先前异常会话，仍见双卡和默认标题；随后自行重启 Hana，再进入同一会话，确认变为单卡且标题正常。此结论来自使用者实机反馈，未自动重启或触发新配图。
