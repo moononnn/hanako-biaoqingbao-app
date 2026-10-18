@@ -10,7 +10,7 @@
 // 通道选型（踩过一次坑，留在这里）：
 //   插件版用「Node 起本地 HTTP 桥 + Python 当客户端」，在 App 里走不通 ——
 //   App 子进程拿不到 --allow-net，net 的 bind 会被 Permission Model 直接拒绝。
-//   悬浮球改成 stdin/stdout，一行一条 JSON。
+//   纸飞机改成 stdin/stdout，一行一条 JSON。
 //
 // 启动健康信息记在 app-data/biaoqingbao-app/probe.log（文件名沿用 PoC 期，内容现在只剩正式链路）。
 
@@ -117,7 +117,7 @@ export default defineApp(async (sdk) => {
 
   // 伙伴显示名：App 沙箱只能碰自己的数据目录，读不到 <hana 主目录>/agents/...，
   // 自己拼路径取名字会一路失败、最后退化成英文 id（hanako）。宿主名单里带着中文名，
-  // 启动时拉一次存进 lib/agent-name.js，卡片标题和悬浮球都走它。
+  // 启动时拉一次存进 lib/agent-name.js，卡片标题和纸飞机都走它。
   //
   // v0.1.48：这段从 apply 末尾挪到了沙箱探针前面。原来探针先跑、名单后缓存，
   // 于是它记的 host-agents 永远是 0 —— 一台假警报（真值是 12），白让人以为名单没拉到。
@@ -346,8 +346,8 @@ export default defineApp(async (sdk) => {
         parameters: t.parameters,
         execute: async (input) => {
           const result = await t.execute(input, legacyToolCtx(input));
-          // 本地图卡走 messageRenderer，由宿主按 customType 确定 App 归属。
-          // QQ Bridge 保留 SessionFile mediaItem；不返回第二张工具卡，不塞像素进模型。
+          // express 的本地图卡随当前工具结果返回；QQ Bridge 仍保留 SessionFile 附件。
+          // 不再为同一张伙伴配图另发一条回合外 custom 消息。
           if (t.name === "express") {
             const clean = stripInlineBase64(result);
             const sticker = extractSelectedSticker(result);
@@ -364,30 +364,23 @@ export default defineApp(async (sdk) => {
               ok: false, error: "选中了图片，但图卡没接上：" + prepared.error,
               data: { action: "delivery_failed", stickerId: sticker.id },
             }) }] };
-            // 自己选的图不塞回正在生成的模型输入，等本轮定稿、空闲后投。
-            if (prepared.preparedRecord) {
-              const queued = queueStickerDelivery({ sdk, dataDir: sdk.dataDir, sessionPath,
-                sticker, text: sticker.description || "",
-                emotion: typeof input?.emotion === "string" ? input.emotion : "",
-                preparedRecord: prepared.preparedRecord });
-              if (!queued.ok) return { content: [{ type: "text", text: JSON.stringify({
-                ok: false, error: "图片未能排进投递队列：" + queued.error,
-              }) }] };
-            }
-            // 已排队或提供桥接附件，定稿伪标记兜底不能重复配图。
+            // 图卡已随当前工具结果返回；伪标记兜底不能再补发同一张图。
             markInjectionDelivered(sessionPath);
             const details = { ...clean.details,
+              ...(prepared.card ? { card: prepared.card } : {}),
               ...(prepared.media ? { media: prepared.media } : {}) };
             if (prepared.messageError) {
               record(`sticker-message-fail ${prepared.messageError}`);
               return { ...clean, details, content: [...(Array.isArray(clean.content) ? clean.content : []),
-                { type: "text", text: "图片附件已登记，但本地交互图卡投递未确认：" + prepared.messageError }] };
+                { type: "text", text: "图片附件已登记，但本地回复内图卡未建立：" + prepared.messageError }] };
             }
             if (prepared.sessionFileError) {
               record(`session-file-stage-fail ${prepared.sessionFileError}`);
               return { ...clean,
                 content: [...(Array.isArray(clean.content) ? clean.content : []), { type: "text",
-                  text: "会话图片附件未能登记；本地图片已排队等本轮结束后显示，其他端的图片未确认送达。" }],
+                  text: prepared.card
+                    ? "会话图片附件未能登记；本地图片卡已随当前回复返回，其他端的图片未确认送达。"
+                    : "会话图片附件未能登记，本地图片卡也未建立；其他端的图片未确认送达。" }],
                 details,
               };
             }

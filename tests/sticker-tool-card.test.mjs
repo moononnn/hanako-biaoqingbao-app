@@ -22,8 +22,8 @@ function fixtureSdk() {
   return { calls, sdk: { dataDir, bus: { request: async (type) => {
     calls.push(type);
     if (type === 'session:list') return [{ sessionId: 'sess_fixture', path: sessionPath }];
-    if (type === 'session:send-custom') return { ok: true, entryId: 'entry_fixture' };
-    throw new Error('不允许二次投递或调用模型：' + type);
+    if (type === 'session:stage-file') return { mediaItem: { type: 'session_file', fileId: 'sf_fixture', mime: 'image/png' } };
+    throw new Error('express 图卡不应走回合外投递或调用模型：' + type);
   } } } };
 }
 function registeredExpress(sdk, result, delivered) {
@@ -40,7 +40,7 @@ function registeredExpress(sdk, result, delivered) {
     extractSelectedSticker: delivery.extractSelectedSticker,
     createStickerToolCard: delivery.createStickerToolCard,
     markInjectionDelivered: value => delivered.push(value),
-    queueStickerDelivery: entry => { assert.ok(entry.preparedRecord); return { ok: true }; },
+    queueStickerDelivery: () => { throw new Error('express 图卡不能改走回合末补投'); },
     record() {},
   });
 }
@@ -65,7 +65,12 @@ test('工具卡准备保留图片、会话、伙伴与情绪，宿主身份和�
   const { sdk, calls } = fixtureSdk();
   const out = await delivery.createStickerToolCard({ sdk, dataDir, sessionPath, sticker, text: '测试图', emotion: '开心' });
   assert.equal(out.ok, true);
-  assert.equal(out.card, undefined, '不再经工具结果返回需来源验签的 iframe 卡');
+  assert.equal(out.card.pluginId, 'biaoqingbao-app');
+  assert.equal(out.card.sessionId, 'sess_fixture');
+  assert.equal(out.card.type, 'iframe');
+  assert.match(out.card.route, /recordId=a_/);
+  assert.equal(Object.hasOwn(out.card, 'cardInstanceId'), false);
+  assert.equal(Object.hasOwn(out.card, 'hanaAppCardSource'), false);
   assert.equal(out.preparedRecord.id, out.recordId);
   const stored = readMessageCard(dataDir, out.recordId);
   assert.equal(stored.sender, 'partner');
@@ -132,16 +137,17 @@ test('旧 custom 卡与旧 hash 身份仍能读取；非法业务编号不得抢
   assert.equal(candidates('', {}, '#id=' + id)[0], id);
 });
 
-test('真实注册回调投递 custom 消息且不返回 details.card，阻止定稿重复补发', async () => {
+test('真实注册回调把图卡放进当前工具结果，保留 Bridge 附件且不回合末补投', async () => {
   const { sdk, calls } = fixtureSdk(), delivered = [];
   const result = { content: [{ type: 'text', text: JSON.stringify({ ok: true, data: { action: 'selected', sticker } }) }], details: { preserved: true } };
   const execute = registeredExpress(sdk, result, delivered);
-  const out = await execute({ context: { sessionPath }, emotion: '开心' });
+  const out = await execute({ context: { sessionPath, callToken: 'call_fixture' }, emotion: '开心' });
   assert.equal(out.details.preserved, true);
-  assert.equal(out.details.card, undefined);
+  assert.match(out.details.card.route, /recordId=a_/);
+  assert.equal(out.details.media.items[0].fileId, 'sf_fixture');
   assert.equal(out.content[0].text, result.content[0].text);
   assert.deepEqual(delivered, [sessionPath]);
-  assert.deepEqual(calls, ['session:list']);
+  assert.deepEqual(calls, ['session:list', 'session:stage-file']);
 });
 
 test('注册回调准备失败要明确报失败，不标记送达、不排队', async () => {
@@ -162,7 +168,7 @@ test('小于旧阈值的 data URL 也剥离，图卡与记录仍正常返回', a
   const returned = JSON.parse(out.content[0].text);
   assert.equal(returned.data.sticker.url, undefined);
   assert.equal(payload.data.sticker.url.startsWith('data:'), true);
-  assert.equal(out.details.card, undefined);
+  assert.match(out.details.card.route, /recordId=a_/);
 });
 
 test('长回复超过兜底等待仍在生成时保留队列，不把图塞回模型', async () => {

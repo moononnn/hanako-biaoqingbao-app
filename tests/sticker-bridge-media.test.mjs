@@ -1,4 +1,4 @@
-// QQ Bridge 配图附件：工具结果的 details.media 由宿主 BridgeManager 转为 QQ 媒体消息。
+// QQ Bridge 配图附件：details.media 仍由宿主 BridgeManager 转为 QQ 媒体消息；details.card 留在本地回复里。
 // 测试只模拟 App Bus，不注册真实 SessionFile、不向 QQ 发消息。
 
 import test, { after, beforeEach } from 'node:test';
@@ -60,15 +60,17 @@ function sticker() {
   return { id: 'stk_bridge_test', filePath: imagePath, description: '桥接测试图' };
 }
 
-test('QQ Bridge 工具卡同时准备 SessionFile mediaItem，使用当前工具 callToken', async () => {
+test('QQ Bridge 保留 SessionFile 附件，同时准备本地回复图卡并使用当前工具 callToken', async () => {
   const { sdk, calls } = makeSdk();
   const result = await createStickerToolCard({
     sdk, dataDir, sessionPath: bridgePath, callToken: 'call_token_current_tool', sticker: sticker(), text: '测试图',
   });
 
   assert.equal(result.ok, true, result.error);
-  assert.ok(result.preparedRecord, '桌面 Hana 的图片消息已准备，等待定稿队列');
-  assert.equal(result.card, undefined);
+  assert.ok(result.preparedRecord, '本地图片消息记录已准备');
+  assert.equal(result.card.pluginId, 'biaoqingbao-app');
+  assert.equal(result.card.sessionId, 'sess_bridge_test');
+  assert.match(result.card.route, /recordId=a_/);
   assert.deepEqual(result.media, { items: [STAGED_MEDIA_ITEM] });
   const stage = calls.find((call) => call.type === 'session:stage-file');
   assert.equal(stage?.payload.callToken, 'call_token_current_tool');
@@ -85,7 +87,9 @@ test('普通 Hana 会话也登记 SessionFile，同时保留本地图卡', async
 
   assert.equal(result.ok, true, result.error);
   assert.ok(result.preparedRecord);
-  assert.equal(result.card, undefined);
+  assert.equal(result.card.pluginId, 'biaoqingbao-app');
+  assert.equal(result.card.sessionId, 'sess_native_test');
+  assert.match(result.card.route, /recordId=a_/);
   assert.deepEqual(result.media, { items: [STAGED_MEDIA_ITEM] });
   const stage = calls.find((call) => call.type === 'session:stage-file');
   assert.equal(stage?.payload.callToken, 'call_token_current_tool');
@@ -100,7 +104,8 @@ test('会话文件登记失败时仍保留本地图卡并暴露失败，不伪�
 
   assert.equal(result.ok, true, result.error);
   assert.ok(result.preparedRecord);
-  assert.equal(result.card, undefined);
+  assert.equal(result.card.pluginId, 'biaoqingbao-app');
+  assert.match(result.card.route, /recordId=a_/);
   assert.equal(result.media, undefined);
   assert.match(result.sessionFileError, /未授权/);
   assert.equal(calls.some((call) => call.type === 'session:stage-file'), true);
