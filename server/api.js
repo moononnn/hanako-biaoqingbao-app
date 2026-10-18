@@ -297,7 +297,7 @@ function mergeMigrationData(key, incoming) {
     return merged;
   }
   if (key === 'stickerGroups') return normalizeGroupStore(incoming);
-  // 模板、画像、修正反馈和显示/悬浮球配置是全局资产，迁移包作为来源机的完整快照覆盖当前值。
+  // 模板、画像、修正反馈和显示/纸飞机配置是全局资产，迁移包作为来源机的完整快照覆盖当前值。
   return incoming;
 }
 
@@ -412,7 +412,7 @@ export default async function registerRoutes(app, ctx) {
     });
   });
 
-  // v0.25.1/v0.34.22 - API 的图库写操作与工具、悬浮球共用 shared 层队列，
+  // v0.25.1/v0.34.22 - API 的图库写操作与工具、纸飞机共用 shared 层队列，
   // 不能只在上传路由内部串行，否则跨入口读改写仍会丢元数据或分组关系。
   function enqueueUploadWrite(task) {
     return enqueueStickerDataWrite(task);
@@ -3307,7 +3307,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
         customApiKey: body.customApiKey ?? oldCfg.customApiKey ?? '',
         customModel: body.customModel ?? oldCfg.customModel ?? '',
         customDimensions: body.customDimensions ?? oldCfg.customDimensions ?? 1024,
-        // v0.33.29 - 悬浮球识图入库自动向量开关（分享版默认关）
+        // v0.33.29 - 纸飞机识图入库自动向量开关（分享版默认关）
         autoVectorOnSave: typeof body.autoVectorOnSave === 'boolean' ? body.autoVectorOnSave : oldCfg.autoVectorOnSave === true,
       };
       writeEmbeddingConfig(cfg);
@@ -3721,7 +3721,7 @@ ${draft}
     }
   });
 
-  // ═══ 表情包悬浮球 — 管理端点 ═══
+  // ═══ 表情包纸飞机 — 管理端点 ═══
   app.post('/api/ball/start', async () => {
     const result = await startBall(ctx);
     return json(result, result.ok ? 200 : 400);

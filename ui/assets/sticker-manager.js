@@ -860,7 +860,7 @@
     }
   }
 
-  // v0.33.37/v0.34.22 - 悬浮球等其他入口入库后页面自动刷新：轻量轮询列表和分组指纹，变了才重载
+  // v0.33.37/v0.34.22 - 纸飞机等其他入口入库后页面自动刷新：轻量轮询列表和分组指纹，变了才重载
   var lastListFingerprint = '';
   var lastGroupFingerprint = '';
   function listFingerprint(list) {
@@ -1049,7 +1049,7 @@
           + '<button class="edit-btn" data-id="' + escHtml(s.id) + '">编辑</button>'
           + '<button class="retag-btn" data-id="' + escHtml(s.id) + '">识图</button>'
           + '<button class="group-btn" data-id="' + escHtml(s.id) + '">分组</button>'
-          + '<button class="ball-pin-btn' + (ballPinned ? ' active' : '') + '" data-id="' + escHtml(s.id) + '" aria-pressed="' + (ballPinned ? 'true' : 'false') + '">' + (ballPinned ? '已加入悬浮球' : '加入悬浮球') + '</button>'
+          + '<button class="ball-pin-btn' + (ballPinned ? ' active' : '') + '" data-id="' + escHtml(s.id) + '" aria-pressed="' + (ballPinned ? 'true' : 'false') + '">' + (ballPinned ? '已加入纸飞机' : '加入纸飞机') + '</button>'
           + '<button class="delete-btn" data-id="' + escHtml(s.id) + '">删除</button>'
           + '</div></div>';
         card.querySelector('.edit-btn').onclick = function (e) { e.stopPropagation(); openEditor(s); };
@@ -1564,7 +1564,7 @@
     { id: 'preference', label: '偏好培养' },
     { id: 'style', label: '学我说话' },
     { id: 'dialect', label: '方言配置' },
-    { id: 'interface', label: '界面与悬浮球' },
+    { id: 'interface', label: '界面与纸飞机' },
     { id: 'groups', label: '图库分组' },
   ];
   function getExportConfig() {
@@ -2085,7 +2085,7 @@
     } catch (e) {
       statusEl.textContent = '状态读取失败';
       var toggle = $('ball-toggle-top');
-      if (toggle) toggle.title = '悬浮球状态读取失败：' + (e.message || '请稍后再试');
+      if (toggle) toggle.title = '纸飞机状态读取失败：' + (e.message || '请稍后再试');
     }
   }
 
@@ -2100,10 +2100,10 @@
     if (switchEl) switchEl.classList.toggle('on', running);
     if (running) {
       statusEl.textContent = data.connected ? '已开启' : '连接中…';
-      toggle.title = '关闭桌面纸飞机悬浮球；右键可关闭';
+      toggle.title = '关闭桌面纸飞机；右键可关闭';
     } else {
       statusEl.textContent = data && (data.error || data.dependencyError) ? (data.error || data.dependencyError) : '未开启';
-      toggle.title = '开启桌面纸飞机悬浮球；右键可关闭';
+      toggle.title = '开启桌面纸飞机；右键可关闭';
     }
   }
 
@@ -2111,7 +2111,7 @@
     document.querySelectorAll('.ball-pin-btn[data-id]').forEach(function (button) {
       var id = button.getAttribute('data-id');
       var pinned = ballPinnedIds.has(id);
-      button.textContent = pinned ? '已加入悬浮球' : '加入悬浮球';
+      button.textContent = pinned ? '已加入纸飞机' : '加入纸飞机';
       button.classList.toggle('active', pinned);
       button.setAttribute('aria-pressed', pinned ? 'true' : 'false');
     });
@@ -2132,10 +2132,10 @@
       });
       var result = await resp.json();
       if (!result.ok) throw new Error(result.error || '操作失败');
-      toast(action === 'start' ? '悬浮球已启动' : '悬浮球已停止');
+      toast(action === 'start' ? '纸飞机已启动' : '纸飞机已停止');
       await loadBallState();
     } catch (e) {
-      toast('悬浮球操作失败：' + (e.message || '未知错误'), true);
+      toast('纸飞机操作失败：' + (e.message || '未知错误'), true);
       await loadBallState();
     } finally {
       button.disabled = false;
@@ -2157,7 +2157,7 @@
       else if (pinned) ballPinnedIds.add(id);
       else ballPinnedIds.delete(id);
       updateBallPinButtons();
-      toast(pinned ? '已加入悬浮球' : '已从悬浮球移除');
+      toast(pinned ? '已加入纸飞机' : '已从纸飞机移除');
     } catch (e) {
       updateBallPinButtons();
       toast('保存失败：' + (e.message || '未知错误'), true);
@@ -2171,7 +2171,7 @@
     if (id) setBallPin(id, !ballPinnedIds.has(id), button);
   }
 
-  // ─── 打开插件页面自动启动悬浮球（半自动：手动关过则本次不再弹）───
+  // ─── 打开插件页面自动启动纸飞机（半自动：手动关过则本次不再弹）───
   async function autoBootBall() {
     var st;
     try {
@@ -2181,7 +2181,7 @@
     if (st.running) return; // 已经在跑不重复启动
     if (st.dismissed) return; // 上次手动关过：本次打开页面不弹
     if (!st.pyQtOk) {
-      toast('悬浮球需要 Python + PyQt6，当前环境还不能加载它', true);
+      toast('纸飞机需要 Python + PyQt6，当前环境还不能加载它', true);
       return;
     }
     toast('正在启动纸飞机…');
@@ -2194,17 +2194,17 @@
         toast('纸飞机起飞啦 ✈');
         await loadBallState();
       } else {
-        toast((start && start.error) || '悬浮球启动失败', true);
+        toast((start && start.error) || '纸飞机启动失败', true);
         await loadBallState();
       }
     } catch (e) {
-      toast('悬浮球启动失败', true);
+      toast('纸飞机启动失败', true);
       await loadBallState();
     }
   }
 
   // ─── 纸飞机说明（2026-10-17）───
-  // 新装用户不知道悬浮球能干什么，而且打开页面不再自动起飞，
+  // 新装用户不知道纸飞机能干什么，而且打开页面不再自动起飞，
   // 所以在开关旁边放一个「?」入口，点开是一张说明卡。
   function installBallHelp() {
     var anchor = $('ball-status-top');
@@ -2267,7 +2267,7 @@
       + '</div>'
       + '<div class="bh-body">'
       + '<div class="bh-item"><span class="bh-ico">' + pic + '</span><div><h3 class="bh-h">拖图入库</h3><p class="bh-p">把图片直接拖到纸飞机上，它会自己识图、打标签、收进图库，不用先打开这个页面。</p></div></div>'
-      + '<div class="bh-item"><span class="bh-ico pink">' + send + '</span><div><h3 class="bh-h">随手发图</h3><p class="bh-p">在图库里点「加入悬浮球」，把常用的图钉上去；聊天时点一下就能发给伙伴。</p></div></div>'
+      + '<div class="bh-item"><span class="bh-ico pink">' + send + '</span><div><h3 class="bh-h">随手发图</h3><p class="bh-p">在图库里点「加入纸飞机」，把常用的图钉上去；聊天时点一下就能发给伙伴。</p></div></div>'
       + '<div class="bh-item"><span class="bh-ico sand">' + power + '</span><div><h3 class="bh-h">起飞与降落</h3><p class="bh-p">首页开关控制它出现或收起，右键纸飞机也能关。需要本机装好 Python 和 PyQt6。</p></div></div>'
       + '</div>'
       + '<div class="bh-note">打开页面不会再自动起飞，想用的时候点一下开关就好。</div>'
@@ -2536,7 +2536,7 @@
       $('embedding-custom-key').value = cfg.customApiKey ? '********' : '';
       $('embedding-custom-model').value = cfg.customModel || '';
       $('embedding-custom-dimensions').value = cfg.customDimensions || '';
-      // v0.33.29 - 悬浮球识图入库自动向量开关
+      // v0.33.29 - 纸飞机识图入库自动向量开关
       var autoVec = $('embedding-auto-vector');
       if (autoVec) autoVec.checked = cfg.autoVectorOnSave !== false;
     } catch (e) { console.warn('[embed cfg] load err:', e); }
@@ -6358,7 +6358,7 @@ function formatUserstyleTime(iso) {
     checkBatchTasks();
     updateModelGuide();
     updateUploadBtnState();
-    installBallHelp(); // 2026-10-17 - 打开页面不再自动起飞悬浮球，只挂一个说明入口
+    installBallHelp(); // 2026-10-17 - 打开页面不再自动起飞纸飞机，只挂一个说明入口
 
     // v0.34.18 - 导航：首页入口点击（主卡 / 右侧入口 / 底部提示），支持键盘 Enter/Space
     document.querySelectorAll('.home-hero[data-goto], .home-entry[data-goto], .home-preference-tip[data-goto]').forEach(function (card) {
@@ -6713,7 +6713,7 @@ function formatUserstyleTime(iso) {
     // v0.25.1 - 角标定时刷新：识别时切去聊天页，回来角标状态也是最新的
     setInterval(function () { checkBatchTasks(); }, 5000);
 
-    // v0.33.37 - 悬浮球/其他进程入库后图库自动刷新（列表本身是元数据，轻量轮询；变了才重绘，不打断操作）
+    // v0.33.37 - 纸飞机/其他进程入库后图库自动刷新（列表本身是元数据，轻量轮询；变了才重绘，不打断操作）
     setInterval(async function () {
       try {
         var resp = await apiFetch(withAuth(API + '/api/list'));
