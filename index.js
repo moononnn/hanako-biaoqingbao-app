@@ -408,12 +408,16 @@ export default defineApp(async (sdk) => {
   try {
     const apiRoutes = (await import("./server/api.js")).default;
     const boot = await import("./server/boot.js");
+    const { createStickerInputPanel } = await import("./lib/sticker-input-panel.js");
+    const stickerInputPanel = createStickerInputPanel(sdk);
+    await stickerInputPanel.registerTool();
     // ⚠ 这个 await 不能省：宿主可能把注册回调延后执行（SDK 会等 registration.ready 回执，
     //   见 sdk/app-contract/server-client.js）。不 await 的话，下面那步 tagged_at 回填
     //   就可能抢在迁移之前落盘，顺序保证落空（2026-10-11 发布前交叉审查指出）。
     await sdk.routes.register((app) => {
       apiRoutes(app, sdk);
       registerMessageCardRoutes(app, sdk.dataDir);
+      stickerInputPanel.registerRoutes(app);
       // 页面启动数据：App 版页面是静态的，改由页面自己来取（替代老版的服务端注入）
       app.get("/api/boot", (c) => c.json({ ok: true, data: boot.buildBootData() }));
       /* #release-strip-start 构建发布包时这段会被删掉，见 scripts/build-release.mjs */
@@ -471,6 +475,23 @@ export default defineApp(async (sdk) => {
     record(`tagged-at 回填 ${filled} 条`);
   } catch (e) {
     record(`tagged-at 回填失败 ${e?.code || ""} ${e?.message || e}`);
+  }
+
+  // ── 融合服务（风铃 × 纸飞机）──
+  //   闲不住的协调器要认这颗球，得先能问出「在不在跑、在屏幕哪儿」。
+  //   注册失败就退化成单侧，纸飞机自己照常跑，不影响别的功能。
+  try {
+    const ballMod = await import("./lib/ball.js");
+    const { registerFusionService } = await import("./lib/fusion-service.js");
+    const ballCtx = { dataDir: sdk.dataDir, log: sdk.logger };
+    await registerFusionService({
+      sdk,
+      start: () => ballMod.startBall(ballCtx),
+      stop: () => ballMod.stopBall(),
+      state: () => ballMod.getBallState(),
+    });
+  } catch (e) {
+    record(`fusion-service 失败 ${e?.code || ""} ${e?.message || e}`);
   }
 
   await sdk.logger.info("biaoqingbao-app ready");
