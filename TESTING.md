@@ -1,5 +1,106 @@
 # 自动测试
 
+## 2026-10-20 发布前全量（v0.5.0 候选）
+
+`node --test --test-concurrency=1 "tests/*.test.mjs"`：**398 项通过，0 失败**（24.2s）。`python -B tests/test_ball_target.py`（1 项，offscreen）与 `python -B tests/test_ball_wait_state.py`（1 项）均 OK，未写入宿主或真实数据，无 `.pyc` 残留。改动相关的 8 个 JS（`index.js`、`lib/ball.js`、`lib/sticker-input-panel.js`、`lib/sticker-order.js`、`lib/fusion-service.js`、`ui/assets/sticker-compose.js`、`sticker-preview.js`、`sticker-reorder.js`）语法检查通过；`python/ball_app.py` 内存 compile 通过；`git diff --check` 无空白错误。
+
+本轮收尾范围为文档与版本：README 新增「🪄 输入栏里的表情包按钮」一节（含截图 `assets/release-screenshots/sticker-input-panel.jpg`）、安装权限清单补 `app/input.status` / `app/input.panels` 一行、第一次使用新增一步并顺延编号；`manifest.version` 定为 `0.5.0`（发布候选）。README 文字内容经本人确认后落地，简介未动。未调用真实模型、未代发消息、未改真实图库；宿主实机视觉与图文实收以本人先前验收的截图为准。
+
+## 2026-10-20 输入栏小魔杖入口（本地）
+
+仅修改 manifest inputStatus 的文字和悬停提示。JSON 解析及定向断言通过：text 为 🪄、title/tooltip 保留表情包、工具绑定不变、版本仍为 0.4.1；差异格式检查通过。不跑无关业务测试；宿主 emoji 实际显示待本人验收。
+
+## 2026-10-20 移除多余管理模式（本地）
+
+`node --test --test-name-pattern="UI contract|UI right click" tests/sticker-input-panel.test.mjs` 定向 2 项通过；相关 JS 语法及差异格式检查通过。断言无管理节点、事件绑定及状态变量，保留右键标题/删除入口；模拟初始化、右键删除确认及拖拽提交同测通过。未删除真实图片或数据，未跑全量，宿主视觉待重新打开面板验收。
+
+## 2026-10-20 标题编辑开头显示（本地）
+
+`node --test --test-name-pattern="right-click title editor" tests/sticker-input-panel.test.mjs` 定向 1 项通过。模拟长标题聚焦时光标在末尾且横向偏移 160px，验证打开后 selectionStart/End 均为 0、scrollLeft 为 0，标题保持完整；保存及失败保留断言同测通过。相关 JS 语法与差异格式检查通过；宿主视觉待重新打开弹框验收，未全量、未调用模型、未修改真实标题。
+
+## 2026-10-20 右键修改标题与标题同步（本地，版本保持 0.4.1）
+
+`node --test --test-concurrency=1 tests/sticker-input-panel.test.mjs tests/sticker-preview.test.mjs`：**30 项通过，0 失败**；两份相关 JS/MJS 语法、Python 内存 compile 与 `git diff --check` 通过。隔离提取 Python `_on_pinned_polled` 的 4 条回调检查通过：同 ID 同标题不刷新、同 ID 改标题刷新、过期结果忽略、忙碌时忽略，不导入/启动 PyQt，不产 pyc。
+
+新增用例验证右键标题编辑器预填、空标题拦截、只发送主页同款 `{action:'update', id, description}`、失败保留弹窗/输入/重试按钮、确认成功才关闭、刷新显示新标题且不改其他标签。最初一次测试中模拟 JSON 响应错误共用同一对象引用，修正为真实响应一样的独立副本后通过；没有为通过测试改弱业务断言。独立只读复核无阻断。
+
+保存复用 `server/api.js` 现有 update 写队列、元数据持久化及 `upsertTeachingSample` 异步链，没有新增后台写入通道。注意：现有教学需要 embedding 成功才保存教学样本；标题保存成功不等于教学已完成，UI 只提示“标题已保存”。未实际调用教学/识图模型，未改真实图库或发送消息，未跑全量；真实宿主的弹框视觉和新一轮识图命中效果尚未验收。纸飞机同步现在也比对标题，取代前一轮“ID 不变不检测描述”的限制。
+
+## 2026-10-20 右键整理与双入口手动排序（本地，版本保持 0.4.1）
+
+本轮按明确选择更新排序规则：我的图集/纸飞机改为共享手动顺序，新加入放最前；从图库添加继续按入库时间降序。此前本日时间排序验收保留为历史记录，不代表本轮图集仍锁定时间顺序。
+
+```powershell
+node --test --test-concurrency=1 tests/sticker-input-panel.test.mjs tests/sticker-order.test.mjs tests/sticker-preview.test.mjs
+node --check lib/ball.js
+node --check lib/sticker-input-panel.js
+node --check ui/assets/sticker-compose.js
+node --check ui/assets/sticker-reorder.js
+git diff --check
+```
+
+定向 **34 项通过，0 失败**，4 份 JS 语法检查与差异格式检查通过。`python/ball_app.py` 内存 compile 通过，不生成 pyc；另有隔离纯 Python 回调验证通过（未启动 GUI）。涵盖右键菜单打开、删原图先确认且取消不删除、拖拽提交完整顺序、向前/向后移动和无效落点、新增置前与重复加入不移位、两入口读写共用顺序、缺成员/重复成员/无效票据拒绝，及发送、草稿、预览回归。
+
+纸飞机可见时每 8 秒仅比对图集 ID 顺序，未变不拉图片；隐藏/拖拽/排序保存/发送期间不刷新，过期读取不覆盖新排序，仍存在的选中图保持选中。该同步不检测 ID 未变的描述更新。未触碰真实图库内容，未代发消息、未调用模型、未跑全量；真实宿主右键/拖动及两端可见联动仍待本人验收。
+
+## 2026-10-20 图文分开发送、成功清理与紧凑底栏（本地，版本保持 0.4.1）
+
+反馈基线：输入框文字显示在图卡内，已发送内容在后续重新打开时仍残留，底栏偏高且关闭入口重复。原发送处理用可见性 epoch 过滤成功回执，收起/重开后可能直接跳过清理；此旧版未另做宿主实机复现，不用修复后通过倒推原宿主现象。
+
+```powershell
+node --test --test-concurrency=1 tests/sticker-input-panel.test.mjs tests/ball-message-card.test.mjs tests/sticker-preview.test.mjs tests/sticker-order.test.mjs
+node --check lib/sticker-input-panel.js
+node --check ui/assets/sticker-compose.js
+node --check tests/sticker-input-panel.test.mjs
+git diff --check
+```
+
+本次定向 **49 项通过，0 失败**，3 份 JS/MJS 语法及差异格式检查通过。覆盖图卡无配文/独立普通文字消息、纯图只由最后一张触发、文字明确拒收只重试文字、文字超时不重投、成功期间可见性变化仍清空、迟到回执不清另一票据草稿、重挂核对完成态后清除已发图文、失败保持草稿，以及原图片投递、排序与悬停回归。独立只读审查未发现阻断。
+
+视觉改动：输入框与发送按钮固定为 40px 高，文本仍可换行并在框内滚动；删除 HTML 的右上角收起节点和对应 JS 绑定，保留宿主关闭入口。仅做相关静态检查，尚未做本轮宿主实机视觉与图文实收验收；未代发消息、未调用真实模型、未跑全量。已发布的历史图卡不改写。
+
+## 2026-10-20 图集统一新到旧（本地，版本保持 0.4.1）
+
+`node --test --test-concurrency=1 tests/sticker-order.test.mjs tests/sticker-input-panel.test.mjs`：**22 项通过，0 失败**。4 份改动相关 JS/MJS 语法检查通过；`python/ball_app.py` 使用内存 `compile` 检查通过，不生成 pyc；`git diff --check` 通过。
+
+覆盖入库时间降序而非识图时间、缺失/非法时间放后、同时间稳定排序、数值时间、源数组/图库不被排序写回、面板图库和快捷图集不随原 pinnedIds 顺序，以及纸飞机两条列表路由共用排序器/界面不再绑定拖拽改序的静态契约。纸飞机真实 PyQt 交互与打开后的显示尚待本人验收；未跑全量、未调用真实模型、未迁移或改写真实图库。现有手动排序数据保留，只不再作为这些发送入口的展示顺序。
+
+## 2026-10-20 缩略图裁切修复与悬停预览（本地，版本保持 0.4.1）
+
+基线：连续滚动版本未设置固有行高，100 张图的隔离浏览器页面中，图片约 139px 高而格子仅约 4.8px，整库被压入容器。按同场景将自动行改为 max-content、格子保留内容高度后，格子约 169.5px，图库产生正常滚动。该复现使用测试图片与当前 CSS，不读取真实图库。
+
+```powershell
+node --test --test-concurrency=1 tests/sticker-preview.test.mjs tests/sticker-input-panel.test.mjs
+node --check ui/assets/sticker-preview.js
+node --check ui/assets/sticker-compose.js
+node --check tests/sticker-preview.test.mjs
+git diff --check
+```
+
+定向 **22 项通过，0 失败**，3 份 JS/MJS 语法检查及差异格式检查通过。新增 5 项预览回归覆盖宽窄/上下左右边界、延迟前移开不加载、迟到旧图片不覆盖新图片、收起/触屏/零尺寸视图，以及固有行高与完整缩放契约。既有 17 项面板用例一并通过。
+
+另外在真实浏览器引擎的独立测试 iframe 测量：636×476 时格子约 99.9px、图片约 69.4px，图库可滚动且发送区位置不随滚动变化；316×476 时格子约 88.5px、图片约 58px，280×320 的预览完整位于视口内，图片加载完成。该验证不等于 Hana 宿主端到端验收；没有代发消息、真实模型调用或全量测试。正式重新加载后，实际面板仍需本人反馈。
+
+## 2026-10-20 图库连续滚动（本地优化，版本保持 0.4.1）
+
+`node --test tests/sticker-input-panel.test.mjs`：**17 项通过，0 失败**；页面 JS 语法与 `git diff --check` 通过。扩充现有 DOM 执行回归，覆盖 60 张不分页、未进入可视区不请求图片、进入可视区才读取像素、输入文字保留滚动位置及既有失败草稿保护；图片可见性使用模拟 IntersectionObserver，不替代真实宿主滚动与布局验收。仅改 UI/定向测试/技术文档，未跑全量、未代发消息、未调用真实模型。原生 inputStatus 的宿主校验仍仅接受 check/pin/sync，不支持自画图片，按钮保持原样。
+
+## 2026-10-20 输入栏表情发送面板（本地开发，版本保持 0.4.1）
+
+```powershell
+node --test --test-concurrency=1 tests/sticker-input-panel.test.mjs tests/ball-message-card.test.mjs
+node --check index.js
+node --check lib/ball.js
+node --check lib/sticker-input-panel.js
+node --check ui/assets/sticker-compose.js
+node --check tests/sticker-input-panel.test.mjs
+git diff --check
+```
+
+定向 **34 项通过，0 失败**（新面板 17 项、既有图卡 17 项）；5 份 JS/MJS 语法检查及差异格式检查通过。新用例覆盖参数边界、仅最后一图触发回复、缺图预检、部分失败重试不重复前图、未知投递不盲重放、固定会话/sessionRef 编号、重复打开复用绑定、超过 100 条仍能发送并保留旧请求防重、纯文字 accepted 回执、共享 pinned 图集、失败保留正文、临时解绑/重挂恢复草稿。DOM 执行测试使用轻量模拟元素和模拟 SDK，不能代替真实 WebView 验收。
+
+独立只读审查指出的重复打开丢草稿、会话编号形状及请求容量问题已修；迟到回执增加绑定代数隔离。未跑全量、未调用真实模型/API、未修改真实图库或代发消息。正式重新加载入口返回新增权限需本人审批：`app/input.status` / `app/input.panels`；因此新面板尚未确认加载生效，真实宿主显示、窄屏及纸飞机跨端刷新/图文实收待验收。现有 host=on、agent=on 仅说明原应用启用，不能当新功能加载证据。未修改版本、README、简介，未 commit/push/发布。
+
 ## 2026-10-18 Hana 1.1.24-beta 回复内图卡恢复（本地，验证时版本 0.4.0，发布定版 0.4.1）
 
 ```powershell
