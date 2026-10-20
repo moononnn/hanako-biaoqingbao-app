@@ -1,5 +1,20 @@
 # 自动测试
 
+## 2026-10-21 审包跟进项（本地，版本保持 0.5.0）
+
+`node --test --test-concurrency=1 "tests/*.test.mjs"`：**400 项通过，0 失败**（23.8s，比上版多 2 项）。`py -B tests/test_ball_target.py` 与 `py -B tests/test_ball_wait_state.py` 各 1 项 OK（offscreen，无 pyc 残留）。改动文件 4 个 JS/Python 语法与内存编译通过，`git diff --check` 无空白错误。
+
+本轮对应星眠 v0.5.0 审包的四条非阻断跟进：
+
+- 新增「没有 crypto.randomUUID 时也能报价」用例：vm 上下文里给空 crypto 对象，点发送后请求编号仍过服务端格式校验，草稿清空、按钮回到「发送」而不卡在处理中；另加静态断言，禁止再出现裸调 `crypto.randomUUID()`。
+- 新增「重启后文字进度仍生效」用例：已接纳（accepted）值同一编号重试不再调 bus；不确定（unknown）值重启后仍拦住重复发送。
+- `server/api.js` 删除原图失败改为写 `sticker-delete.log` 并在回包带 warning；静态断言限制日志名必须存在。
+- `python/ball_app.py` 去掉 `_bridge_serial` 全局串行锁与它的包装函数，保留写锁与按 id 分发；内存编译通过。
+
+测试隔离顺手修了一处：`harness()` 以前和其他用例共用同一个临时根目录，落盘进度加入后旧用例会互相污染，现改为每个 harness 单独建目录。
+
+未做：没装宿主、没跑真实面板与纸飞机交互、没调模型；宿主上的实际视觉与延迟改善待本人复验。
+
 ## 2026-10-20 发布前全量（v0.5.0 候选）
 
 `node --test --test-concurrency=1 "tests/*.test.mjs"`：**398 项通过，0 失败**（24.2s）。`python -B tests/test_ball_target.py`（1 项，offscreen）与 `python -B tests/test_ball_wait_state.py`（1 项）均 OK，未写入宿主或真实数据，无 `.pyc` 残留。改动相关的 8 个 JS（`index.js`、`lib/ball.js`、`lib/sticker-input-panel.js`、`lib/sticker-order.js`、`lib/fusion-service.js`、`ui/assets/sticker-compose.js`、`sticker-preview.js`、`sticker-reorder.js`）语法检查通过；`python/ball_app.py` 内存 compile 通过；`git diff --check` 无空白错误。

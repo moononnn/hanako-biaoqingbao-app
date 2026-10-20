@@ -1307,8 +1307,13 @@ export default async function registerRoutes(app, ctx) {
       const idx = meta.findIndex(s => s.id === id);
       if (idx === -1) return json({ ok: false, error: '未找到' });
       const filePath = safeStickerPath(STICKERS_DIR, meta[idx].file);
+      let orphanFile = '';
       if (filePath) {
-        try { fs.unlinkSync(filePath); } catch {}
+        try { fs.unlinkSync(filePath); } catch (error) {
+          // 删不掉就留个痕：以前这里的空 catch 会让用户目录里多出一张看不见的孤儿图。
+          orphanFile = filePath;
+          try { appendBoundedLog(path.join(DATA_DIR, 'sticker-delete.log'), new Date().toISOString() + ' | 删除原图失败，留下孤儿文件：' + filePath + ' | ' + (error?.message || error) + '\n'); } catch {}
+        }
       }
       meta.splice(idx, 1); writeMeta(meta);
       // v0.34.35 - 删图同步注销指纹，否则删掉的那张图会一直把新图误判成重复
@@ -1363,7 +1368,7 @@ export default async function registerRoutes(app, ctx) {
       try { await removeStickerRecentMatches({ dataDir: DATA_DIR, stickerId: id }); } catch {}
 
       const msg = cleanedRefs > 0 ? `已删除（清理了 ${cleanedRefs} 条偏好引用）` : '已删除';
-      return json({ ok: true, message: msg, cleanedReferences: cleanedRefs });
+      return json({ ok: true, message: msg, cleanedReferences: cleanedRefs, ...(orphanFile ? { warning: '图库记录已删除，但原文件未能删掉，可能在贴图目录里留下一个孤儿文件（已记日志）' } : {}) });
       });
     }
 

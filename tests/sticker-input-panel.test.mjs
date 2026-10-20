@@ -86,7 +86,7 @@ test('timeout stays unknown and cannot blindly replay images', async t => {
 });
 function harness() {
   const routes = new Map(); let tool, shown; let calls = 0;
-  const sdk = { dataDir: root, tools: { register: async value => { tool = value; } }, userInteraction: {
+  const sdk = { dataDir: fs.mkdtempSync(path.join(root, 'panel-')), tools: { register: async value => { tool = value; } }, userInteraction: {
     show: async value => { shown = value; return { panelId: 'panel' }; }, dismiss: async () => {},
   }, bus: { request: async (verb, body) => {
     if (verb === 'session:get') return { session: { sessionRef: { id: 'sess_bound-session' }, id: 'internal-uuid' } };
@@ -225,13 +225,17 @@ test('UI contract uses SDK binding, safe DOM, retained failure draft and explici
   assert.ok(!html.includes('id="manage"')); assert.ok(!ui.includes("$('manage')")); assert.ok(!ui.includes('managing'));
   assert.ok(html.includes('id="context-delete"') && html.includes('id="context-title"'));
   assert.ok(!ui.includes('.innerHTML')); assert.match(ui, /待发送内容已保留/);
+  assert.ok(!/requestId \|\|= crypto\.randomUUID\(\)/.test(ui), '发送编号不能直接调 randomUUID');
+  assert.match(ui, /typeof crypto !== 'undefined' && typeof crypto\.randomUUID === 'function'/);
+  const apiSource = fs.readFileSync(new URL('../server/api.js', import.meta.url), 'utf8');
+  assert.match(apiSource, /sticker-delete\.log/, '删原图失败要留下痕迹');
   assert.match(html, /id="delete-dialog"/); assert.match(html, /id="reset-dialog"/);
   const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
   assert.ok(manifest.capabilities.includes('app/input.status'));
   assert.equal(manifest.contributes.ui.inputStatus[0].toolName, 'stickers.open_compose');
 });
 
-function successUi({ stored = new Map(), send, completed = '', catalog = [], saveTitle } = {}) {
+function successUi({ stored = new Map(), send, completed = '', catalog = [], saveTitle, crypto: cryptoStub = { randomUUID: () => 'request-ui-success' } } = {}) {
   class Element {
     constructor() { this.value = ''; this.children = []; this.dataset = {}; this.scrollTop = 0; this.isConnected = true; this.style = {}; this.listeners = {}; this.classList = { toggle() {}, add() {}, remove() {} }; }
     append(...items) { this.children.push(...items); } replaceChildren(...items) { this.children = items; }
@@ -249,9 +253,35 @@ function successUi({ stored = new Map(), send, completed = '', catalog = [], sav
     return { ok: true, json: async () => ({ ok: true, data: JSON.parse(JSON.stringify(catalog)), pinnedIds: [...pins], completedRequestId: completed }), blob: async () => ({}) };
   } } };
   const source = fs.readFileSync(new URL('../ui/assets/sticker-compose.js', import.meta.url), 'utf8').replace("import { hana } from './sdk.js';", '').replace("import { createStickerPreview } from './sticker-preview.js';", '').replace("import { moveSticker } from './sticker-reorder.js';", '');
-  vm.runInNewContext(source, { document, hana, createStickerPreview: () => ({ bind() {}, hide() {}, dispose() {} }), moveSticker, sessionStorage: { setItem: (k, v) => stored.set(k, v), getItem: k => stored.get(k), removeItem: k => stored.delete(k) }, window: { innerWidth: 640, innerHeight: 480, addEventListener() {} }, crypto: { randomUUID: () => 'request-ui-success' }, setInterval: () => 0, clearInterval() {}, queueMicrotask, URL: { createObjectURL: () => 'blob:mock', revokeObjectURL() {} } });
+  vm.runInNewContext(source, { document, hana, createStickerPreview: () => ({ bind() {}, hide() {}, dispose() {} }), moveSticker, sessionStorage: { setItem: (k, v) => stored.set(k, v), getItem: k => stored.get(k), removeItem: k => stored.delete(k) }, window: { innerWidth: 640, innerHeight: 480, addEventListener() {} }, crypto: cryptoStub, setInterval: () => 0, clearInterval() {}, queueMicrotask, URL: { createObjectURL: () => 'blob:mock', revokeObjectURL() {} } });
   return { get: id => document.getElementById(id), context: value => context(value), stored, requests };
 }
+test('fallback request id when the host page has no crypto.randomUUID', async () => {
+  const ui = successUi({ crypto: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  ui.get('text').value = '没有随机数也要能发'; ui.get('text').oninput();
+  await ui.get('send').onclick();
+  const sent = ui.requests.find(request => request.route.includes('/send'));
+  assert.match(sent.body.requestId, /^[a-zA-Z0-9_-]{8,100}$/, '退回来的编号要能过服务端校验');
+  assert.equal(ui.get('text').value, '', '发送成功后清空草稿');
+  assert.equal(ui.get('send').textContent, '发送', '按钮不能卡在处理中');
+});
+test('text progress survives a restart: accepted is not resent, unknown still blocks', async t => {
+  const accepted = fixture(t);
+  accepted.sdk.bus.request = async (verb, body) => { accepted.payloads.push({ verb, body }); return { ok: true, accepted: true }; };
+  const input = valid({ stickerIds: [] });
+  assert.equal((await deliverCompose({ ...accepted, sessionId: 'bound', input })).ok, true);
+  assert.equal(accepted.payloads.length, 1);
+  assert.equal((await deliverCompose({ ...accepted, sessionId: 'bound', progress: {}, input })).ok, true);
+  assert.equal(accepted.payloads.length, 1, '已接纳的文字不会被重发');
+
+  const unknown = fixture(t);
+  unknown.sdk.bus.request = async () => { throw new Error('timeout'); };
+  await assert.rejects(deliverCompose({ ...unknown, sessionId: 'bound', input: valid({ stickerIds: [] }) }));
+  const blocked = await deliverCompose({ ...unknown, sessionId: 'bound', progress: {}, input: valid({ stickerIds: [] }) });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.error, /不要重复发送/);
+});
 test('UI right click opens actions, original deletion asks confirmation, drag submits full shared order', async () => {
   const ui = successUi({ catalog: ['a', 'b', 'c'].map(id => ({ id, description: id, keywords: [] })) });
   await new Promise(resolve => setImmediate(resolve));

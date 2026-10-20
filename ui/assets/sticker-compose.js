@@ -5,6 +5,16 @@ const $ = id => document.getElementById(id);
 let active = false;
 let ticket = '', catalog = [], pinnedIds = [], selected = [], mode = 'pinned', busy = false, requestId = '', generation = 0;
 let draggedId = '', contextId = '', editingTitleId = '', titleSaving = false;
+// 发送编号：宿主页面不一定是安全上下文，randomUUID 可能不存在或调用时抛错。
+// 退回到时间戳加随机数，格式仍要过服务端的 [a-zA-Z0-9_-]{8,100}。
+let fallbackRequestSeq = 0;
+function newRequestId() {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  } catch {}
+  fallbackRequestSeq += 1;
+  return 'req-' + Date.now().toString(36) + '-' + fallbackRequestSeq + '-' + Math.random().toString(36).slice(2, 10);
+}
 const images = new Map();
 const imageObserver = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
   for (const entry of entries) {
@@ -227,7 +237,7 @@ $('refresh').onclick = () => reload();
 $('send').onclick = async () => {
   if (busy || !active || !ticket) return;
   const sendingTicket = ticket;
-  busy = true; requestId ||= crypto.randomUUID();
+  busy = true; requestId ||= newRequestId();
   const sendingRequestId = requestId;
   let ownsReply = false;
   render(); note('正在发送…');

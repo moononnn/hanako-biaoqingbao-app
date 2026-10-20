@@ -184,8 +184,6 @@ _bridge_lock = threading.Lock()
 _bridge_cond = threading.Condition()
 _bridge_pending = {}
 _bridge_reader = None
-# 临时诊断：请求串行锁，验证并发收包假设后删除。
-_bridge_serial = threading.Lock()
 
 
 def _bridge_reader_loop():
@@ -233,7 +231,7 @@ def _ensure_bridge_reader():
 
 
 def _trace(text):
-    """临时诊断：崩溃排查用，定位完成后删除。"""
+    """诊断打点：写 stderr，出问题时好对时间线。"""
     try:
         sys.stderr.write("[表情包球] [trace] " + str(text) + "\n")
         sys.stderr.flush()
@@ -242,13 +240,12 @@ def _trace(text):
 
 
 def request_json(method, route, payload=None, timeout=10):
-    """经管道向 Node 侧请求（App 版）。返回与原来同样形状的 dict。"""
-    # 临时诊断：把管道请求排成一队，验证崩溃是否来自多线程并发收包。
-    with _bridge_serial:
-        return _request_json_serial(method, route, payload, timeout)
+    """经管道向 Node 侧请求（App 版）。返回与原来同样形状的 dict。
 
-
-def _request_json_serial(method, route, payload=None, timeout=10):
+    并发发送安全：写 stdout 有 _bridge_lock，收包按 id 在 _bridge_pending 里分发。
+    以前这里还套了一把全局串行锁（当初排查崩溃用的），它会把心跳和轮询排在一个
+    8 到 15 秒的请求后面，所以拿掉了。
+    """
     _trace(f"request_json 进入 {method} {route}")
     _ensure_bridge_reader()
     request_id = uuid.uuid4().hex
