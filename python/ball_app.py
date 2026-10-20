@@ -1881,6 +1881,13 @@ class BallPanel(QFrame):
         self.workers = []
         self._drag_state = None
         self._buttons_by_id = {}
+        self._items_seq = 0
+        self._items_loading = 0
+        self._pinned_polling = False
+        self._reorder_saving = False
+        self._pinned_timer = QTimer(self)
+        self._pinned_timer.setInterval(8000)
+        self._pinned_timer.timeout.connect(self._poll_pinned)
         # 面板自身拖动：拖动时纸飞机一起跟着走（保持相对位置）
         self._panel_drag = None
         self._panel_dragging = False
@@ -2689,7 +2696,41 @@ class BallPanel(QFrame):
             if widget:
                 widget.deleteLater()
 
+    def _items_blocked(self):
+        return self.busy or self._drag_state is not None or self._reorder_saving
+
+    def _poll_pinned(self):
+        if not self.isVisible() or self._items_blocked() or self._pinned_polling or self._items_loading:
+            return
+        self._pinned_polling = True
+        seq = self._items_seq
+        worker = BackgroundRequest(lambda: request_json("GET", "/pinned", timeout=8), self, "biaoqingbao-pinned-poll")
+        self.workers.append(worker)
+        worker.done.connect(lambda result, seq=seq: self._on_pinned_polled(result, seq))
+        worker.finished.connect(lambda w=worker: self._retire_worker(w))
+        worker.start()
+
+    def _on_pinned_polled(self, result, seq):
+        self._pinned_polling = False
+        if seq != self._items_seq or not self.isVisible() or self._items_blocked() or not result.get("ok"):
+            return
+        # 也比对标题，面板里纠正后纸飞机无需关开就能更新显示。
+        signature = lambda items: [(str(item.get("id")), item.get("description") or "") for item in items]
+        if signature(result.get("stickers") or []) != signature(self.items):
+            self.refresh()
+
+    def _on_items_loaded(self, result, seq):
+        self._items_loading -= 1
+        if seq != self._items_seq or not self.isVisible() or self._items_blocked():
+            return
+        self.apply_items(result)
+
     def refresh(self):
+        if self._items_blocked():
+            return
+        self._items_seq += 1
+        seq = self._items_seq
+        self._items_loading += 1
         # v0.33.45 - 先放「＋ 添加表情包」占位格，图集加载期间添加入口常驻，不空等
         self._ensure_add_cell_visible()
         if not self.items:
@@ -2697,7 +2738,7 @@ class BallPanel(QFrame):
             self.hint.show()
         worker = BackgroundRequest(self.load_items, self, "biaoqingbao-items")
         self.workers.append(worker)
-        worker.done.connect(self.apply_items)
+        worker.done.connect(lambda result, seq=seq: self._on_items_loaded(result, seq))
         worker.finished.connect(lambda w=worker: self._retire_worker(w))
         worker.start()
 
@@ -3100,6 +3141,7 @@ class BallPanel(QFrame):
             pixmap = QPixmap()
             if item.get("imageData"):
                 pixmap.loadFromData(item["imageData"])
+            # 两个入口共用已保存的图集顺序。
             button = StickerButton(item, pixmap, self.grid_host, on_context=self._open_sticker_context_menu, on_drag=self._on_sticker_drag)
             button.clicked.connect(lambda checked=False, sid=item.get("id"): self.select_sticker(sid))
             self._buttons_by_id[str(item.get("id"))] = button
@@ -3123,9 +3165,12 @@ class BallPanel(QFrame):
         super().showEvent(event)
         self.restore_panel_opacity()
         self._fade_poll_timer.start()
+        self._pinned_timer.start()
         self._set_all_movies(True)
 
     def hideEvent(self, event):
+        self._pinned_timer.stop()
+        self._items_seq += 1
         self._fade_poll_timer.stop()
         self.restore_panel_opacity()
         super().hideEvent(event)
@@ -3147,7 +3192,7 @@ class BallPanel(QFrame):
             self._drag_end(global_pos)
 
     def _drag_start(self, button, global_pos):
-        if self.busy or len(self.items) < 2:
+        if self._items_blocked() or len(self.items) < 2:
             return
         from_index = None
         for index, item in enumerate(self.items):
@@ -3156,6 +3201,8 @@ class BallPanel(QFrame):
                 break
         if from_index is None:
             return
+        # 拖拽开始即作废此前的读取，防止落下后旧顺序回包覆盖新顺序。
+        self._items_seq += 1
         pixmap = QPixmap()
         if button.item.get("imageData"):
             pixmap.loadFromData(button.item["imageData"])
@@ -3224,6 +3271,8 @@ class BallPanel(QFrame):
         self._destroy_drag_ghost(state.get("ghost"))
         if target == from_index:
             return
+        self._reorder_saving = True
+        self._items_seq += 1
         new_items = reorder_items(self.items, from_index, target)
         self.items = new_items
         self.apply_items({"ok": True, "items": new_items})
@@ -3239,6 +3288,8 @@ class BallPanel(QFrame):
         worker.start()
 
     def _on_reorder_saved(self, result):
+        self._reorder_saving = False
+        self._items_seq += 1
         if result.get("ok"):
             self.hint.setText("顺序已保存 ✓")
             self.hint.show()
