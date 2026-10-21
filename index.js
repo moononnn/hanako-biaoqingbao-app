@@ -411,6 +411,11 @@ export default defineApp(async (sdk) => {
     const { createStickerInputPanel } = await import("./lib/sticker-input-panel.js");
     const stickerInputPanel = createStickerInputPanel(sdk);
     await stickerInputPanel.registerTool();
+    // 输入栏那个按钮的显隐开关：宿主只给按会话覆盖，加载时先把已知会话盖一遍，新会话靠事件补。
+    try {
+      const { installInputButtonWatcher } = await import("./lib/input-button.js");
+      void installInputButtonWatcher(sdk).catch(() => {});
+    } catch (error) { record(`input-button 初始化失败 ${error?.message || error}`); }
     // ⚠ 这个 await 不能省：宿主可能把注册回调延后执行（SDK 会等 registration.ready 回执，
     //   见 sdk/app-contract/server-client.js）。不 await 的话，下面那步 tagged_at 回填
     //   就可能抢在迁移之前落盘，顺序保证落空（2026-10-11 发布前交叉审查指出）。

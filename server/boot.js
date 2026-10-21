@@ -67,6 +67,8 @@ export function buildBootData() {
       agentSelfNote: true,
       // v0.2.12：图库排序档位，新装/旧数据都落到「加入时间 新→旧」
       gallerySort: 'added_desc',
+      // 2026-10-21：聊天输入栏那个表情按钮的显隐开关，首页与后端共用同一份真值
+      inputButton: true,
     }),
     __DECISION_LOG__: readJson('decision-log.json', { version: 1, entries: [] }),
     __CONTEXT_FEEDBACK__: readContextFeedback({ dataDir: DATA_DIR }),

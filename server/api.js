@@ -106,6 +106,16 @@ import { appendBoundedLog } from '../lib/log-trim.js';
 import { isCodexVisionProvider } from '../lib/vision-codex.js';
 import { applyPreferenceFeedback, mutatePreferences, snapshotMapping, ensureUser } from '../lib/feedback.js';
 import { removeStickerExposure } from '../lib/exposure.js';
+import { syncInputButton, isInputButtonSyncPending } from '../lib/input-button.js';
+import { mergeDisplayConfig, displayConfigSwitchesDiffer } from '../lib/display-config-merge.js';
+
+// 输入栏按钮显隐的最近一次同步结果。
+// 保存接口改成「先回包、同步放后台」以后，页面要能问出同步到底成没成，
+// 所以结果存在这里，由 GET /api/display-config 一并带出去。
+let latestInputButtonSync = { ok: false, synced: 0, failed: 0, total: 0, reason: 'not-run', seq: 0 };
+// 请求序号：两个保存请求交叠时，只有最后一次的结果算数。
+// 没有它的话，旧的后台任务会在晚一步时把新结果盖掉，界面就会显示上一次的旧状态。
+let inputButtonSyncSeq = 0;
 import { removeStickerContextFeedback, readContextFeedback, removeContextFitEntry, applyContextFit } from '../lib/context-feedback.js';
 import { readAgentFitNotes, listAgentFitNotes, removeAgentFitEntry, removeStickerAgentFitNotes } from '../lib/agent-fit-notes.js';
 import { removeStickerRecentMatches } from '../lib/recent-match.js';
@@ -297,7 +307,13 @@ function mergeMigrationData(key, incoming) {
     return merged;
   }
   if (key === 'stickerGroups') return normalizeGroupStore(incoming);
-  // 模板、画像、修正反馈和显示/纸飞机配置是全局资产，迁移包作为来源机的完整快照覆盖当前值。
+  if (key === 'displayConfig') {
+    // 显示/纸飞机配置是全局资产，迁移包作为来源机的快照覆盖大部分字段；
+    // 但本机亲手拨过的两个总闸（输入栏表情按钮、伙伴配图自评）不随包走，
+    // 整份覆盖会把它们静默重置回默认值。见 lib/display-config-merge.js。
+    return mergeDisplayConfig(current, incoming);
+  }
+  // 模板、画像、修正反馈等其余全局资产，迁移包作为来源机的完整快照覆盖当前值。
   return incoming;
 }
 
@@ -1183,8 +1199,47 @@ export default async function registerRoutes(app, ctx) {
             migratedKeys.push(key);
           }
         }
+        // 导入可能动过显示配置。先记下本机导入前的值（要在提交之前读，提交后就读不到原值了）：
+        // 用来判断包里带的总闸和本机是不是不一样。
+        const displayConfigBefore = migrationData?.displayConfig
+          ? readJsonFile(path.join(DATA_DIR, 'display-config.json'), null)
+          : null;
+
         const committed = commitJsonTransaction(updates);
         if (!committed.ok) throw committed.error;
+
+        // 导入后把输入栏按钮重新盖一遍，让会话里的实际状态和文件对得上。
+        let inputButtonNote = '';
+        if (migrationData?.displayConfig) {
+          if (displayConfigSwitchesDiffer(displayConfigBefore, migrationData.displayConfig)) {
+            inputButtonNote = '，包里的输入栏按钮 / 伙伴配图自评设置与本机不同，已保留本机的';
+          }
+          // 不 await：重盖一遍要几秒到几十秒，导入不该被它按住。
+          // 接进序号仲裁：用户在导入后几秒内又改了开关时，这一轮就收手，
+          // 不能拿「导入时那个旧值」把用户刚改回去的状态盖掉。
+          const importSeq = inputButtonSyncSeq;
+          try {
+            const after = readJsonFile(path.join(DATA_DIR, 'display-config.json'), {});
+            // 开跑前先置为「在跑」：不然这几秒里首页状态字显示的还是上一次的旧结论，
+            // 那结论与本轮重盖无关。
+            latestInputButtonSync = { ok: false, synced: 0, failed: 0, total: 0, reason: 'pending', seq: importSeq };
+            void syncInputButton(ctx, after.inputButton !== false, () => importSeq !== inputButtonSyncSeq)
+              .then(result => {
+                // 结果也写回最近一次同步状态：只落在日志里的话，首页状态字看不到。
+                if (importSeq === inputButtonSyncSeq) {
+                  latestInputButtonSync = { ...result, seq: inputButtonSyncSeq };
+                }
+                try { ctx?.log?.info?.(`[biaoqingbao] 导入后重盖输入栏按钮：${result.ok ? 'ok' : 'fail'} ${result.synced}/${result.total}${result.failed ? ' 失败 ' + result.failed : ''}${result.reason ? ' ' + result.reason : ''}`); } catch {}
+              })
+              .catch(error => {
+                try { ctx?.log?.warn?.('[biaoqingbao] 导入后重盖输入栏按钮抛错:', error?.message || error); } catch {}
+              });
+            // 进行态的说法：同步是后台跑的，结果未知时说「已同步」就是撒谎。
+            inputButtonNote += '，输入栏按钮已开始按本机设置重新同步，结果见首页状态字';
+          } catch (error) {
+            inputButtonNote += '，输入栏按钮重同步失败：' + (error?.message || error);
+          }
+        }
 
         // v0.34.35 - 导入成功的图登记进指纹索引，供后续导入查重（索引不在事务内，失败不影响入库）
         try {
@@ -1236,8 +1291,9 @@ export default async function registerRoutes(app, ctx) {
             migratedKeys,
             migrationReport,
             teachingVectorsQueued,
+            inputButtonNote,
           },
-          message: `成功导入 ${imported.length} 张${restoredText}${migrationText}，跳过 ${skipped.length} 个文件`,
+          message: `成功导入 ${imported.length} 张${restoredText}${migrationText}${inputButtonNote}，跳过 ${skipped.length} 个文件`,
         });
         } catch (error) {
           for (const file of writtenFiles) {
@@ -1908,11 +1964,17 @@ export default async function registerRoutes(app, ctx) {
 // 两边不同步会被 tests/gallery-sort.test.mjs 的对齐断言挡住。
 const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'description', 'untagged_first', 'group'];
   app.get('/api/display-config', (c) => {
-    let cfg = { smallImageFit: true, sizeMode: 'auto', agentSelfNote: true, gallerySort: 'added_desc' };
+    let cfg = { smallImageFit: true, sizeMode: 'auto', agentSelfNote: true, gallerySort: 'added_desc', inputButton: true };
     try {
       cfg = { ...cfg, ...JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'display-config.json'), 'utf-8')) };
     } catch {}
-    return json({ ok: true, data: cfg });
+    // ⚠ 在跑的状态必须带 pending:true。
+    //   页面靠这个标记判断「还没完，再等等」；只给 reason:'pending' 的话，
+    //   前端第一次轮询就会把「还在跑」当成最终结果，界面立刻说「没盖上」。
+    const syncView = isInputButtonSyncPending(latestInputButtonSync)
+      ? { ...latestInputButtonSync, pending: true }
+      : latestInputButtonSync;
+    return json({ ok: true, data: { ...cfg, inputButton: cfg.inputButton !== false }, inputButtonSync: syncView });
   });
 
   // ═══ POST /api/display-config — 保存配图卡片显示配置 ═══
@@ -1934,9 +1996,36 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
         agentSelfNote: typeof body.agentSelfNote === 'boolean' ? body.agentSelfNote : (typeof old.agentSelfNote === 'boolean' ? old.agentSelfNote : true),
         // v0.2.12 - 图库排序档位：added_desc/added_asc/tagged_desc/description/untagged_first/group
         gallerySort: GALLERY_SORT_MODES.includes(body.gallerySort) ? body.gallerySort : (GALLERY_SORT_MODES.includes(old.gallerySort) ? old.gallerySort : 'added_desc'),
+        // 输入栏表情按钮显隐：宿主只给按会话覆盖，改完得把已知会话同步一遍
+        inputButton: typeof body.inputButton === 'boolean' ? body.inputButton : (typeof old.inputButton === 'boolean' ? old.inputButton : true),
       };
       atomicWriteJson(path.join(DATA_DIR, 'display-config.json'), cfg);
-      return json({ ok: true, data: cfg });
+      // 同步失败不抹掉保存：偏好已经落盘，下次启动会再盖一遍。
+      // ⚠ 这里必须传 ctx：registerRoutes 的第二个参数才是宿主给的 sdk 对象，
+      //   2026-10-21 曾误写成 sdk（作用域里没有这个标识符），ReferenceError 被空 catch 吞掉，
+      //   开关存进去了、按钮却一直不消失。
+      //
+      // 2026-10-21：同步不再挡回包。会话多的时候盖一遍要好几秒到几十秒，
+      // 页面干等着只会卡在「处理中」。现在先回包（pending），同步在后台跑，
+      // 结果写进 latestInputButtonSync，页面轮询 GET /api/display-config 取最终状态。
+      latestInputButtonSync = { ok: false, synced: 0, failed: 0, total: 0, reason: 'pending', seq: ++inputButtonSyncSeq };
+      const seq = latestInputButtonSync.seq;
+      void (async () => {
+        try {
+          const result = await syncInputButton(ctx, cfg.inputButton, () => seq !== inputButtonSyncSeq);
+          // 已经有更新的请求了，这次的结果作废：不许拿旧结果盖掉新状态。
+          if (seq !== inputButtonSyncSeq) return;
+          latestInputButtonSync = { ...result, seq };
+          try {
+            await ctx.logger?.info?.(`输入栏按钮显隐同步：${result.ok ? 'ok' : 'fail'} ${result.synced}/${result.total}${result.failed ? ` 失败 ${result.failed}` : ''}${result.truncated ? ` 截断 ${result.truncated}` : ''}${result.reason ? ' ' + result.reason : ''}`);
+          } catch {}
+        } catch (error) {
+          if (seq !== inputButtonSyncSeq) return;
+          latestInputButtonSync = { ok: false, synced: 0, failed: 0, total: 0, reason: 'sync-threw', error: String(error?.message || error), seq };
+          try { await ctx.logger?.warn?.('输入栏按钮显隐同步抛错：' + (error?.message || error)); } catch {}
+        }
+      })();
+      return json({ ok: true, data: cfg, inputButtonSync: { ...latestInputButtonSync, pending: true } });
     } catch (e) {
       return json({ ok: false, error: e.message }, 500);
     }

@@ -216,6 +216,7 @@
     var view = $('view-' + name);
     if (view) view.classList.remove('hidden');
     if (name === 'preferences') { syncSizeMode(); syncFitToggle(); syncFbToggle(); }
+    if (name === 'home') { renderInputButtonState(); }
     window.scrollTo(0, 0);
   }
 
@@ -260,6 +261,152 @@
     } catch (e) {
       t.classList.toggle('on', !next);
       toast('保存失败，网络开小差了', true);
+    }
+  }
+  // 输入栏表情按钮显隐：开关存 display-config，后端保存后会把已知会话同步一遍。
+  // 2026-10-21 从偏好设置页挑到首页，放在纸飞机开关旁边：这个开关是「聊天时随手调」的，
+  // 藏在设置里没人会去翻。状态一律从 window.__DISPLAY_CONFIG__ 读，两处共用同一份真值。
+  var inputButtonSyncSeq = 0;
+  function inputButtonEnabled() {
+    var cfg = window.__DISPLAY_CONFIG__ || {};
+    return cfg.inputButton !== false;
+  }
+  // 最近一次同步结果（后端带的）。没有它就不知道「保存了」到底有没有真盖到会话上。
+  function inputButtonSyncState() {
+    return window.__INPUT_BUTTON_SYNC__ || null;
+  }
+  function renderInputButtonState() {
+    var enabled = inputButtonEnabled();
+    var toggle = $('input-button-toggle-top');
+    var status = $('input-button-status-top');
+    if (toggle) {
+      toggle.classList.toggle('on', enabled);
+      toggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      var switchEl = toggle.querySelector('.ball-toggle-switch');
+      if (switchEl) switchEl.classList.toggle('on', enabled);
+      toggle.title = enabled
+        ? '关闭聊天输入栏里的表情包按钮；主页和纸飞机不受影响'
+        : '开启聊天输入栏里的表情包按钮；主页和纸飞机不受影响';
+    }
+    if (!status) return;
+    var sync = inputButtonSyncState();
+    var base = enabled ? '已开启' : '已关闭';
+    if (!sync) { status.textContent = base; return; }
+    // 「还在跑」的两种说法都要认：服务端给的是 pending 标记，
+    // 而在跑的那份状态里带的是 reason:'pending'。只认一个就会把「还在跑」当成最终结果。
+    if (sync.pending || sync.reason === 'pending') { status.textContent = '同步中…'; return; }
+    // 还没同步过（比如刚打开页面）不算“没盖上”，别一开始就吓人。
+    if (sync.reason === 'not-run') { status.textContent = base; return; }
+    // 被新的请求取代了：新一轮正在跑，不算“没盖上”。
+    if (sync.reason === 'superseded') { status.textContent = '同步中…'; return; }
+    // 盖成了但也有失败的，如实说「部分会话没盖上」，别拿一句「已关闭」糊过去。
+    if (sync.ok === false) { status.textContent = base + '（没盖上）'; return; }
+    if (sync.failed > 0 || sync.truncated > 0) { status.textContent = base + '（部分会话没盖上）'; return; }
+    status.textContent = base;
+    // 数字放悬停提示里：状态字那一格窄，写不下具体个数。
+    if (sync.total) {
+      status.title = '上次同步：盖成 ' + (sync.synced || 0) + '/' + sync.total
+        + (sync.failed ? '，失败 ' + sync.failed : '')
+        + (sync.truncated ? '，超出上限 ' + sync.truncated : '');
+    }
+  }
+  // 打开页面时问一次后端：这个开关上次同步到底成没成。
+  async function loadInputButtonSync() {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/display-config'));
+      var data = await resp.json();
+      if (!data || !data.ok) return;
+      if (data.data) window.__DISPLAY_CONFIG__ = data.data;
+      window.__INPUT_BUTTON_SYNC__ = data.inputButtonSync || null;
+      renderInputButtonState();
+    } catch (e) { /* 问不着就先用配置里的真值显示 */ }
+  }
+  // 后端把同步放到后台跑了，这里轮询结果。轮询到最终结果前不跟用户说「已完成」。
+  async function waitInputButtonSync(timeoutMs, seq) {
+    var deadline = Date.now() + (timeoutMs || 20000);
+    while (Date.now() < deadline) {
+      await new Promise(function (r) { setTimeout(r, 1000); });
+      try {
+        var resp = await apiFetch(withAuth(API + '/api/display-config'));
+        var data = await resp.json();
+        if (!data || !data.ok) continue;
+        var sync = data.inputButtonSync || null;
+        if (!sync || sync.pending || sync.reason === 'pending') continue;
+        // 用户在这期间又动了一次：这次结果作废，不写状态（否则旧结果会盖掉新状态）。
+        if (typeof seq === 'number' && seq !== inputButtonSyncSeq) return { stale: true };
+        if (data.data) window.__DISPLAY_CONFIG__ = data.data;
+        window.__INPUT_BUTTON_SYNC__ = sync;
+        renderInputButtonState();
+        return sync;
+      } catch (e) { /* 这一轮没问着就再问 */ }
+    }
+    return null;
+  }
+  async function toggleInputButtonTop() {
+    var toggle = $('input-button-toggle-top');
+    var status = $('input-button-status-top');
+    if (!toggle || toggle.disabled) return;
+    var next = !inputButtonEnabled();
+    // 序号：用户连点或者又切了一次时，旧的轮询结果不能盖掉新的操作。
+    var seq = ++inputButtonSyncSeq;
+    toggle.disabled = true;
+    if (status) status.textContent = '处理中…';
+    // 先按新状态上色，失败再回回去，保证点了就有反应
+    toggle.classList.toggle('on', next);
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/display-config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inputButton: next }),
+      });
+      var data = await resp.json();
+      if (!data || !data.ok) throw new Error((data && data.error) || '保存失败');
+      window.__DISPLAY_CONFIG__ = data.data;
+      var sync = data.inputButtonSync || {};
+      window.__INPUT_BUTTON_SYNC__ = sync;
+      renderInputButtonState();
+      // 偏好已落盘，聊天栏那边的显隐是另一回事：宿主只给按会话盖，可能没盖成。
+      // 没盖成就得说清楚，不能让「已隐藏」这句把没生效的事吞掉。
+      if (sync.pending) {
+        // 同步在后台跑，界面不干等。
+        toast('已保存，正在同步聊天栏的按钮…');
+        toggle.disabled = false;
+        var final = await waitInputButtonSync(20000, seq);
+        if (final && final.stale) return;
+        if (!final) {
+          toast('已保存，但同步结果还没回来；稍后看首页状态字', true);
+          return;
+        }
+        if (final.ok === false) {
+          toast(next
+            ? '已保存，但聊天栏的按钮没能同步显示：' + (final.error || final.reason || '未知原因')
+            : '已保存，但聊天栏的按钮暂时没藏住：' + (final.error || final.reason || '未知原因') + '；重开窗口或重启后会再盖一遍', true);
+        } else if (final.truncated > 0) {
+          toast('已保存，但有 ' + final.truncated + ' 个会话超出上限没盖到（已盖 ' + final.synced + '）', true);
+        } else if (final.failed > 0) {
+          toast('已保存，但有 ' + final.failed + ' 个会话没盖上（盖成 ' + final.synced + '/' + final.total + '）', true);
+        } else {
+          toast(next ? '已开启：聊天输入栏会出现表情包按钮' : '已关闭：聊天输入栏不再显示表情包按钮，纸飞机照旧');
+        }
+        return;
+      }
+      if (seq !== inputButtonSyncSeq) return;
+      if (sync.ok === false) {
+        toast(next
+          ? '已保存，但聊天栏的按钮没能同步显示：' + (sync.error || sync.reason || '未知原因')
+          : '已保存，但聊天栏的按钮暂时没藏住：' + (sync.error || sync.reason || '未知原因') + '；重开窗口或重启后会再盖一遍', true);
+      } else if (sync.truncated > 0) {
+        toast('已保存，但有 ' + sync.truncated + ' 个会话超出上限没盖到（已盖 ' + sync.synced + '）', true);
+      } else if (sync.failed > 0) {
+        toast('已保存，但有 ' + sync.failed + ' 个会话没盖上（盖成 ' + sync.synced + '/' + sync.total + '）', true);
+      } else {
+        toast(next ? '已开启：聊天输入栏会出现表情包按钮' : '已关闭：聊天输入栏不再显示表情包按钮，纸飞机照旧');
+      }
+    } catch (e) {
+      renderInputButtonState();
+      toast('输入栏按钮开关保存失败：' + (e.message || '未知错误'), true);
+    } finally {
+      toggle.disabled = false;
     }
   }
   // v0.24.0 - 小图自适应拨动开关（v0.33.78 恢复到偏好页，与档位选择器配合）
@@ -6354,6 +6501,8 @@ function formatUserstyleTime(iso) {
     loadStickers();
     loadGlobalAutoImageState();
     loadBallState();
+    renderInputButtonState();
+    loadInputButtonSync();
     loadSemanticIndexStatus();
     checkBatchTasks();
     updateModelGuide();
@@ -6453,6 +6602,9 @@ function formatUserstyleTime(iso) {
     if (autoImageToggleBtn) autoImageToggleBtn.addEventListener('click', toggleGlobalAutoImage);
     var ballToggleBtn = $('ball-toggle-top');
     if (ballToggleBtn) ballToggleBtn.addEventListener('click', toggleBall);
+    // 2026-10-21 - 输入栏表情按钮开关从偏好页挑到首页，跟纸飞机开关排在一行
+    var inputButtonTopBtn = $('input-button-toggle-top');
+    if (inputButtonTopBtn) inputButtonTopBtn.addEventListener('click', toggleInputButtonTop);
     // v0.19.5 - 检查更新按钮（v0.34.18 收进设置菜单）
     if ($('btn-check-update')) {
       $('btn-check-update').addEventListener('click', function () { closeHomeMenu(); checkUpdate(); });
@@ -6778,6 +6930,9 @@ function formatUserstyleTime(iso) {
       fbToggleEl.addEventListener('click', toggleFbButtons);
       syncFbToggle();
     }
+
+    // 偏好设置页：输入栏表情按钮开关已于 2026-10-21 挑到首页（上面那行），
+    // 这里不再留那一格，也就没有对应事件可挂。
 
     // v0.34.57 - 偏好设置页：伙伴配图自评开关 + 记录行上的移除按钮
     var agentSelfNoteEl = $('agent-self-note-toggle');
