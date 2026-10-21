@@ -11,6 +11,8 @@ const viewSource = fs.readFileSync(new URL('../ui/assets/message-card-view.js', 
   .replace('export function mountMessageCard', 'function mountMessageCard');
 const source = viewSource + '\nmountMessageCard({ showCaption: true });\n';
 const idA = 'a_' + 'a'.repeat(20);
+// 个别用例要改变 display-config 的回包（比如带上用户显示名），默认空。
+let displayConfigExtra = {};
 const idB = 'a_' + 'b'.repeat(20);
 const settle = () => new Promise(resolve => setTimeout(resolve, 5));
 
@@ -77,7 +79,7 @@ function ui(context, fetch, initialSearch = '', viewport = { width: 314, height:
       api: { fetch: async (route, init) => {
         // 显示配置与认不出记录时的现场上报都是卡片自己的前置/诊断请求，不计入「卡片数据请求」的断言。
         if (route === '/api/display-config') {
-          return { ok: true, json: async () => ({ ok: true, data: { sizeMode: 'auto', smallImageFit: true, showFeedbackButtons: true } }) };
+          return { ok: true, json: async () => ({ ok: true, data: { sizeMode: 'auto', smallImageFit: true, showFeedbackButtons: true }, ...displayConfigExtra }) };
         }
         if (route.startsWith('/api/message-card-context')) {
           debugNotes.push(decodeURIComponent((route.match(/note=([^&]*)/) || [])[1] || ''));
@@ -596,6 +598,16 @@ test('自己发的图：标题是「你丢了一张过来」，不套伙伴那�
   const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA));
   await settle();
   assert.equal(state.chromeSets[0].title, '你丢了一张过来');
+});
+test('自己发的图：有用户显示名时，标题换成「名字丢了一张过来」；名字过长或带引号只退回「你」', async () => {
+  displayConfigExtra = { userName: '玛儿' };
+  const named = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA));
+  await settle();
+  assert.equal(named.chromeSets[0].title, '玛儿丢了一张过来');
+  displayConfigExtra = {};
+  const fallback = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA));
+  await settle();
+  assert.equal(fallback.chromeSets[0].title, '你丢了一张过来');
 });
 
 // v0.1.33 回归：两张流内卡合成一张后，配文得按归属区分。

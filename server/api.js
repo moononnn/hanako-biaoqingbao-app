@@ -1963,6 +1963,16 @@ export default async function registerRoutes(app, ctx) {
 // v0.2.12：图库排序档位。与 ui/assets/gallery-sort.js 的 SORT_MODES 一一对应，
 // 两边不同步会被 tests/gallery-sort.test.mjs 的对齐断言挡住。
 const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'description', 'untagged_first', 'group'];
+  // 用户显示名：只用于流内卡的标题称呼，读不到就让前端退回「你」。
+  function ownerDisplayName() {
+    try {
+      const data = JSON.parse(fs.readFileSync(path.join(HANA_HOME, 'users.json'), 'utf-8'));
+      const users = Array.isArray(data?.users) ? data.users : [];
+      const owner = users.find(u => u?.userId === data.defaultUserId) || users.find(u => u?.kind === 'legacy_owner') || users[0];
+      const raw = typeof owner?.displayName === 'string' ? owner.displayName : (typeof owner?.username === 'string' ? owner.username : '');
+      return raw.replace(/[\r\n\t]+/g, ' ').trim().slice(0, 24);
+    } catch { return ''; }
+  }
   app.get('/api/display-config', (c) => {
     let cfg = { smallImageFit: true, sizeMode: 'auto', agentSelfNote: true, gallerySort: 'added_desc', inputButton: true };
     try {
@@ -1974,7 +1984,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
     const syncView = isInputButtonSyncPending(latestInputButtonSync)
       ? { ...latestInputButtonSync, pending: true }
       : latestInputButtonSync;
-    return json({ ok: true, data: { ...cfg, inputButton: cfg.inputButton !== false }, inputButtonSync: syncView });
+    return json({ ok: true, data: { ...cfg, inputButton: cfg.inputButton !== false }, userName: ownerDisplayName(), inputButtonSync: syncView });
   });
 
   // ═══ POST /api/display-config — 保存配图卡片显示配置 ═══

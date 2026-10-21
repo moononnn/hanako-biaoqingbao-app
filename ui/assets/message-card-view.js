@@ -17,7 +17,7 @@ const DEFAULT_CONFIG = { sizeMode: 'auto', smallImageFit: true, smallImageThresh
 // v0.1.27 - 卡头标题由页面自己交给宿主。宿主清单里那个静态的「表情包」是分类名，
 // 图片就在旁边，再说一遍等于什么也没说；这里按「谁发的 + 当时什么情绪」拼一句人话。
 // 名字、情绪缺一个就退掉那一截，两个都缺也不能剩个空标题。
-const USER_CARD_TITLE = '你丢了一张过来';
+const USER_NAME_FALLBACK = '你'; // v0.5.1：标题用配置里的显示名，读不到才用「你」
 const PARTNER_NAME_MAX = 12;
 const PARTNER_EMOTION_MAX = 8;
 
@@ -28,8 +28,8 @@ function titlePiece(value, maxLength) {
   return text;
 }
 
-function cardTitleFor({ sender, agentName, emotion } = {}) {
-  if (sender !== 'partner') return USER_CARD_TITLE;
+function cardTitleFor({ sender, agentName, emotion, userName } = {}) {
+  if (sender !== 'partner') return (titlePiece(userName, PARTNER_NAME_MAX) || USER_NAME_FALLBACK) + '丢了一张过来';
   const name = titlePiece(agentName, PARTNER_NAME_MAX);
   const mood = titlePiece(emotion, PARTNER_EMOTION_MAX);
   const head = name ? name + ' 顺手配了张' : '顺手配了张';
@@ -156,7 +156,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
     try {
       const response = await hana.api.fetch('/api/display-config');
       const result = await response.json();
-      if (result?.ok && result.data) config = { ...DEFAULT_CONFIG, ...result.data };
+      if (result?.ok && result.data) config = { ...DEFAULT_CONFIG, ...result.data, userName: typeof result.userName === 'string' ? result.userName : '' };
     } catch { /* 用默认值 */ }
   })();
 
@@ -1071,7 +1071,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
       if (image.style) image.style.width = config.smallImageFit === false ? '100%' : '';
       reflectFeedback();
       // 标题用的归属、伙伴名和情绪都在这一支里才齐。
-      setCardHeader(cardTitleFor({ sender: result.data.sender, agentName: result.data.agentName, emotion: result.data.emotion }));
+      setCardHeader(cardTitleFor({ sender: result.data.sender, agentName: result.data.agentName, emotion: result.data.emotion, userName: config.userName }));
       clearTimeout(reviveTimer);
       reviveTries = 0;
       status.textContent = '';
