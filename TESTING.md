@@ -1,10 +1,124 @@
 # 自动测试
 
+## 2026-10-21 复核轮的第二个阻断项修复（本地，版本定 0.5.1）
+
+独立审查伙伴的增量复核又判 fail，两条都是真的：
+
+1. **非布尔来源值能把本机的 false 顶成 true**：上一轮把判据改成「包里是布尔才处理」，于是包里带 `inputButton: "false"`（字符串）或 `null` 时，合并结果就是那个脏值；读取侧认的是 `!== false`，字符串 `"false"` 在那边会被当成 true——等于本机关着的开关被静默打开，而且差异判断因 next 非布尔直接返回 false，回执一个字不提。
+   修法：`mergeDisplayConfig` 的循环改为「包里没带（`undefined`）就不动；带了（哪怕是脏值）一律按本机生效值处理」；`displayConfigSwitchesDiffer` 对非布尔来源值也判差异（本机有明确设置时）。
+2. **回执在结果未知时就宣告同步完成**：`inputButtonNote` 那句「已按本机设置重新同步」是同步**刚发起**时就拼进去的，而同步是后台跑；后来全失败时回执照样说「已同步」。
+   修法：改成进行态的「已开始按本机设置重新同步，结果见首页状态字」；并在该轮开跑前先把 `latestInputButtonSync` 置为 `pending`，免得这几秒里首页状态字显示的还是上一次那轮与本次无关的旧结论。
+
+命令与结果：`node --test tests/display-config-merge.test.mjs` **8 项通过 / 0 失败**；全量 `node --test --test-concurrency=1 "tests/*.test.mjs"` **424 项通过 / 0 失败**。
+
+## 2026-10-21 搬家包修复的边界补全（本地，版本定 0.5.1）
+
+独立审查伙伴审过上一版后指出一个**反向**的边界漏洞：合并只在「本机这个键是布尔」时才保留本机值，而读取侧把缺键当 true（生效值 true）。于是「本机从没动过这个开关（生效 true）+ 旧包带 inputButton:false」→ 导入后按钮被**静默关掉**，而且回执一个字不提（差异判断也要求两边都是布尔）。
+
+补法：
+
+- `lib/display-config-merge.js`：新增 `EFFECTIVE_DEFAULTS`，保留总闸时用「本机生效值」（本机是布尔就用它，不是布尔就用默认值，与读取侧同一套算法）。包里没带这两个键时不往配置文件里造键；带了才落一个明确值。
+- `displayConfigSwitchesDiffer` 改用同一套生效默认值比较，缺键的差异不再被漏报。
+- 导入后的重同步接进序号仲裁（`isStale`）：用户在导入后几秒内又改了开关时，这一轮立刻收手，不会拿「导入时的旧值」盖回去。
+- 导入后的重同步结果写回 `latestInputButtonSync`（首页状态字能看到），失败时落一条 warn 而不是只被 `.catch(() => {})` 吞掉；导入回执里补一句「输入栏按钮已按本机设置重新同步」。
+
+命令与结果：`node --test tests/display-config-merge.test.mjs` **7 项通过 / 0 失败**；全量 `node --test --test-concurrency=1 "tests/*.test.mjs"` **423 项通过 / 0 失败**。
+
+审查伙伴另提的几条按「非阻断不扩改」记下：退避判据只认错误文案（宿主改文案就退化成一次性失败，仍如实报失败）、`total` 是「列到的会话数」而非宿主会话总数、发布截图 `assets/release-screenshots/sticker-home.png` 是旧版首页布局（与 CHANGELOG 描述不符，截图更新需实机操作，未改）。
+
+## 2026-10-21 搬家包导入静默重置开关的修复（本地，版本定 0.5.1）
+
+审查伙伴指出（并经实测确认，属既有行为、非本版引入）：`lib/sticker-transfer.js` 的 `sanitizeDisplayConfig` 导出白名单只有 5 个键，**不含** `inputButton` 与 `agentSelfNote`；而 `server/api.js` 的 `mergeMigrationData` 对 `displayConfig` 走 `return incoming` 整份覆盖。于是导入一个搬家包，本机关掉的输入栏表情按钮会重新出现、伙伴配图自评总闸会被悄悄打开，且导入路径不触发 `inputStatus` 同步，文件状态与宿主实际状态会对不上。
+
+修法（抽成可测模块 `lib/display-config-merge.js`）：
+
+- `mergeDisplayConfig(current, incoming)`：包的字段覆盖本机同名字段，本机独有字段保留；`inputButton` 与 `agentSelfNote` 两个本机总闸**始终保留本机值**（本机值不是布尔就不当总闸处理）。
+- `displayConfigSwitchesDiffer(current, incoming)`：包里带的总闸与本机不一致时能识别出来，导入回执里写明「包里的……与本机不同，已保留本机的」。
+- `server/api.js`：`mergeMigrationData` 增加 `displayConfig` 分支走 `mergeDisplayConfig`；导入事务提交后（**提交前**先读本机原值）后台触发一次 `syncInputButton`，让会话里的实际状态和文件对得上——不 await，避免把导入按住几十秒。
+
+命令与结果：`node --test tests/display-config-merge.test.mjs` **5 项通过 / 0 失败**；`node --check lib/display-config-merge.js server/api.js tests/display-config-merge.test.mjs` 通过；全量 `node --test --test-concurrency=1 "tests/*.test.mjs"` **421 项通过 / 0 失败**。
+
+未覆盖：未在真实宿主上做过一次搬家包导入（需本人验收：导入一个含旧配置的包，关掉的开关应保持关闭，导入结果里应出现「已保留本机的」字样）；导入后的重盖是后台触发，耗时与结果未实机观察。
+
+## 2026-10-21 复核轮的阻断项修复（本地，版本定 0.5.1）
+
+独立审查伙伴对上一候选包判 fail，阻断项是**在跑状态的前后端契约对不上**：服务端 GET 原样返回在跑状态（只有 `reason:'pending'`，没有 `pending:true`），而前端轮询靠 `sync.pending` 判断是否继续等，于是第一次轮询（T+1s）就把「还在跑」当成最终结果，界面立刻显示「已关闭（没盖上）」并弹出「没能同步显示：pending」，轮询也不再继续。会话多时同步必然超过 1 秒，所以这不是边角。
+
+修法：
+
+- `lib/input-button.js` 新增并导出 `isInputButtonSyncPending(sync)`：「在跑」两种标记（`pending:true` 与 `reason:'pending'`）都认，server 与页面各用各的那一份判法（页面是浏览器脚本，不能 import 共享模块）。
+- `server/api.js` 的 GET `/api/display-config`：在跑的状态补上 `pending:true` 再回。
+- `ui/assets/sticker-manager.js`：`waitInputButtonSync` 与状态字都同时认两个标记；新增 `reason:'superseded'` 的处理（被新请求取代不算「没盖上」）。
+- `lib/input-button.js` 的 `syncInputButton` 新增可选 `isStale` 回调，每次 `inputStatus.set` 之前先问一句：被更新的请求取代了就立刻收手，不再把旧值晚写进会话（序号原先只护「结果回写」，护不住副作用）。
+
+命令与结果：`node --test --test-concurrency=1 "tests/*.test.mjs"` **416 项通过 / 0 失败**（新增 2 项：「还在跑」两种标记都认、被取代时立刻收手）；`node --check lib/input-button.js server/api.js ui/assets/sticker-manager.js tests/input-button.test.mjs` 通过。
+
+未覆盖：pending 契约的修复没有端到端测试覆盖（server 路由层没有现成测试架），靠代码路径与审包复核确认；未在真实宿主里实测「同步超过 1 秒时界面不停在没盖上」。
+
+## 2026-10-21 审包后收尾（本地，版本定 0.5.1）
+
+独立审查伙伴对 0.5.1 候选包提的收尾项，本轮一并改掉：
+
+- **服务端同步结果带请求序号**：`server/api.js` 的 `latestInputButtonSync` 加 `seq`，两个保存请求交叠时旧的后台任务不再覆盖新结果。
+- **前端先比序号再写状态**：上一版 `waitInputButtonSync` 在比较序号之前就写了 `window.__INPUT_BUTTON_SYNC__` 并重绘状态字，序号只护住了提示、护不住状态字；现在先比序号再写，并新增 `stale` 标记让调用方不再多嘴。
+- **退路路径的结果留日志**：`lib/input-button.js` 里「拿不到会话 id 退路全量同步」与「单会话补盖」两条路径的结果原先直接丢掉，现在各写一条日志。
+- **会话截断要披露**：`syncInputButton` 统计被 2000 上限截掉的会话数并回传 `truncated`，界面会说明有多少会话没盖到。
+- **事件负载兼容**：`session_created` 的会话 id 除了 `event.sessionId`，也从 `event.payload` / `event.data` 里再找一次（宿主文档说负载是平铺的，这是防御性兼容）。
+- **导入搬家包覆盖 `displayConfig` 的问题**：审查伙伴指出搬家包导入对 `displayConfig` 是整份覆盖，`inputButton` 可能被抹掉。这属既有行为、不在本轮改动范围，记下来待下版处理。
+
+命令与结果：`node --test --test-concurrency=1 "tests/*.test.mjs"` **414 项通过 / 0 失败**；`node --check lib/input-button.js server/api.js ui/assets/sticker-manager.js tests/input-button.test.mjs` 通过。
+
+## 2026-10-21 审包三条建议的优化（本地，版本定 0.5.1）
+
+按独立审查伙伴对 0.6.0 候选包提的三条非阻断建议改：
+
+1. **同步结果带失败数**：`lib/input-button.js` 的 `syncInputButton` 统计失败会话数，返回值新增 `failed`，盖成了但有失败的会带 `reason: 'partial'`；全部失败仍报 `not-declared-yet` / `all-sessions-failed`。新增 `syncInputButtonSession(sdk, sessionId, enabled)`，只盖一个会话。
+2. **新会话只补盖那一个**：`installInputButtonWatcher` 的订阅回调改读宿主事件投影（宿主文档：回调恒为 `(event, sessionPath)`，`event.type` 是类型名，`session_created` 负载带 `{ sessionId, sessionPath, agentId }`），拿到 `sessionId` 就只盖那一个；拿不到 id 才退回全量。上一版把 `event` 当字符串比（`event !== 'session_created'`），回调实际一次都没生效过。
+3. **保存不再干等**：`server/api.js` 的 `POST /api/display-config` 改为先回包（`inputButtonSync.pending = true`），同步在后台跑，最近一次结果存模块级 `latestInputButtonSync`，由 `GET /api/display-config` 带出；`ui/assets/sticker-manager.js` 轮询该接口取最终结果，状态字与 toast 区分「同步中 / 没盖上 / 部分会话没盖上 / 正常」四种，并用 `inputButtonSyncSeq` 防止旧轮询结果盖掉新操作。
+
+- 命令与结果：`node --test --test-concurrency=1 "tests/*.test.mjs"` **411 项通过 / 0 失败**（34.0s，比上一版多 3 项：`tests/input-button.test.mjs` 里的「会话事件带 sessionId 时只盖那一个会话」「单会话同步：盖成了就算数，盖不成就报出来」「同步结果带失败数：盖成了但也有失败的，要说部分而不是全好」）；`node --check lib/input-button.js server/api.js ui/assets/sticker-manager.js tests/input-button.test.mjs` 通过。
+- 未覆盖：未在真实宿主里点开关并肉眼确认按钮消失/出现（需本人验收）；后台同步与页面轮询的实机时序未验；`session_created` 事件投影的真实形状只按宿主文档写，未在运行中的宿主上抓到真实事件样本。
+
+## 2026-10-21 输入栏按钮开关挑到首页（本地，版本保持 0.5.0）
+
+- 范围：`ui/panel.html`（首页状态条新增 `input-button-toggle-top` 与 `input-button-status-top`，样式沿用 `ball-toggle-wrap`；偏好页的 `sticker-input-toggle` 整格移除）、`ui/assets/sticker-manager.js`（`syncInputButtonToggle`/`toggleInputButton` 换成 `inputButtonEnabled`/`renderInputButtonState`/`toggleInputButtonTop`，挂到首页点击、`showView('home')` 与 `DOMContentLoaded` 初始化；`showView('preferences')` 去掉了已不存在的 sync 调用）、`server/boot.js`（默认 `__DISPLAY_CONFIG__` 补 `inputButton: true`）。
+- 命令与结果：`node --test --test-concurrency=1 "tests/*.test.mjs"` **408 项通过 / 0 失败**（34.0s）；`node --check ui/assets/sticker-manager.js server/boot.js` 与 `node --check server/api.js lib/input-button.js` 通过。
+- 未覆盖：未在真实首页点过这个新开关（需本人验收：点一下 → 状态字变 → 输入栏 🪄 跟着变）；未验证窄窗口下状态条折行后第三个开关的排布；未跑竖屏/移动端样式。
+
+## 2026-10-21 输入栏表情按钮开关「关了不生效」修复（本地，版本保持 0.5.0）
+
+两根一并修：
+
+- `server/api.js` 的 `POST /api/display-config` 里同步调用写的是 `syncInputButton(sdk, …)`，但 `registerRoutes(app, ctx)` 的作用域里没有 `sdk`，一行 ReferenceError 被外层 `try {} catch {}` 吞掉——配置存了、同步一次没跑、界面还提示「已隐藏」。改传 `ctx`，失败不再静默，回包里带 `inputButtonSync: { ok, synced, total, reason?, error? }`。
+- `lib/input-button.js` 装载同步原来只等 1.5 秒就盖，撞上「宿主还没投影本应用的 inputStatus 声明」（本机日志 `has no declared input status item sticker-compose`，09:25:24）后一次失败即放弃。改成退避重试 800/1600/3200/6000/10000ms，只对这类「声明没认」的错重试；权限/名单类失败不纠缠。`syncInputButton` 不再把「一个都没盖成」报成成功，回 `reason: not-declared-yet | all-sessions-failed`。会话上限 200 → 2000，改 8 个一批并发（本机会话已 322 个，原上限会让最新窗口漏掉，用户正看着的那个按钮就还在）；顺带避开串行 RPC 的耗时与高并发撞宿主 RPC 上限。`ui/assets/sticker-manager.js` 在同步失败时如实提示，不再拿「已隐藏」盖住没生效。
+
+验证：`node --test tests/input-button.test.mjs` **7 项通过 / 0 失败**（覆盖默认显示、逐会话覆盖与单点失败隔离、列会话失败不假装成功、装载同步与新会话补同步、声明未投影时退避重试直到盖上、非声明类失败只试一次、回包带失败原因）。`node --test --test-concurrency=1 "tests/*.test.mjs"` 全量 **408 项通过 / 0 失败**（32.4s，比上版多的 7 项就是这个文件）。`node --check lib/input-button.js server/api.js ui/assets/sticker-manager.js` 通过。宿主实机：重载后日志 `输入栏按钮启动同步：ok 322/322`（修前为 `has no declared input status item` 并带崩装载）。
+
+未覆盖：未在真实聊天窗口内点击开关并肉眼确认按钮消失/出现（需本人确认）；`session_created` 后的补同步只做单测，未等真实新窗口验证。
+
+## 2026-10-21 输入栏表情按钮显隐开关（本地，版本保持 0.5.0）
+
+`node --test --test-concurrency=1 "tests/*.test.mjs"`：**405 项通过，0 失败**（26.7s）；新增 `tests/input-button.test.mjs` 4 项（默认显示、逐会话覆盖与单点失败隔离、列会话失败不假装成功、装载同步 + 新会话补同步且订阅带第二参数）。`py -B` 两组纸飞机用例 OK，无 pyc 残留。
+
+实现：`lib/input-button.js` 读 `display-config.json` 的 `inputButton`（默认显示），`syncInputButton` 列会话后逐个 `inputStatus.set({ sessionId, id: 'sticker-compose', visible })`；`installInputButtonWatcher` 在应用装载时同步一次，并订阅 `session_created` 补盖新会话。`/api/display-config` 收 `inputButton` 并当场同步；面板偏好页新增对应拨动开关。
+
+边界：宿主只支持按会话的动态覆盖，且覆盖只活在本次宿主运行；重启后由应用装载时重新盖。本机未做宿主内实机验收（开关点击后的即时显隐、刷新后保持）——需本人确认。
+
+## 2026-10-21 文字流内卡：试过、实机否决、已回退（本地，版本保持 0.5.0）
+
+试过把文字改成 `session:send-custom` + 自己的 `sticker-text` 流内卡（405 项测试当时全过）。实机看到的效果：宿主给流内卡套了一层卡头「对话内文字」加复制按钮和边框，一句话被画成一张卡片，与聊天流不协调，本人当场叫停。
+
+回退：`lib/sticker-input-panel.js`、`manifest.json`、`tests/sticker-input-panel.test.mjs` 回到 `93abf4b` 的版本（文字重新走 `session:send`，进度仍落盘 `compose-text/`）；删除 `lib/sticker-text-card.js`、`ui/sticker-text.html`、`ui/assets/sticker-text-view.js`、`tests/sticker-text-card.test.mjs`；清单校验用例恢复为两张卡、两个 customType。保留本轮之前的标题带名字改动（`server/api.js`、`ui/assets/message-card-view.js`）。
+
+回退后 `node --test --test-concurrency=1 "tests/*.test.mjs"`：**401 项通过，0 失败**（29.9s）。之前那轮的 405 项记录只证明那个方案写过、能过测试，不代表它合适；实机否决优先。
+
+未做：未在真实宿主验收卡片外观、模型是否把这句当用户原话、图文一次发送时的回合顺序；以上需实机确认。
+
 ## 2026-10-21 审包跟进项（本地，版本保持 0.5.0）
 
 `node --test --test-concurrency=1 "tests/*.test.mjs"`：**400 项通过，0 失败**（23.8s，比上版多 2 项）。`py -B tests/test_ball_target.py` 与 `py -B tests/test_ball_wait_state.py` 各 1 项 OK（offscreen，无 pyc 残留）。改动文件 4 个 JS/Python 语法与内存编译通过，`git diff --check` 无空白错误。
 
-本轮对应星眠 v0.5.0 审包的四条非阻断跟进：
+本轮对应 v0.5.0 审包的四条非阻断跟进：
 
 - 新增「没有 crypto.randomUUID 时也能报价」用例：vm 上下文里给空 crypto 对象，点发送后请求编号仍过服务端格式校验，草稿清空、按钮回到「发送」而不卡在处理中；另加静态断言，禁止再出现裸调 `crypto.randomUUID()`。
 - 新增「重启后文字进度仍生效」用例：已接纳（accepted）值同一编号重试不再调 bus；不确定（unknown）值重启后仍拦住重复发送。
