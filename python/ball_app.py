@@ -88,6 +88,7 @@ from PyQt6.QtGui import (
     QKeySequence,
     QMovie,
     QPainter,
+    QPainterPath,
     QPixmap,
     QKeyEvent,
     QPolygonF,
@@ -101,6 +102,8 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
+    QLineEdit,
     QPushButton,
     QMenu,
     QScrollArea,
@@ -130,7 +133,15 @@ SEND_TIMEOUT = 60
 STICKER_COLUMNS = 4
 STICKER_TILE_SIZE = 62
 STICKER_ICON_SIZE = 52
+# 纸飞机面板里的图一律圆角：方角图从格子四角戳出来，跟面板的圆角语言打架
+# 0.22 ≈ 52px 图标上 11px 圆角，跟格子自身的 12px 边框对齐成一个观感
+STICKER_ICON_RADIUS_RATIO = 0.22
+# 配图手帐入口先收起来（面板顶部腾给「管理」），功能代码和数据都留着，改回 True 就回来
+HISTORY_ENTRY_VISIBLE = False
 MENU_WIDTH = 180
+# 分类弹层比右键菜单宽一截：里面有说明文字、分类勾选行和新建输入框，180 太挤
+PICKER_WIDTH = 248
+PICKER_MAX_LIST_HEIGHT = 176
 EDGE_INSET = 16
 RECENT_POLL_MS = 1500
 RECENT_EXTRA_HEIGHT = 112
@@ -290,6 +301,56 @@ def load_image_data(sticker_id):
         return base64.b64decode(result["data"])
     except Exception:
         return None
+
+
+def rounded_pixmap(pixmap, size=0, radius_ratio=STICKER_ICON_RADIUS_RATIO, min_radius=8):
+    """把图裁成圆角。size>0 时先等比缩进 size×size 的框里；半径按短边算，小图不会被削尖。"""
+    if pixmap is None or pixmap.isNull():
+        return pixmap
+    source = pixmap
+    if source.devicePixelRatio() != 1.0:
+        source = QPixmap(source)
+        source.setDevicePixelRatio(1.0)
+    if size:
+        source = source.scaled(
+            size, size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    width = source.width()
+    height = source.height()
+    if width < 2 or height < 2:
+        return source
+    radius = max(min_radius, int(round(min(width, height) * radius_ratio)))
+    radius = min(radius, min(width, height) // 2)
+    rounded = QPixmap(width, height)
+    rounded.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(rounded)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(0, 0, width, height), radius, radius)
+    painter.setClipPath(path)
+    painter.drawPixmap(0, 0, source)
+    painter.end()
+    return rounded
+
+
+def paint_popup_card(widget, radius=14):
+    """给无边框透明弹层画底：透明窗口下 QSS 的 background 不生效，白底和圆角只能自己画。
+    弹层都走这一张脸：一层很淡的阴影，一张圆角白卡。"""
+    painter = QPainter(widget)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    rect = widget.rect()
+    shadow = QColor('#c7c0b4')
+    shadow.setAlpha(42)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(shadow)
+    painter.drawRoundedRect(QRectF(rect.adjusted(4, 5, -2, -1)), radius, radius)
+    painter.setPen(QColor('#d7e5dc'))
+    painter.setBrush(QColor('#fffdf7'))
+    painter.drawRoundedRect(QRectF(rect.adjusted(1, 1, -1, -4)), radius, radius)
+    painter.end()
 
 
 def _looks_like_gif(data):
@@ -559,6 +620,11 @@ class StickerButton(QPushButton):
         self.setFixedSize(STICKER_TILE_SIZE, STICKER_TILE_SIZE)
         self.setIcon(QIcon(pixmap) if pixmap and not pixmap.isNull() else QIcon())
         self.setIconSize(QSize(STICKER_ICON_SIZE, STICKER_ICON_SIZE))
+        # 圆角在图标层做：按钮的 border-radius 管不住贴上去的方图
+        if pixmap and not pixmap.isNull():
+            self.setIcon(QIcon(rounded_pixmap(pixmap, STICKER_ICON_SIZE)))
+        else:
+            self.setIcon(QIcon())
         # v0.33.38 - 面板上的 GIF 动图：QMovie 逐帧驱动图标，静止图不受影响；
         # 图标 QIcon 绘制时自动等比缩到 iconSize，不用手动算缩放
         self._movie = None
@@ -585,6 +651,8 @@ class StickerButton(QPushButton):
         title = str(item.get("description") or item.get("file") or item.get("id") or "表情包")
         self.setAccessibleName(title)
         self.setProperty("selected", False)
+        # 管理态的选中是另一回事（绿色框），跟「选中待发送」的粉框分开
+        self.setProperty("managed", False)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context)
         self.setStyleSheet(
@@ -592,6 +660,7 @@ class StickerButton(QPushButton):
             "QPushButton:hover { border-color:#b6d1c4; background:#eef8f2; }"
             "QPushButton:pressed { border-color:#e89bb0; background:#fff0f4; }"
             "QPushButton[selected=\"true\"] { border-color:#e89bb0; background:#fff0f4; }"
+            "QPushButton[managed=\"true\"] { border-color:#5dae8e; background:#eef8f2; }"
             "QPushButton:disabled { background:transparent; border-color:transparent; }"
             # v0.1.7 等待态：发出去的那张在禁选期间仍留粉框，视线不用再去找是哪张
             "QPushButton[selected=\"true\"]:disabled { border-color:#e89bb0; background:#fff0f4; }"
@@ -606,10 +675,44 @@ class StickerButton(QPushButton):
             self.on_context(self.item, global_pos)
 
     def _on_movie_frame(self, _frame):
-        if self._movie is not None:
+        if self._movie is None:
+            return
+        try:
             pm = self._movie.currentPixmap()
-            if pm and not pm.isNull():
-                self.setIcon(QIcon(pm))
+        except RuntimeError:
+            # 按钮已经在销毁路上，这一帧不要了
+            return
+        if pm and not pm.isNull():
+            # 动图逐帧同样裁圆角，否则一播放又变回方角
+            self.setIcon(QIcon(rounded_pixmap(pm, STICKER_ICON_SIZE)))
+
+    def dispose(self):
+        """销毁前先把动图停干净。
+
+        QMovie 还在播时被父部件一起带走，解码线程会碰到已经释放的 device/缓冲，
+        实测就是那条 exitCode=0xC0000005：先停、再断信号、最后让它延迟销毁。
+        """
+        movie = self._movie
+        self._movie = None
+        if movie is not None:
+            try:
+                movie.frameChanged.disconnect(self._on_movie_frame)
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                movie.stop()
+            except RuntimeError:
+                pass
+            try:
+                movie.deleteLater()
+            except RuntimeError:
+                pass
+        self._movie_buffer = None
+        self._movie_data = None
+        try:
+            self.setIcon(QIcon())
+        except RuntimeError:
+            pass
 
     def set_movie_playing(self, playing):
         """面板可见时播放动图，隐藏时暂停（省 CPU）。"""
@@ -618,6 +721,13 @@ class StickerButton(QPushButton):
 
     def set_selected(self, selected):
         self.setProperty("selected", bool(selected))
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def set_managed(self, managed):
+        """管理态下勾选的图（绿色框），跟待发送选择的粉框不是一回事。"""
+        self.setProperty("managed", bool(managed))
         self.style().unpolish(self)
         self.style().polish(self)
         self.update()
@@ -785,6 +895,11 @@ class StickerContextMenu(QFrame):
         self.btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_remove.clicked.connect(self._remove_from_list)
         self.root.addWidget(self.btn_remove)
+        # 收藏分类：把这张图放进某些分类（跟网页端同一份数据）
+        self.btn_category = QPushButton('放进分类…')
+        self.btn_category.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_category.clicked.connect(self._open_category)
+        self.root.addWidget(self.btn_category)
         self.btn_delete = QPushButton('整个删除')
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_delete.setObjectName('deleteBtn')
@@ -835,6 +950,7 @@ class StickerContextMenu(QFrame):
     def _enter_confirm(self):
         self.btn_remove.hide()
         self.btn_delete.hide()
+        self.btn_category.hide()
         self.confirm_box.show()
         self.adjustSize()
         self._reposition()
@@ -843,6 +959,18 @@ class StickerContextMenu(QFrame):
         self.confirm_box.hide()
         self.btn_remove.show()
         self.btn_delete.show()
+        self.btn_category.show()
+
+    def _open_category(self):
+        """把这张图放进分类：勾选哪些分类，或当场新建一个。"""
+        initial = set(self.item.get('categoryIds') or [])
+        self.close()
+        self.panel._open_category_picker(
+            [self.sticker_id],
+            initial=initial,
+            title='放进分类',
+            hint='勾上这张图要待的分类。',
+        )
         self.adjustSize()
         self._reposition()
 
@@ -917,6 +1045,363 @@ class StickerContextMenu(QFrame):
         painter.setBrush(QColor('#fbf8ef'))
         painter.drawRoundedRect(QRectF(self.rect().adjusted(2, 2, -2, -5)), 16, 16)
         painter.end()
+
+
+class CategoryPicker(QFrame):
+    """分类选择弹层：勾选图要进哪些分类，或当场新建一个分类。
+
+    两种用法：
+    - 单张（initial = 这张图现在在的分类）：勾选什么就保存成什么
+    - 多张（initial = 空）：勾选的分类是「要加进去的」，跟图原来有的分类并存
+    """
+
+    def __init__(self, panel, sticker_ids, initial=None, title='放进分类', hint=''):
+        super().__init__(None)
+        self.panel = panel
+        self.sticker_ids = [str(value) for value in (sticker_ids or []) if str(value)]
+        self.initial = set(initial or [])
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName('categoryPicker')
+        self.setFixedWidth(PICKER_WIDTH)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 13, 14, 14)
+        root.setSpacing(8)
+
+        self.title = QLabel(title)
+        self.title.setObjectName('menuTitle')
+        self.title.setWordWrap(True)
+        root.addWidget(self.title)
+
+        self.hint = QLabel(hint)
+        self.hint.setObjectName('menuHint')
+        self.hint.setWordWrap(True)
+        self.hint.setVisible(bool(hint))
+        root.addWidget(self.hint)
+
+        # 分类多了不把弹层撑到屏幕外：列表区自己能滚
+        self.list_scroll = QScrollArea(self)
+        self.list_scroll.setObjectName('pickerScroll')
+        self.list_scroll.setWidgetResizable(True)
+        self.list_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.list_host = QWidget()
+        self.list_host.setObjectName('pickerListHost')
+        self.list_layout = QVBoxLayout(self.list_host)
+        self.list_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_layout.setSpacing(2)
+        self.list_scroll.setWidget(self.list_host)
+        root.addWidget(self.list_scroll)
+
+        new_row = QHBoxLayout()
+        new_row.setSpacing(6)
+        self.new_name = QLineEdit(self)
+        self.new_name.setPlaceholderText('新分类的名字')
+        self.new_name.setMaxLength(40)
+        # 输完名字回车就建，不用鼠标去点「创建」
+        self.new_name.returnPressed.connect(self._create_category)
+        new_row.addWidget(self.new_name, 1)
+        self.btn_new = QPushButton('创建')
+        self.btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_new.clicked.connect(self._create_category)
+        new_row.addWidget(self.btn_new)
+        root.addLayout(new_row)
+
+        row = QHBoxLayout()
+        row.setSpacing(7)
+        self.btn_cancel = QPushButton('取消')
+        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel.clicked.connect(self.close)
+        row.addWidget(self.btn_cancel)
+        self.btn_ok = QPushButton('保存')
+        self.btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ok.setObjectName('primaryBtn')
+        self.btn_ok.clicked.connect(self._submit)
+        row.addWidget(self.btn_ok)
+        root.addLayout(row)
+
+        self.status = QLabel('')
+        self.status.setObjectName('menuStatus')
+        self.status.setWordWrap(True)
+        self.status.setVisible(False)
+        root.addWidget(self.status)
+
+        self.setStyleSheet(
+            # 透明窗口下 QSS 的 background 不画，白底圆角全在 paintEvent 里
+            'QFrame#categoryPicker { background:transparent; border:none; }'
+            'QLabel#menuTitle { color:#437a65; background:transparent; font-family:"Microsoft YaHei UI"; font-size:12px; font-weight:700; }'
+            'QLabel#menuHint { color:#84978d; background:transparent; font-family:"Microsoft YaHei UI"; font-size:10px; }'
+            'QLabel#menuStatus { color:#a05e72; background:transparent; font-family:"Microsoft YaHei UI"; font-size:10px; }'
+            'QScrollArea#pickerScroll { background:transparent; border:none; }'
+            'QWidget#pickerListHost { background:transparent; }'
+            'QLineEdit { background:#ffffff; border:1px solid #d7e5dc; border-radius:8px; padding:4px 8px; min-height:18px; '
+            'font-family:"Microsoft YaHei UI"; font-size:11px; color:#46574f; }'
+            'QLineEdit:focus { border-color:#5dae8e; }'
+            'QCheckBox { color:#46574f; font-family:"Microsoft YaHei UI"; font-size:11px; spacing:8px; padding:2px 0; }'
+            'QCheckBox::indicator { width:13px; height:13px; }'
+            'QPushButton { min-height:28px; padding:0 12px; color:#46574f; background:#fffdf7; '
+            'border:1px solid #d7e5dc; border-radius:9px; font-family:"Microsoft YaHei UI"; font-size:11px; }'
+            'QPushButton:hover { color:#437a65; border-color:#5dae8e; background:#eef8f2; }'
+            'QPushButton#primaryBtn { color:#fffdf7; background:#5dae8e; border-color:#5dae8e; font-weight:600; }'
+            'QPushButton#primaryBtn:hover { background:#4f9c80; border-color:#4f9c80; }'
+            'QScrollBar:vertical { background:transparent; width:7px; margin:0; }'
+            'QScrollBar::handle:vertical { background:#c9dfd3; border-radius:3px; min-height:24px; }'
+            'QScrollBar::handle:vertical:hover { background:#5dae8e; }'
+            'QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; width:0; }'
+            'QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }'
+        )
+        self.refresh()
+        self.adjustSize()
+        # Esc 收起弹层，跟面板其他浮层一个习惯
+        self._esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._esc.activated.connect(self.close)
+
+    def paintEvent(self, event):
+        """自己画底：透明窗口下 QSS 的 background 会被吃掉，白底和圆角得走 QPainter。
+        跟右键菜单同一套语言：一层很淡的阴影，一张圆角白卡。"""
+        paint_popup_card(self)
+
+    def refresh(self):
+        """按面板当前的分类清单重画勾选项。"""
+        while self.list_layout.count():
+            item = self.list_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        categories = getattr(self.panel, 'categories', None) or []
+        if not categories:
+            empty = QLabel('还没有分类，先在下面起一个名字。')
+            empty.setObjectName('menuHint')
+            self.list_layout.addWidget(empty)
+            self._fit_list_height()
+            return
+        for category in categories:
+            cid = str(category.get('id') or '')
+            row = QWidget(self.list_host)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(2, 3, 2, 3)
+            row_layout.setSpacing(6)
+            box = QCheckBox(str(category.get('name') or cid), row)
+            box.setChecked(cid in self.initial)
+            box.setProperty('categoryId', cid)
+            row_layout.addWidget(box, 1)
+            count = QLabel('%s' % category.get('count', 0))
+            count.setObjectName('menuHint')
+            row_layout.addWidget(count)
+            self.list_layout.addWidget(row)
+        self._fit_list_height()
+
+    def _fit_list_height(self):
+        """列表区按内容长高，长到上限就内部滚动，不把弹层顶出屏幕。"""
+        hint = self.list_host.sizeHint().height()
+        self.list_scroll.setFixedHeight(max(20, min(hint + 2, PICKER_MAX_LIST_HEIGHT)))
+
+    def show_at(self, global_pos=None):
+        """弹在指定位置附近（贴着面板，跟右键菜单一个规矩）。"""
+        self.adjustSize()
+        bounds = screen_bounds(self.panel)
+        if global_pos is not None:
+            left, top, right, bottom = bounds
+            x = int(global_pos.x())
+            y = int(global_pos.y())
+            if x + self.width() > right:
+                x = right - self.width()
+            if y + self.height() > bottom:
+                y = bottom - self.height()
+            if x < left:
+                x = left
+            if y < top:
+                y = top
+            self.move(x, y)
+        else:
+            rect = (self.panel.x(), self.panel.y(), self.panel.width(), self.panel.height())
+            self.move(*position_popup_beside(rect, (self.width(), self.height()), bounds, anchor_ratio=0.33, prefer_side="right"))
+        self.show()
+        self.raise_()
+
+    def _checked_ids(self):
+        ids = []
+        for index in range(self.list_layout.count()):
+            item = self.list_layout.itemAt(index)
+            widget = item.widget() if item else None
+            if not widget:
+                continue
+            layout = widget.layout()
+            if not layout:
+                continue
+            for position in range(layout.count()):
+                child = layout.itemAt(position).widget()
+                if isinstance(child, QCheckBox) and child.isChecked():
+                    ids.append(str(child.property('categoryId') or ''))
+        return [value for value in ids if value]
+
+    def _create_category(self):
+        name = self.new_name.text().strip()
+        if not name:
+            self._show_status('先给分类起个名字')
+            return
+        result = self.panel._create_category(name)
+        if not result.get('ok'):
+            self._show_status(result.get('error') or '分类没建成')
+            return
+        category = result.get('category') or {}
+        self.panel.categories = (self.panel.categories or []) + [{
+            'id': category.get('id'),
+            'name': category.get('name'),
+            'count': 0,
+        }]
+        self.initial.add(str(category.get('id') or ''))
+        self.new_name.clear()
+        self.refresh()
+        # 面板上的分类行也得跟着长出新 tab，不然新建完像没成功
+        render_bar = getattr(self.panel, '_render_category_bar', None)
+        if callable(render_bar):
+            render_bar()
+
+    def _show_status(self, text):
+        self.status.setText(text)
+        self.status.setVisible(True)
+
+    def _submit(self):
+        ids = self._checked_ids()
+        if not ids:
+            self._show_status('一个分类都没选')
+            return
+        result = self.panel._apply_category_batch(self.sticker_ids, ids)
+        if not result.get('ok'):
+            self._show_status(result.get('error') or '没存上')
+            return
+        self.close()
+
+
+class TextPrompt(QFrame):
+    """一个输入框的小卡片：分类改名这类单行编辑走它，跟分类弹层同一张脸。"""
+
+    def __init__(self, panel, title, hint='', initial='', placeholder='', confirm_text='保存', on_confirm=None):
+        super().__init__(None)
+        self.panel = panel
+        self.on_confirm = on_confirm
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName('textPrompt')
+        self.setFixedWidth(PICKER_WIDTH)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 13, 14, 14)
+        root.setSpacing(8)
+
+        self.title = QLabel(title)
+        self.title.setObjectName('menuTitle')
+        self.title.setWordWrap(True)
+        root.addWidget(self.title)
+
+        self.hint = QLabel(hint)
+        self.hint.setObjectName('menuHint')
+        self.hint.setWordWrap(True)
+        self.hint.setVisible(bool(hint))
+        root.addWidget(self.hint)
+
+        self.edit = QLineEdit(self)
+        self.edit.setPlaceholderText(placeholder)
+        self.edit.setMaxLength(40)
+        self.edit.setText(str(initial or ''))
+        self.edit.returnPressed.connect(self._submit)
+        root.addWidget(self.edit)
+
+        row = QHBoxLayout()
+        row.setSpacing(7)
+        self.btn_cancel = QPushButton('取消')
+        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel.clicked.connect(self.close)
+        row.addWidget(self.btn_cancel)
+        self.btn_ok = QPushButton(confirm_text)
+        self.btn_ok.setObjectName('primaryBtn')
+        self.btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ok.clicked.connect(self._submit)
+        row.addWidget(self.btn_ok)
+        root.addLayout(row)
+
+        self.status = QLabel('')
+        self.status.setObjectName('menuStatus')
+        self.status.setWordWrap(True)
+        self.status.setVisible(False)
+        root.addWidget(self.status)
+
+        self.setStyleSheet(
+            'QFrame#textPrompt { background:transparent; border:none; }'
+            'QLabel#menuTitle { color:#437a65; background:transparent; font-family:"Microsoft YaHei UI"; font-size:12px; font-weight:700; }'
+            'QLabel#menuHint { color:#84978d; background:transparent; font-family:"Microsoft YaHei UI"; font-size:10px; }'
+            'QLabel#menuStatus { color:#a05e72; background:transparent; font-family:"Microsoft YaHei UI"; font-size:10px; }'
+            'QLineEdit { background:#ffffff; border:1px solid #d7e5dc; border-radius:8px; padding:4px 8px; min-height:18px; '
+            'font-family:"Microsoft YaHei UI"; font-size:11px; color:#46574f; }'
+            'QLineEdit:focus { border-color:#5dae8e; }'
+            'QPushButton { min-height:28px; padding:0 12px; color:#46574f; background:#fffdf7; '
+            'border:1px solid #d7e5dc; border-radius:9px; font-family:"Microsoft YaHei UI"; font-size:11px; }'
+            'QPushButton:hover { color:#437a65; border-color:#5dae8e; background:#eef8f2; }'
+            'QPushButton#primaryBtn { color:#fffdf7; background:#5dae8e; border-color:#5dae8e; font-weight:600; }'
+            'QPushButton#primaryBtn:hover { background:#4f9c80; border-color:#4f9c80; }'
+        )
+        self.adjustSize()
+        self._esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._esc.activated.connect(self.close)
+
+    def paintEvent(self, event):
+        paint_popup_card(self)
+
+    def show_at(self, global_pos=None):
+        self.adjustSize()
+        bounds = screen_bounds(self.panel)
+        if global_pos is not None:
+            left, top, right, bottom = bounds
+            x = int(global_pos.x())
+            y = int(global_pos.y())
+            if x + self.width() > right:
+                x = right - self.width()
+            if y + self.height() > bottom:
+                y = bottom - self.height()
+            self.move(max(left, x), max(top, y))
+        else:
+            rect = (self.panel.x(), self.panel.y(), self.panel.width(), self.panel.height())
+            self.move(*position_popup_beside(rect, (self.width(), self.height()), bounds, anchor_ratio=0.33, prefer_side="right"))
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.edit.setFocus()
+        self.edit.selectAll()
+
+    def _show_status(self, text):
+        self.status.setText(text)
+        self.status.setVisible(True)
+
+    def _submit(self):
+        text = self.edit.text().strip()
+        if not text:
+            self._show_status('先写个名字')
+            return
+        if not callable(self.on_confirm):
+            self.close()
+            return
+        result = self.on_confirm(text) or {}
+        if not result.get('ok'):
+            self._show_status(result.get('error') or '没存上，再试一下')
+            return
+        self.close()
 
 
 class TargetMenu(QFrame):
@@ -1872,6 +2357,14 @@ class BallPanel(QFrame):
         self.ball = ball
         self.items = []
         self.selected_sticker_id = None
+        # 收藏分类（跟网页端同一份数据）：分类清单、当前看的分类、管理态多选
+        self.categories = []
+        self._category_filter = ''
+        self._managing = False
+        self._manage_selected = set()
+        # 删分类是两步：先记住哪个分类已经点过一次
+        self._category_armed_delete = ''
+        self._category_picker = None
         self.retry_confirmation_required = False
         self.sticker_columns = STICKER_COLUMNS
         self.busy = False
@@ -1946,6 +2439,11 @@ class BallPanel(QFrame):
             "QPushButton#targetSel { min-height:24px; padding:0 9px; color:#4a9277; background:#f4faf7; "
             "border:1px solid #d7e5dc; border-radius:8px; font-family:'Microsoft YaHei UI'; font-size:11px; }"
             "QPushButton#targetSel:hover { color:#437a65; border-color:#5dae8e; background:#eef8f2; }"
+            "QPushButton#manageToggle { min-height:24px; padding:0 10px; color:#4a9277; background:#f4faf7; "
+            "border:1px solid #d7e5dc; border-radius:8px; font-family:'Microsoft YaHei UI'; font-size:11px; }"
+            "QPushButton#manageToggle:hover { color:#437a65; border-color:#5dae8e; background:#eef8f2; }"
+            "QPushButton#manageToggle[active=\"true\"] { color:#fffdf7; background:#5dae8e; border-color:#5dae8e; }"
+            "QPushButton#manageToggle[active=\"true\"]:hover { background:#4f9d7e; border-color:#4f9d7e; }"
             "QLabel#targetInfo { color:#84978d; background:transparent; font-family:'Microsoft YaHei UI'; font-size:10px; padding-left:2px; }"
             "QTextEdit#messageEdit { color:#46574f; background:#fffdf7; border:1px solid #d7e5dc; "
             "border-radius:10px; padding:7px 9px; font-family:'Microsoft YaHei UI'; font-size:12px; }"
@@ -1988,6 +2486,27 @@ class BallPanel(QFrame):
             "QFrame#chatPreview { background:#fff7f9; border:1px solid #e8b7c8; border-radius:9px; }"
             "QLabel#chatPreviewTitle { color:#a05e72; font-family:'Microsoft YaHei UI'; font-size:11px; font-weight:700; }"
             "QLabel#chatPreviewText { color:#46574f; font-family:'Microsoft YaHei UI'; font-size:10px; line-height:1.5; }"
+            # 收藏分类行与管理条（跟网页端一套语言）
+            # 分类 tab 是胶囊：半径必须 ≤ 自身半高，Qt 里写 999px 会直接退化成方角（跟网页不一样）
+            "QPushButton#catBtn { min-height:26px; padding:0 10px; color:#4a9277; background:#fffdf7; border:1px solid #c9ded2; border-radius:14px; font-family:'Microsoft YaHei UI'; font-size:11px; }"
+            "QPushButton#catBtn:hover { background:#eef8f2; border-color:#5dae8e; }"
+            "QPushButton#catBtn:checked { color:#fffdf7; background:#5dae8e; border-color:#5dae8e; }"
+            # 管理态下选中分类时露出的两个小按钮（改名 / 删分类）
+            "QPushButton#catToolBtn, QPushButton#catToolDangerBtn { min-height:26px; padding:0 10px; border-radius:14px; "
+            "font-family:'Microsoft YaHei UI'; font-size:11px; }"
+            "QPushButton#catToolBtn { color:#4a9277; background:#f4faf7; border:1px solid #d5e6dd; }"
+            "QPushButton#catToolBtn:hover { color:#437a65; background:#eef8f2; border-color:#5dae8e; }"
+            "QPushButton#catToolDangerBtn { color:#a05e72; background:#fff7f9; border:1px solid #e8b7c8; }"
+            "QPushButton#catToolDangerBtn:hover { background:#fdf0f4; border-color:#e89bb0; }"
+            "QLabel#categoryToolsLabel { color:#84978d; background:transparent; font-family:'Microsoft YaHei UI'; font-size:10px; }"
+            "QWidget#categoryTools { background:transparent; }"
+            "QWidget#manageBar { background:transparent; }"
+            "QLabel#manageCount { color:#84978d; font-family:'Microsoft YaHei UI'; font-size:10px; }"
+            "QPushButton#manageBtn { min-height:26px; padding:0 9px; color:#46574f; background:#fffdf7; border:1px solid #c9ded2; border-radius:9px; font-family:'Microsoft YaHei UI'; font-size:11px; }"
+            "QPushButton#manageBtn:hover { background:#eef8f2; border-color:#5dae8e; }"
+            "QPushButton#manageBtn:disabled { color:#aabbb2; background:#f1f5f2; border-color:#d7e5dc; }"
+            "QPushButton#managePrimaryBtn { min-height:26px; padding:0 12px; color:#fffdf7; background:#5dae8e; border:1px solid #5dae8e; border-radius:9px; font-family:'Microsoft YaHei UI'; font-size:11px; font-weight:600; }"
+            "QPushButton#managePrimaryBtn:hover { background:#4f9c80; }"
             # 滚动条统一：细薄荷圆条（与网页端同规范，2026-08-26）
             "QScrollBar:vertical { background:transparent; width:8px; margin:0; }"
             "QScrollBar::handle:vertical { background:#c9dfd3; border-radius:4px; min-height:28px; }"
@@ -2007,7 +2526,8 @@ class BallPanel(QFrame):
         self.lbl_target_label = QLabel("当前对话")
         self.lbl_target_label.setObjectName("targetLabel")
         target_row.addWidget(self.lbl_target_label)
-        self.btn_target = QPushButton("自动判断 ▾")
+        # ▼/▲ 而不是 ▾/▴：微软雅黑 UI 里没有小三角这两个字形，会渲染成方块
+        self.btn_target = QPushButton("自动判断 ▼")
         self.btn_target.setObjectName("targetSel")
         self.btn_target.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_target.setToolTip("选择要把表情包发到哪段对话")
@@ -2020,7 +2540,15 @@ class BallPanel(QFrame):
         self.btn_history.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_history.setToolTip("看看最近配过哪些表情包，喜欢/不喜欢或找小花聊聊")
         self.btn_history.clicked.connect(self.open_history_panel)
+        self.btn_history.setVisible(HISTORY_ENTRY_VISIBLE)
         target_row.addWidget(self.btn_history)
+        # 管理挤到右上角：分类行只留分类和「＋分类」，不再跟功能按钮抢位置
+        self.btn_manage = QPushButton("管理")
+        self.btn_manage.setObjectName("manageToggle")
+        self.btn_manage.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_manage.setToolTip("管理收藏：多选表情包，批量放进分类或移出收藏")
+        self.btn_manage.clicked.connect(self._toggle_manage)
+        target_row.addWidget(self.btn_manage)
         root.addLayout(target_row)
 
         self.lbl_target_info = QLabel("正在定位对话…")
@@ -2061,6 +2589,13 @@ class BallPanel(QFrame):
 
         self._build_history_panel()
 
+        # 收藏分类行：全部 / 各分类 / ＋新建 / 管理（跟网页端同一份数据）
+        self.category_bar = self._build_category_bar()
+        root.addWidget(self.category_bar)
+        # 管理态下选中分类后才出现的一行：改名 / 删分类
+        self.category_tools = self._build_category_tools()
+        root.addWidget(self.category_tools)
+
         # v0.33.48 - 图集网格 / 配图手帐同位置切换（QStackedWidget，无跳动）
         self.stack = QStackedWidget()
         self.stack.addWidget(self.scroll)
@@ -2072,6 +2607,10 @@ class BallPanel(QFrame):
         self.hint.setWordWrap(True)
         self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self.hint)
+
+        # 管理态的批量操作条（平时藏着）
+        self.manage_bar = self._build_manage_bar()
+        root.addWidget(self.manage_bar)
 
         self.editor = MessageEdit(self)
         self.editor.send_requested.connect(self.send_selected)
@@ -2090,6 +2629,377 @@ class BallPanel(QFrame):
         self._close_shortcut.activated.connect(self._on_escape_close)
         self.update_button_states()
         self.recog_panel = RecognizePanel(self)
+
+    # ── 收藏分类 + 管理态（跟网页端同一套数据与交互） ──
+
+    def _build_category_bar(self):
+        """一行横向滚动的分类 tab：全部 / 各分类 / ＋新建 / 管理。"""
+        scroll = QScrollArea(self)
+        scroll.setObjectName('categoryScroll')
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(30)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        host = QWidget(scroll)
+        host.setObjectName('categoryHost')
+        row = QHBoxLayout(host)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(5)
+        # 让宿主按内容撑宽度：不然 QScrollArea 会把按钮压回视口宽，字就被切了
+        row.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self.category_row = row
+        self.category_row_host = host
+        scroll.setWidget(host)
+        scroll.setStyleSheet(
+            'QScrollArea#categoryScroll { background:transparent; border:none; }'
+            'QWidget#categoryHost { background:transparent; }'
+        )
+        self._render_category_bar()
+        return scroll
+
+    @staticmethod
+    def _fit_category_button(button):
+        """按真实字体量一遍文字宽度：QSS 给的 sizeHint 偶尔比画出来的窄，字会被切。"""
+        button.ensurePolished()
+        button.setMinimumWidth(button.fontMetrics().horizontalAdvance(button.text()) + 28)
+
+    def _render_category_bar(self):
+        """重画分类行。分类清单变了或切了分类就调它。"""
+        while self.category_row.count():
+            item = self.category_row.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.category_buttons = {}
+        all_btn = QPushButton('全部')
+        all_btn.setObjectName('catBtn')
+        all_btn.setCheckable(True)
+        all_btn.setChecked(not self._category_filter)
+        all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        all_btn.setToolTip('看全部收藏')
+        all_btn.clicked.connect(lambda: self._select_category(''))
+        self.category_row.addWidget(all_btn)
+        self.category_buttons[''] = all_btn
+        self._fit_category_button(all_btn)
+
+        for category in self.categories or []:
+            cid = str(category.get('id') or '')
+            label = str(category.get('name') or cid)
+            count = category.get('count', 0)
+            btn = QPushButton('%s %s' % (label, count))
+            btn.setObjectName('catBtn')
+            btn.setCheckable(True)
+            btn.setChecked(self._category_filter == cid)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip('只看这个分类里的表情包')
+            btn.clicked.connect(lambda _checked=False, value=cid: self._select_category(value))
+            self.category_row.addWidget(btn)
+            self.category_buttons[cid] = btn
+            self._fit_category_button(btn)
+        # 管理态的分类编辑不塞在这条行里（一挤就把「＋分类」顶出视野），单独一行
+        add_btn = QPushButton('＋分类')
+        add_btn.setObjectName('catBtn')
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setToolTip('新建一个收藏分类')
+        add_btn.clicked.connect(self._create_category_inline)
+        # 平时不露新建入口：进了管理态才出现，分类行保持干净
+        self.add_category_btn = add_btn
+        self.category_row.addWidget(add_btn)
+        self._fit_category_button(add_btn)
+        # 先加入布局再设可见：没父控件就叫 setVisible 会把按钮当成独立窗口去显
+        add_btn.setVisible(self._managing)
+        self._refresh_category_tools()
+        # 「管理」不在这条行里了（挪到面板右上角），分类行只留分类本身
+
+    def _build_category_tools(self):
+        """管理态、选中某个分类时才露出来的一行：改名和删分类。"""
+        bar = QWidget(self)
+        bar.setObjectName('categoryTools')
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(2, 0, 2, 0)
+        layout.setSpacing(5)
+        self.category_tools_label = QLabel('')
+        self.category_tools_label.setObjectName('categoryToolsLabel')
+        layout.addWidget(self.category_tools_label)
+        layout.addStretch(1)
+        self.btn_cat_rename = QPushButton('改名')
+        self.btn_cat_rename.setObjectName('catToolBtn')
+        self.btn_cat_rename.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cat_rename.setToolTip('给这个分类换个名字')
+        self.btn_cat_rename.clicked.connect(lambda: self._open_category_rename(self._category_filter))
+        layout.addWidget(self.btn_cat_rename)
+        self.btn_cat_delete = QPushButton('删分类')
+        self.btn_cat_delete.setObjectName('catToolDangerBtn')
+        self.btn_cat_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cat_delete.setToolTip('分类里的图不会被删，只是不再归到这个分类')
+        self.btn_cat_delete.clicked.connect(lambda: self._arm_or_delete_category(self._category_filter))
+        layout.addWidget(self.btn_cat_delete)
+        bar.hide()
+        return bar
+
+    def _refresh_category_tools(self):
+        """按当前状态更新「改名 / 删分类」那行。"""
+        tools = getattr(self, 'category_tools', None)
+        if tools is None:
+            return
+        category = None
+        if self._category_filter:
+            category = next((entry for entry in (self.categories or [])
+                             if str(entry.get('id')) == str(self._category_filter)), None)
+        visible = bool(self._managing and category)
+        tools.setVisible(visible)
+        if not visible:
+            return
+        self.category_tools_label.setText('正在管：%s' % (category.get('name') or self._category_filter))
+        armed = self._category_armed_delete == str(self._category_filter)
+        self.btn_cat_delete.setText('再点一次' if armed else '删分类')
+
+    def _build_manage_bar(self):
+        """管理态底部的批量操作条。"""
+        bar = QWidget(self)
+        bar.setObjectName('manageBar')
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        self.manage_count = QLabel('已选 0 张')
+        self.manage_count.setObjectName('manageCount')
+        layout.addWidget(self.manage_count)
+        self.btn_manage_all = QPushButton('全选')
+        self.btn_manage_all.setObjectName('manageBtn')
+        self.btn_manage_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_manage_all.clicked.connect(self._manage_select_all)
+        layout.addWidget(self.btn_manage_all)
+        self.btn_manage_category = QPushButton('放进分类…')
+        self.btn_manage_category.setObjectName('manageBtn')
+        self.btn_manage_category.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_manage_category.clicked.connect(self._manage_batch_category)
+        layout.addWidget(self.btn_manage_category)
+        self.btn_manage_remove_category = QPushButton('移出这个分类')
+        self.btn_manage_remove_category.setObjectName('manageBtn')
+        self.btn_manage_remove_category.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_manage_remove_category.clicked.connect(self._manage_batch_remove_category)
+        layout.addWidget(self.btn_manage_remove_category)
+        self.btn_manage_unpin = QPushButton('移出收藏')
+        self.btn_manage_unpin.setObjectName('manageBtn')
+        self.btn_manage_unpin.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_manage_unpin.clicked.connect(self._manage_batch_unpin)
+        layout.addWidget(self.btn_manage_unpin)
+        # 收尾的「完成」只剩右上角那一个（底部再放一个会把这条挤爆）
+        bar.hide()
+        return bar
+
+    def _select_category(self, category_id):
+        """切到某个分类（再点一次回到全部收藏）。"""
+        self._category_filter = '' if self._category_filter == category_id else category_id
+        self._manage_selected.clear()
+        self._category_armed_delete = ''
+        self._render_category_bar()
+        self._render_grid()
+        self._refresh_manage_ui()
+        self._refresh_category_tools()
+
+    def _toggle_manage(self):
+        """管理态：对整个收藏多选，批量放进分类或移出收藏。"""
+        self._managing = not self._managing
+        self._manage_selected.clear()
+        self._category_armed_delete = ''
+        # 管理态要露出「＋分类」和分类编辑入口，退出时再收回去
+        self._render_category_bar()
+        self._refresh_manage_ui()
+        self.update_button_states()
+
+    def _category_anchor_global(self, category_id):
+        """弹层贴着被点的那个分类 tab。"""
+        button = self.category_buttons.get(str(category_id))
+        if button is not None:
+            try:
+                return button.mapToGlobal(button.rect().center())
+            except (RuntimeError, AttributeError):
+                pass
+        return self._grid_anchor_global()
+
+    def _arm_or_delete_category(self, category_id):
+        """删分类两步：第一次点只是变文字，再点才真删。"""
+        category_id = str(category_id)
+        if self._category_armed_delete != category_id:
+            self._category_armed_delete = category_id
+            self._refresh_category_tools()
+            self.hint.setText('再点一次「再点一次」才真的删掉这个分类')
+            self.hint.show()
+            return
+        self._delete_category(category_id)
+
+    def _open_category_rename(self, category_id):
+        category = next((entry for entry in (self.categories or []) if str(entry.get('id')) == str(category_id)), None)
+        if not category:
+            return
+        prompt = TextPrompt(
+            self,
+            '改分类名字',
+            hint='换个名字，图还留在这个分类里。',
+            initial=str(category.get('name') or ''),
+            placeholder='分类名',
+            confirm_text='保存',
+            on_confirm=lambda name: self._rename_category(category_id, name),
+        )
+        prompt.show_at(self._category_anchor_global(category_id))
+        self._text_prompt = prompt
+
+    def _rename_category(self, category_id, name):
+        name = str(name or '').strip()
+        if not name:
+            return {'ok': False, 'error': '名字不能空着'}
+        result = request_json('POST', '/category-rename', {'id': str(category_id), 'name': name}, timeout=10)
+        if not result.get('ok'):
+            return {'ok': False, 'error': result.get('error') or '没改成'}
+        self.refresh()
+        return {'ok': True}
+
+    def _delete_category(self, category_id):
+        category_id = str(category_id)
+        result = request_json('POST', '/category-delete', {'id': category_id}, timeout=10)
+        self._category_armed_delete = ''
+        if not result.get('ok'):
+            self.hint.setText(result.get('error') or '没删成')
+            self.hint.show()
+            self._refresh_category_tools()
+            return {'ok': False, 'error': result.get('error') or '没删成'}
+        if self._category_filter == category_id:
+            self._category_filter = ''
+        self.hint.setText('分类删掉了，里面的图还在收藏里')
+        self.hint.show()
+        self.refresh()
+        return {'ok': True}
+
+    def _toggle_manage_pick(self, sticker_id):
+        sticker_id = str(sticker_id)
+        if sticker_id in self._manage_selected:
+            self._manage_selected.discard(sticker_id)
+        else:
+            self._manage_selected.add(sticker_id)
+        self._refresh_manage_ui()
+        self.update_button_states()
+
+    def _manage_visible_ids(self):
+        return [str(item.get('id')) for item in self._visible_items() if item.get('id')]
+
+    def _manage_select_all(self):
+        ids = self._manage_visible_ids()
+        if ids and all(value in self._manage_selected for value in ids):
+            self._manage_selected.clear()
+        else:
+            for value in ids:
+                self._manage_selected.add(value)
+        self._refresh_manage_ui()
+        self.update_button_states()
+
+    def _refresh_manage_ui(self):
+        """管理态：显示操作条、收起发送框。"""
+        managing = bool(self._managing)
+        self.manage_bar.setVisible(managing)
+        self.editor.setVisible(not managing)
+        self.send_button.setVisible(not managing)
+        count = len(self._manage_selected)
+        self.manage_count.setText('已选 %d 张' % count)
+        # 右上角的管理按钮跟着状态走：进管理态变「完成」并亮色
+        toggle = getattr(self, 'btn_manage', None)
+        if toggle is not None:
+            toggle.setText('完成' if managing else '管理')
+            if bool(toggle.property('active')) != managing:
+                toggle.setProperty('active', managing)
+                toggle.style().unpolish(toggle)
+                toggle.style().polish(toggle)
+        ids = self._manage_visible_ids()
+        self.btn_manage_all.setText('全不选' if ids and all(value in self._manage_selected for value in ids) else '全选')
+        self.btn_manage_category.setEnabled(bool(count))
+        self.btn_manage_unpin.setEnabled(bool(count))
+        self.btn_manage_remove_category.setVisible(bool(self._category_filter))
+        self.btn_manage_remove_category.setEnabled(bool(count))
+
+    def _create_category_inline(self):
+        """分类行上的「＋分类」：直接弹输入框新建。"""
+        picker = CategoryPicker(self, [], initial=set(), title='新建分类', hint='给收藏里的图起个名字，比如「打工人」。')
+        picker.new_name.setFocus()
+        picker.show_at(self.ball.mapToGlobal(self.ball.rect().center()) if hasattr(self.ball, 'mapToGlobal') else None)
+        self._category_picker = picker
+
+    def _create_category(self, name):
+        """建一个分类。返回 {'ok': True, 'category': {...}}。"""
+        result = request_json('POST', '/category-create', {'name': name}, timeout=10)
+        if not result.get('ok'):
+            return {'ok': False, 'error': result.get('error') or '分类没建成'}
+        return {'ok': True, 'category': result.get('category') or {}}
+
+    def _apply_category_batch(self, sticker_ids, category_ids):
+        """批量把图放进分类（合并，不覆盖它们原来有的分类）。"""
+        if not sticker_ids:
+            return {'ok': False, 'error': '没选中图'}
+        result = request_json('POST', '/category-set-batch', {
+            'stickerIds': [str(value) for value in sticker_ids],
+            'categoryIds': [str(value) for value in category_ids],
+        }, timeout=15)
+        if not result.get('ok'):
+            return {'ok': False, 'error': result.get('error') or '没存上'}
+        self.refresh()
+        return {'ok': True, 'count': result.get('count', len(sticker_ids))}
+
+    def _manage_batch_category(self):
+        """管理态：把选中的几张一起放进某些分类。"""
+        ids = sorted(self._manage_selected)
+        if not ids:
+            return
+        picker = CategoryPicker(
+            self, ids, initial=set(),
+            title='把 %d 张放进分类' % len(ids),
+            hint='选中的图会一起加进这些分类（它们原来有的分类不动）。',
+        )
+        picker.show_at(self._grid_anchor_global())
+        self._category_picker = picker
+
+    def _manage_batch_remove_category(self):
+        """管理态：把选中的图移出当前分类（原图还在收藏里）。"""
+        ids = sorted(self._manage_selected)
+        if not ids or not self._category_filter:
+            return
+        result = request_json('POST', '/category-remove-batch', {
+            'stickerIds': ids,
+            'categoryId': self._category_filter,
+        }, timeout=15)
+        if not result.get('ok'):
+            self.hint.setText(result.get('error') or '没移成')
+            self.hint.show()
+            return
+        self._manage_selected.clear()
+        self._refresh_manage_ui()
+        self.refresh()
+
+    def _manage_batch_unpin(self):
+        """管理态：把选中的图移出收藏（原图还在图库里）。"""
+        ids = sorted(self._manage_selected)
+        if not ids:
+            return
+        result = request_json('POST', '/unpin-batch', {'stickerIds': ids}, timeout=15)
+        if not result.get('ok'):
+            self.hint.setText(result.get('error') or '没移成')
+            self.hint.show()
+            return
+        self._manage_selected.clear()
+        self._refresh_manage_ui()
+        self.refresh()
+
+    def _grid_anchor_global(self):
+        """分类弹层弹在哪：网格中间偏上。"""
+        try:
+            return self.grid_host.mapToGlobal(self.grid_host.rect().center())
+        except Exception:
+            return self.mapToGlobal(self.rect().center())
+
+    def _open_category_picker(self, sticker_ids, initial=None, title='放进分类', hint=''):
+        """右键某张图 → 放进分类。"""
+        picker = CategoryPicker(self, sticker_ids, initial=initial, title=title, hint=hint)
+        picker.show_at(self._grid_anchor_global())
+        self._category_picker = picker
 
     def paste_from_clipboard(self):
         """打开粘贴识别面板：用户自己 Ctrl+V 后才读取剪贴板图片，不再自动读。"""
@@ -2302,7 +3212,7 @@ class BallPanel(QFrame):
             img = QPixmap()
             img.loadFromData(m["imageData"])
             if not img.isNull():
-                thumb.setPixmap(img.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                thumb.setPixmap(rounded_pixmap(img, 48))
         self.history_thumbs.append(thumb)
         lay.addWidget(thumb, 0, Qt.AlignmentFlag.AlignTop)
 
@@ -2443,12 +3353,12 @@ class BallPanel(QFrame):
         self.chat_suggestion = None
         self.chat_busy = False
         if pixmap is not None and not pixmap.isNull():
-            self.chat_thumb.setPixmap(pixmap.scaled(30, 30, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            self.chat_thumb.setPixmap(rounded_pixmap(pixmap, 30))
         elif image_data:
             img = QPixmap()
             img.loadFromData(image_data)
             if not img.isNull():
-                self.chat_thumb.setPixmap(img.scaled(30, 30, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                self.chat_thumb.setPixmap(rounded_pixmap(img, 30))
         self.chat_status.setText("告诉我哪里不对、该怎么调")
         self._clear_chat_messages()
         self._append_chat_bubble("assistant", "告诉我哪里不对、该怎么调。\n比如：这张图表达的是撒娇，不是开心")
@@ -2691,6 +3601,10 @@ class BallPanel(QFrame):
             item = self.grid.takeAt(0)
             widget = item.widget()
             if widget:
+                # 先停动图再销毁：QMovie 播着被带走，是 0xC0000005 的老座
+                dispose = getattr(widget, 'dispose', None)
+                if callable(dispose):
+                    dispose()
                 widget.deleteLater()
 
     def _items_blocked(self):
@@ -2828,9 +3742,9 @@ class BallPanel(QFrame):
                 self.recent_thumb.clear()
                 self.chat_thumb.clear()
             else:
-                scaled = image.scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                scaled = rounded_pixmap(image, 56)
                 self.recent_thumb.setPixmap(scaled)
-                self.chat_thumb.setPixmap(image.scaled(30, 30, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                self.chat_thumb.setPixmap(rounded_pixmap(image, 30))
             self.recent_description.setText(str(match.get("description") or "（无描述）"))
             meta = [str(value) for value in (match.get("emotion"), match.get("agentId")) if value]
             self.recent_meta.setText(" · ".join(meta) if meta else "刚刚配图")
@@ -2966,7 +3880,7 @@ class BallPanel(QFrame):
         self.chat_busy = False
         image = self.recent_thumb.pixmap()
         if image and not image.isNull():
-            self.chat_thumb.setPixmap(image.scaled(30, 30, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            self.chat_thumb.setPixmap(rounded_pixmap(image, 30))
         self.chat_status.setText("告诉我哪里不对、该怎么调")
         self._clear_chat_messages()
         self._append_chat_bubble("assistant", "告诉我哪里不对、该怎么调。\\n比如：这张图表达的是撒娇，不是开心")
@@ -3104,8 +4018,9 @@ class BallPanel(QFrame):
         if not pinned.get("ok"):
             return {"ok": False, "error": pinned.get("error") or "读取表情包失败"}
         stickers = pinned.get("stickers") or []
+        categories = pinned.get("categories") or []
         if not stickers:
-            return {"ok": True, "items": []}
+            return {"ok": True, "items": [], "categories": categories}
         # v0.33.45 - 并发拉图：串行 IPC 往返是首次打开慢的根因，8 并发明显提速（本地 HTTP 安全）
         def _load(item):
             copy = dict(item)
@@ -3114,7 +4029,7 @@ class BallPanel(QFrame):
         # 临时对照实验：并发 8 → 1，验证崩溃是否来自“后台线程里再开多线程等管道回包”。
         with ThreadPoolExecutor(max_workers=1) as ex:
             items = list(ex.map(_load, stickers))
-        return {"ok": True, "items": items}
+        return {"ok": True, "items": items, "categories": categories}
 
     def apply_items(self, result):
         if not result.get("ok"):
@@ -3122,6 +4037,7 @@ class BallPanel(QFrame):
             self.hint.show()
             return
         self.items = result.get("items") or []
+        self.categories = result.get("categories") or []
         available_ids = {str(item.get("id")) for item in self.items if item.get("id")}
         if self.selected_sticker_id not in available_ids:
             self.selected_sticker_id = None
@@ -3129,21 +4045,9 @@ class BallPanel(QFrame):
         self._drag_state = None
         if state:
             self._destroy_drag_ghost(state.get("ghost"))
-        self._buttons_by_id = {}
-        self.clear_grid()
-        # 图集网格第 0 格固定为「＋ 添加表情包」占位格，图片从第 1 格开始排
-        self._add_cell = AddStickerCell(self.grid_host, on_add=self.paste_from_clipboard)
-        self.grid.addWidget(self._add_cell, 0, 0)
-        for index, item in enumerate(self.items):
-            pixmap = QPixmap()
-            if item.get("imageData"):
-                pixmap.loadFromData(item["imageData"])
-            # 两个入口共用已保存的图集顺序。
-            button = StickerButton(item, pixmap, self.grid_host, on_context=self._open_sticker_context_menu, on_drag=self._on_sticker_drag)
-            button.clicked.connect(lambda checked=False, sid=item.get("id"): self.select_sticker(sid))
-            self._buttons_by_id[str(item.get("id"))] = button
-            cell = index + 1  # 占位格占第 0 格
-            self.grid.addWidget(button, cell // self.sticker_columns, cell % self.sticker_columns)
+        self._render_grid()
+        self._render_category_bar()
+        self._refresh_manage_ui()
         if self.items:
             self.hint.setText(self.selection_hint())
             self.hint.show()
@@ -3156,6 +4060,53 @@ class BallPanel(QFrame):
         self._set_all_movies(self.isVisible())
         # v0.33.46 - 图集到位恢复网格水平居中（加载中临时靠左，见 _ensure_add_cell_visible）
         self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+
+    def _visible_items(self):
+        """当前分类下要显示的图。没选分类就是全部收藏。"""
+        if not self._category_filter:
+            return list(self.items)
+        target = self._category_filter
+        return [item for item in self.items if target in (item.get('categoryIds') or [])]
+
+    def _reslot_grid(self):
+        """按当前顺序把已有按钮重新落格，不销毁也不重建。
+
+        拖动排序走这条：重建会把一批正在播放的动图一起带走，历史上就是那条 0xC0000005。
+        找不到对应按钮时返回 False，由调用方回退到全量重建。
+        """
+        while self.grid.count():
+            self.grid.takeAt(0)
+        add_cell = getattr(self, '_add_cell', None)
+        if add_cell is not None:
+            self.grid.addWidget(add_cell, 0, 0)
+        for index, item in enumerate(self._visible_items()):
+            button = self._buttons_by_id.get(str(item.get('id')))
+            if button is None:
+                return False
+            cell = index + 1
+            self.grid.addWidget(button, cell // self.sticker_columns, cell % self.sticker_columns)
+        return True
+
+    def _render_grid(self):
+        """重画图集网格。切分类、管理态勾选后都走这里，不重新拉数据。"""
+        self._buttons_by_id = {}
+        self.clear_grid()
+        # 图集网格第 0 格固定为「＋ 添加表情包」占位格，图片从第 1 格开始排
+        self._add_cell = AddStickerCell(self.grid_host, on_add=self.paste_from_clipboard)
+        self.grid.addWidget(self._add_cell, 0, 0)
+        # 筛选状态下不开放拖拽排序：排序接口要的是完整顺序，筛过的列表不完整
+        on_drag = None if self._category_filter else self._on_sticker_drag
+        for index, item in enumerate(self._visible_items()):
+            pixmap = QPixmap()
+            if item.get("imageData"):
+                pixmap.loadFromData(item["imageData"])
+            # 两个入口共用已保存的图集顺序。
+            button = StickerButton(item, pixmap, self.grid_host, on_context=self._open_sticker_context_menu, on_drag=on_drag)
+            button.clicked.connect(lambda checked=False, sid=item.get("id"): self.select_sticker(sid))
+            self._buttons_by_id[str(item.get("id"))] = button
+            cell = index + 1  # 占位格占第 0 格
+            self.grid.addWidget(button, cell // self.sticker_columns, cell % self.sticker_columns)
+        self.update_button_states()
 
     # v0.33.38 - 面板显示时播动图、隐藏时全部暂停（省 CPU）
     def showEvent(self, event):
@@ -3216,11 +4167,7 @@ class BallPanel(QFrame):
         ghost.setFixedSize(STICKER_TILE_SIZE, STICKER_TILE_SIZE)
         ghost.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if not pixmap.isNull():
-            ghost.setPixmap(pixmap.scaled(
-                STICKER_ICON_SIZE, STICKER_ICON_SIZE,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            ))
+            ghost.setPixmap(rounded_pixmap(pixmap, STICKER_ICON_SIZE))
         ghost.setStyleSheet("background:rgba(232,155,176,0.16); border:2px solid #e89bb0; border-radius:12px;")
         ghost.adjustSize()
         ghost.move(global_pos.x() - STICKER_TILE_SIZE // 2, global_pos.y() - STICKER_TILE_SIZE // 2)
@@ -3264,6 +4211,8 @@ class BallPanel(QFrame):
         button = state["button"]
         button.setProperty("dragTarget", False)
         button.setGraphicsEffect(None)
+        # effect 已被 setGraphicsEffect(None) 删掉，别再留悬空引用
+        self._drag_opacity = None
         self._clear_drag_highlight()
         self._destroy_drag_ghost(state.get("ghost"))
         if target == from_index:
@@ -3272,7 +4221,12 @@ class BallPanel(QFrame):
         self._items_seq += 1
         new_items = reorder_items(self.items, from_index, target)
         self.items = new_items
-        self.apply_items({"ok": True, "items": new_items})
+        # 拖完只挪格子，不重建：重建等于把一批正在播放的动图一起送走（0xC0000005 的老座）
+        if not self._reslot_grid():
+            self.apply_items({"ok": True, "items": new_items})
+        else:
+            self._refresh_manage_ui()
+            self.update_button_states()
         ids = [str(item.get("id")) for item in new_items]
         worker = BackgroundRequest(
             lambda: request_json("POST", "/pinned/reorder", {"ids": ids}, timeout=8),
@@ -3332,6 +4286,10 @@ class BallPanel(QFrame):
     def select_sticker(self, sticker_id):
         if self.busy or not sticker_id:
             return
+        if self._managing:
+            # 管理态：点击是勾选，不是选待发送
+            self._toggle_manage_pick(sticker_id)
+            return
         self.reset_retry_confirmation()
         sticker_id = str(sticker_id)
         self.selected_sticker_id = None if self.selected_sticker_id == sticker_id else sticker_id
@@ -3345,7 +4303,13 @@ class BallPanel(QFrame):
             widget = self.grid.itemAt(index).widget()
             if isinstance(widget, StickerButton):
                 widget.setEnabled(not self.busy)
-                widget.set_selected(str(widget.item.get("id")) == self.selected_sticker_id)
+                if self._managing:
+                    # 管理态的勾选是绿色框，跟待发送选择的粉框分开
+                    widget.set_selected(False)
+                    widget.set_managed(str(widget.item.get("id")) in self._manage_selected)
+                else:
+                    widget.set_managed(False)
+                    widget.set_selected(str(widget.item.get("id")) == self.selected_sticker_id)
             elif isinstance(widget, AddStickerCell):
                 widget.setEnabled(not self.busy)
         can_send = bool(self.selected_sticker_id) and not self.busy
@@ -3442,7 +4406,7 @@ class BallPanel(QFrame):
         self._update_target()
 
     def _update_target(self):
-        arrow = "▴" if self.target_menu is not None and self.target_menu.isVisible() else "▾"
+        arrow = "▲" if self.target_menu is not None and self.target_menu.isVisible() else "▼"
         if self.ball.target_mode == "pinned" and self.ball.pinned_target:
             title = (self.ball.target_title or self.ball.pinned_target.get("title") or "").strip()
             label = ("固定 · " + title[:6]) if title else "固定"
@@ -3515,7 +4479,10 @@ class BallPanel(QFrame):
 
     def shutdown(self):
         self.recent_timer.stop()
+        self._pinned_timer.stop()
         self._fade_poll_timer.stop()
+        # 退出前先把动图全停下，别让 QMovie 在析构窗口里还在解帧
+        self._set_all_movies(False)
         self.wait_card.shutdown()
         self.restore_panel_opacity()
         self.recent_request_seq += 1

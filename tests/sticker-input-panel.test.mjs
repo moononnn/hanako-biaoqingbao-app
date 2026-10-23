@@ -85,9 +85,9 @@ test('timeout stays unknown and cannot blindly replay images', async t => {
   assert.equal(calls, 1);
 });
 function harness() {
-  const routes = new Map(); let tool, shown; let calls = 0;
+  const routes = new Map(); let tool, shown; let calls = 0; let dismissed = 0;
   const sdk = { dataDir: fs.mkdtempSync(path.join(root, 'panel-')), tools: { register: async value => { tool = value; } }, userInteraction: {
-    show: async value => { shown = value; return { panelId: 'panel' }; }, dismiss: async () => {},
+    show: async value => { shown = value; return { panelId: 'panel' }; }, dismiss: async () => { dismissed++; },
   }, bus: { request: async (verb, body) => {
     if (verb === 'session:get') return { session: { sessionRef: { id: 'sess_bound-session' }, id: 'internal-uuid' } };
     calls++; return { ok: true };
@@ -95,16 +95,27 @@ function harness() {
   const panel = createStickerInputPanel(sdk);
   panel.registerRoutes({ get: (route, fn) => routes.set('GET ' + route, fn), post: (route, fn) => routes.set('POST ' + route, fn) });
   const invoke = (route, body) => routes.get('POST /api/sticker-compose/' + route)({ req: { json: async () => body }, json: (data, status = 200) => ({ data, status }) });
+  const hidden = ticket => routes.get('POST /api/sticker-compose/panel-hidden')({ req: { query: key => key === 'ticket' ? ticket : '' }, json: (data, status = 200) => ({ data, status }) });
   const library = (ticket, requestId = '') => routes.get('GET /api/sticker-compose/library')({ req: { query: key => key === 'ticket' ? ticket : requestId }, json: (data, status = 200) => ({ data, status }) });
-  return { panel, sdk, invoke, library, get tool() { return tool; }, get shown() { return shown; }, get calls() { return calls; } };
+  return { panel, sdk, invoke, hidden, library, get tool() { return tool; }, get shown() { return shown; }, get calls() { return calls; }, get dismissed() { return dismissed; } };
 }
-test('tool binds its own session; request is deduplicated; changed payload rejected', async () => {
+test('tool toggles: first tap opens, second tap dismisses, third opens with the same ticket', async () => {
   const h = harness(); await h.panel.registerTool();
   await h.tool.execute({ context: { sessionPath: 'fixture-session' } });
   assert.equal(h.shown.sessionId, 'sess_bound-session');
+  assert.equal(h.dismissed, 0, '第一下是打开，不该收起');
   const firstTicket = h.shown.contentFrame.data.ticket;
+  // 再按一下 = 收起
   await h.tool.execute({ context: { sessionPath: 'fixture-session' } });
-  assert.equal(h.shown.contentFrame.data.ticket, firstTicket, '重复打开保留绑定和草稿');
+  assert.equal(h.dismissed, 1, '第二下应收起面板');
+  // 再按回来 = 重新打开，票不变（草稿和防重记录都还在这张票上）
+  await h.tool.execute({ context: { sessionPath: 'fixture-session' } });
+  assert.equal(h.dismissed, 1);
+  assert.equal(h.shown.contentFrame.data.ticket, firstTicket, '重新打开保留绑定和草稿');
+  // 面板自己关掉时会报一声，之后点按钮应该是重新打开而不是收起
+  h.hidden(firstTicket);
+  await h.tool.execute({ context: { sessionPath: 'fixture-session' } });
+  assert.equal(h.dismissed, 1, '面板已经关了，这一下应该打开');
   const body = { ...valid(), ticket: h.shown.contentFrame.data.ticket };
   const results = await Promise.all([h.invoke('send', body), h.invoke('send', body)]);
   assert.ok(results.every(result => result.data.ok)); assert.equal(h.calls, 1);
@@ -117,6 +128,9 @@ test('reopening after 100 sends keeps working and preserves old deduplication', 
   const h = harness(); await h.panel.registerTool(); await h.tool.execute({ context: { sessionPath: 'fixture-session' } });
   const ticket = h.shown.contentFrame.data.ticket;
   for (let i = 0; i < 101; i++) assert.equal((await h.invoke('send', { ...valid({ requestId: 'request-' + String(i).padStart(4, '0') }), ticket })).data.ok, true);
+  // 一次点收起、一次点打开：票不变，老的防重记录还在
+  await h.tool.execute({ context: { sessionPath: 'fixture-session' } });
+  assert.equal(h.dismissed, 1);
   await h.tool.execute({ context: { sessionPath: 'fixture-session' } });
   assert.equal(h.shown.contentFrame.data.ticket, ticket);
   await h.invoke('send', { ...valid({ requestId: 'request-0000' }), ticket });
@@ -222,7 +236,10 @@ test('UI contract uses SDK binding, safe DOM, retained failure draft and explici
   const html = fs.readFileSync(new URL('../ui/sticker-compose.html', import.meta.url), 'utf8');
   assert.match(ui, /hana.inputPanel.onContextChanged/); assert.match(ui, /ticket === sendingTicket/); assert.match(ui, /requestId === sendingRequestId/);
   assert.ok(!html.includes('id="close"')); assert.ok(!ui.includes("$('close')"));
-  assert.ok(!html.includes('id="manage"')); assert.ok(!ui.includes("$('manage')")); assert.ok(!ui.includes('managing'));
+  // 2026-10-22：玥儿要求「我的收藏」里能自建分类，分类要有管理态（改名、删分类、把图移出分类）。
+  // 所以这里不再一刀切禁掉 managing，只保留「面板里不许有全局的管理/关闭按钮」这条；
+  // 分类自己的管理态是 2026-10-22 新加的，见 tests/favorite-categories.test.mjs。
+  assert.ok(!html.includes('id="manage"')); assert.ok(!ui.includes("$('manage')"));
   assert.ok(html.includes('id="context-delete"') && html.includes('id="context-title"'));
   assert.ok(!ui.includes('.innerHTML')); assert.match(ui, /待发送内容已保留/);
   assert.ok(!/requestId \|\|= crypto\.randomUUID\(\)/.test(ui), '发送编号不能直接调 randomUUID');

@@ -36,6 +36,10 @@ test('catalog stays newest first; paper-plane pinned list keeps saved manual ord
   const server = fs.readFileSync(new URL('../lib/ball.js', import.meta.url), 'utf8');
   const python = fs.readFileSync(new URL('../python/ball_app.py', import.meta.url), 'utf8');
   assert.match(server, /stickers: newestStickersFirst\(readMeta\(\)\)\.map\(serializedSticker\)/);
-  assert.match(server, /config.pinnedIds.map\(id => serializedSticker\(byId.get\(id\)\)\)/);
-  assert.ok(python.includes('on_drag=self._on_sticker_drag'));
+  // 收藏顺序必须来自手动保存的 pinnedIds（不重排成 newest）；带分类后这步展开成多行，
+  // 所以盯住来源和输出两端，而不是中间那句 map 的具体排版。
+  assert.match(server, /const stickers = config\.pinnedIds\s*\.map\(/);
+  assert.match(server, /pinnedIds: stickers\.map\(item => item\.id\)/);
+  // 拖拽排序仍接 _on_sticker_drag，但按分类筛选时禁用（筛选态下重排语义不成立）
+  assert.ok(python.includes('on_drag = None if self._category_filter else self._on_sticker_drag'));
 });

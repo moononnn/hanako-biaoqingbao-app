@@ -30,7 +30,7 @@
           "id": "sticker-compose",
           "title": "表情包",
           "text": "🪄",
-          "tooltip": "表情包：打开共享图集，选图或输入文字发送",
+          "tooltip": "打开我的收藏，选图或输入文字发送",
           "toolName": "stickers.open_compose"
         }
       ]
