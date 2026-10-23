@@ -935,4 +935,17 @@ ode --test --test-concurrency=1 "tests/*.test.mjs" 全量，另有纸飞机三�
 
 未覆盖：实机交互（面板实际观感、拖拽手感）仍需宿主里手动过一遍，测试只能守住契约与源码形态。
 
-补充（拆分提交时）：先用 git worktree 逐笔验快照，发现按「输入栏开关」单独成笔会装不上——lib/sticker-input-panel.js 同时承载面板的收藏分类接口与按钮开关，import 了下一笔才出现的 avorite-categories.js，中间快照直接 ERR_MODULE_NOT_FOUND。分类模块与开关逻辑合并成一笔后，逐笔快照均可装载、全绿。
+补充（拆分提交时）：先用 git worktree 逐笔验快照，发现按「输入栏开关」单独成笔会装不上——lib/sticker-input-panel.js 同时承载面板的收藏分类接口与按钮开关，import 了下一笔才出现的 favorite-categories.js，中间快照直接 ERR_MODULE_NOT_FOUND。分类模块与开关逻辑合并成一笔后，逐笔快照均可装载、全绿。
+
+## 2026-10-23 定版 0.5.2 后的发布验证
+
+改动 README 与新增一张图片后，指纹变了，以下是重跑后的结果：
+
+- `verify`：Node 461 项通过 / 0 失败；Python 纸飞机用例 2 组通过。
+- `pack`（官方打包器）：剥内测 `index.js` 1 个块，语法检查 1 个文件通过。
+- `release-tests`（对最终包副本）：最终副本测试通过 461 项，已自动绑定 ZIP/entry 双指纹。
+- **偶发失败记录**：第一次 `release-tests` 时 `py -B tests/test_ball_target.py` 失败 1 项（同一轮本地 `verify` 刚跑完、`pack` 并发进行）。在源码目录单独跑该用例通过，紧接着重跑 `release-tests` 也全部通过。当时本机无纸飞机进程、18904 端口空闲，倾向环境资源争用而非用例本身缺陷。**如实记为偶发，不当作稳定通过。**
+- 云候选：`cloud-build-app-package`（run 39905820269）与 `CI`（run 39905805645）在提交 `2a93d9b` 上均成功；云端 ZIP/entry 双指纹与本地候选完全一致（`d1adaf11…` / `d64ee689…`），因此复用本地副本测试与独立审查结论，不重复全审。
+- 包体积从 5,192,043 字节涨到 7,088,484 字节，增量全部来自新增的 `assets/release-screenshots/sticker-sakura-girl.png`（1,990,281 字节）。尝试用 GDI+ 无损重存 PNG 反而涨到 3,163,273 字节，放弃压缩，保留原图。
+- 文档修正：`TESTING.md` 里有一处 `favorite-categories.js` 的首字母 `f` 曾被换成 form feed（0x0C）控制字符，已修回；该文件与其他发布文档已全文扫过，无同类残留。
+- 未覆盖：本版收藏分类与纸飞机交互仍未由作者实机验收；包体未做极限压缩。
