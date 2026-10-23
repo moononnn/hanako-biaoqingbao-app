@@ -236,7 +236,7 @@ test('UI contract uses SDK binding, safe DOM, retained failure draft and explici
   const html = fs.readFileSync(new URL('../ui/sticker-compose.html', import.meta.url), 'utf8');
   assert.match(ui, /hana.inputPanel.onContextChanged/); assert.match(ui, /ticket === sendingTicket/); assert.match(ui, /requestId === sendingRequestId/);
   assert.ok(!html.includes('id="close"')); assert.ok(!ui.includes("$('close')"));
-  // 2026-10-22：玥儿要求「我的收藏」里能自建分类，分类要有管理态（改名、删分类、把图移出分类）。
+  // 2026-10-22：作者要求「我的收藏」里能自建分类，分类要有管理态（改名、删分类、把图移出分类）。
   // 所以这里不再一刀切禁掉 managing，只保留「面板里不许有全局的管理/关闭按钮」这条；
   // 分类自己的管理态是 2026-10-22 新加的，见 tests/favorite-categories.test.mjs。
   assert.ok(!html.includes('id="manage"')); assert.ok(!ui.includes("$('manage')"));

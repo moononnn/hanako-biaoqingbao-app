@@ -1,7 +1,7 @@
 // 表情包 · 收藏分类回归
 // 保护：我的收藏里自己分的类——新建/改名/删除、一张图进多个分类、
-// 移出收藏时分类跟着清、分类文件坏了要显式报错（不能当空库把她的分类抹掉）。
-// 起因：2026-10-21 玥儿要「收藏里能自己分类」，参考茶话会那套。
+// 移出收藏时分类跟着清、分类文件坏了要显式报错（不能当空库把用户的分类抹掉）。
+// 起因：2026-10-21 作者提出「收藏里能自己分类」，参考茶话会那套。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -107,7 +107,7 @@ test("存盘再读回来，分类还在", () => {
   assert.equal(back.categories[0].name, "摸鱼");
 });
 
-test("分类文件坏了要显式报错，不能当空库把她的分类抹掉", () => {
+test("分类文件坏了要显式报错，不能当空库把用户的分类抹掉", () => {
   const dir = tempDir();
   fs.writeFileSync(categoryStorePath(dir), "{ 这不是 JSON", "utf8");
   const broken = readCategoryStore(dir);
