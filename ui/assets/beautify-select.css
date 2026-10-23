@@ -20,8 +20,14 @@
 .dd-label { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .dd-caret { width: 14px; height: 14px; flex-shrink: 0; color: var(--accent-deep); transition: transform .18s ease; }
 .dd.open .dd-caret { transform: rotate(180deg); }
+/* 面板宽度跟内容走（width: max-content + min-width:100%）：
+   原生 select 被 display:none 藏起来后，包裹层只剩触发栏文字那么宽，
+   面板若还锁死 left:0;right:0 跟触发栏等宽，选项文字就会被省略号吃掉
+   （「未分组（32）」「大肥猫（2）」全变「未分…」「大肥…」）。
+   现在面板按最长选项撑开，右边放不下时由 JS 改成右对齐，两边都不够才收窄。 */
 .dd-panel {
-  position: absolute; left: 0; right: 0; top: calc(100% + 5px); z-index: 40;
+  position: absolute; left: 0; right: auto; top: calc(100% + 5px); z-index: 40;
+  width: max-content; min-width: 100%; max-width: min(420px, calc(100vw - 20px));
   background: var(--card); border: 1px dashed var(--line); border-radius: 13px;
   box-shadow: 0 12px 28px var(--dd-shadow, rgba(69,75,67,.16));
   padding: 5px; max-height: 248px; overflow-y: auto; display: none;

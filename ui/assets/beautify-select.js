@@ -100,6 +100,29 @@
       updateLabel(); // 关闭时同步触发栏，防止选中后仍显示旧值（需再次打开才更新的 bug）
       unlift();
     }
+    // 面板按内容宽度展开后要挑边：默认从触发栏左沿向右铺，
+    // 右边放不下就改成右对齐（贴着触发栏右沿向左铺），两边都不够才按可用宽度收窄，
+    // 保证既不溢出屏幕，也不把选项挤成省略号。
+    function positionPanel() {
+      panel.style.left = "0px";
+      panel.style.right = "auto";
+      panel.style.width = "";
+      var wrapRect = wrap.getBoundingClientRect();
+      var need = panel.scrollWidth; // 内容真正需要的宽度
+      var margin = 10;
+      var spaceRight = window.innerWidth - margin - wrapRect.left;
+      var spaceLeft = wrapRect.right - margin;
+      if (need > spaceRight && spaceLeft > spaceRight) {
+        panel.style.left = "auto";
+        panel.style.right = "0px";
+      }
+      var avail = panel.style.right === "0px" ? spaceLeft : spaceRight;
+      if (need > avail) {
+        var w = Math.min(420, Math.max(120, avail));
+        panel.style.width = w + "px";
+      }
+    }
+
     function open() {
       renderPanel();
       var all = document.querySelectorAll(".dd.open");
@@ -107,6 +130,7 @@
         if (all[i] !== wrap && all[i]._ddClose) all[i]._ddClose();
       }
       wrap.classList.add("open");
+      positionPanel(); // 展开后再量，面板已是 display:block 才量得到
       lift();
     }
     wrap._ddClose = close;
