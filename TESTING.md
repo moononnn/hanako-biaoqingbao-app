@@ -1,5 +1,84 @@
 # 自动测试
 
+## 2026-10-22 输入栏表情按钮改成开关（再按一下收起）
+
+需求：输入栏那个表情按钮按一下打开面板，希望再按一下能关掉。
+
+改法：
+
+- `lib/sticker-input-panel.js`：`stickers.open_compose` 工具里维护 `openPanels`（sessionId → ticket）。同一段对话、同一张票又点一下时，先 `sdk.userInteraction.dismiss({ sessionId, id })` 再清记录，回一句「表情面板已收起。」；否则照旧 show 并记一笔。
+- 新增 `POST /api/sticker-compose/panel-hidden?ticket=`：面板自己被关或被隐藏时前端报一声，后端按 ticket 清掉开着标记，避免下次点按钮误判成「收起」。`/close` 路由顺手也清标记。
+- `ui/assets/sticker-compose.js`：`visibilitychange`（hidden）与 `pagehide` 时用 `navigator.sendBeacon` 报 hidden；`document.addEventListener` 包了 try，老宿主/砂箱里没有也不会抛。
+
+命令与结果：`node --test tests/sticker-input-panel.test.mjs tests/entry-syntax.test.mjs tests/sticker-compose-search.test.mjs` **38 项通过 / 0 失败**（其中 sticker-input-panel 27 项）。本轮改写了两个旧用例：原来的「重复打开保留票」现在按新语义分三下验证——第一下 show、第二下 dismiss（dismissed=1）、第三下再 show 且票不变；另加一步：先报 panel-hidden 再点，应该是打开而不是收起。100 次发送后重开那条也改成「一下收、一下开」。
+
+实机验收（2026-10-22）：玥儿重载后确认第二下能收起，开关行为成立。诊断期的那两行成功日志已收掉，只留着 dismiss 失败时的一行痕迹（下次重载自然生效，不用为它专门重载）。仍未验证：收起后再打开时草稿与选中图是否原样还在（逻辑上票没变，但没实机看）。宿主把面板收成一条（collapsed）也算 hidden，那种状态下再点按钮会走「重新打开」而不是「收起」，这是有意选的行为。
+
+## 2026-10-22 纸飞机分类管理补全（改动 / 删分类，＋分类收进管理态）
+
+需求（玥儿实机反馈）：管理点了之后没法改或删分类；「＋分类」也要进了管理态才出现。
+
+改法：
+
+- 分类行末尾的「＋分类」改成 `setVisible(self._managing)`，平时不露。注意顺序：先 `addWidget` 再 `setVisible`，否则无父控件的按钮会被当成独立窗口去显，之后 `isHidden()` 一直为真。
+- 管理态 + 选中某分类时，分类行下方出现 `categoryTools`：`正在管：XX` + 「改名」+「删分类」。不塞进分类行，是因为 320 宽加两个按钮会把「＋分类」顶出视野。
+- 删分类两步：第一下只把文案变「再点一次」，第二下才 `POST /category-delete`；成功后提示「分类删掉了，里面的图还在收藏里」，若正看着该分类就回到全部。
+- 改名走新增的 `TextPrompt`（跟分类弹层同一张脸：paintEvent 自绘底），预填旧名、回车即存，`POST /category-rename`。
+- `CategoryPicker._create_category` 成功后会叫面板 `_render_category_bar()`：以前新建完分类行不长新 tab，得等下次拉数据。
+- 分类按钮宽度用 `ensurePolished()` 后的 `fontMetrics` 量一遍（必须在 `addWidget` 之后，否则拿不到父级样式表字体）；分类行 host 用 `QLayout.SizeConstraint.SetMinimumSize` 自己撑宽，避免 QScrollArea 把按钮压窄、字被切。
+
+命令与结果：`python -B tests/test_ball_categories.py` **1 项通过 / 0 失败**。本轮新增断言：平时 `add_category_btn.isHidden()`、管理态不 hidden；管理态选中分类后 `category_tools` 可见且说明文案含分类名；点「改名」弹出的卡预填旧名、提交带 `{id:'c1', name:'划水'}`；「删分类」第一下只变文案不真删，第二下才发 `/category-delete`。`test_ball_target.py`、`test_ball_wait_state.py` 各 1 项通过。
+
+离屏抓图（`_tmp_preview_ball/render_panel.py`）：普通态确认分类行没有「＋分类」；管理态选中分类确认工具行与两个按钮的位置、颜色；另打印了四个分类按钮的 geometry，确认不重叠（0-67 / 72-148 / 153-220 / 225-292，间距 5）。
+
+未覆盖（2026-10-22 已部分补）：分类删除经玥儿实机验收确认可用；改名仍未在真库上实际改过名字；分类多到需要横向滚动时的手感未验。
+
+## 2026-10-22 「放进分类」弹层背景透明 + 跟面板风格统一（本地，版本未动）
+
+现象（玥儿实机截图）：弹层几乎没有底，能透出后面的聊天内容；布局也跟纸飞机面板不像一家人。
+
+根因（最小复现确认）：`QFrame` + `WA_TranslucentBackground` 时，QSS 里的 `background` / `border-radius` 根本不画。三类对照抓图像素：translucent + styled → 透底；translucent + 不 styled → 透底；不 translucent + styled → 正常白底。所以不是选择器或 `WA_StyledBackground` 的问题，是透明窗口把 QSS 背景吃掉了。纸飞里其他弹层（BallContextMenu / StickerContextMenu / TargetMenu）都有自绘 `paintEvent`，只有 CategoryPicker 漏了。
+
+改法：`CategoryPicker` 加 `paintEvent` 自绘圆角白卡 + 淡阴影（跟右键菜单同一套），QSS 里把 `QFrame#categoryPicker` 的 background/border 改成 transparent；同时把弹层拉回面板语言：宽 `MENU_WIDTH`180 → `PICKER_WIDTH`248、内边距 14/13、间距 8、按钮 30→28px 圆角 9、说明 9→10px、复选框行加内边距；分类多了列表区内部滚动（`PICKER_MAX_LIST_HEIGHT`176）。
+
+命令与结果：`python -B tests/test_ball_categories.py` **1 项通过 / 0 失败**（弹层里 `findChildren(QCheckBox)` 与 `_submit` 路径不变）；`test_ball_target.py` 1 项通过；`ball_app.py` 内存 compile 通过。离屏抓图（`_tmp_preview_ball/render_picker.py`）对比了 2 个分类与 8 个分类两种形态：白底、圆角、阴影、滚动都正常。
+
+未覆盖：滚动条宽度与鼠标滚轮手感未在真机验；复选框指示器仍是系统绘制，只把尺寸定到 13px，没换自绘图。
+
+## 2026-10-22 纸飞机拖动排序崩溃（exitCode 0xC0000005）
+
+取证（`%USERPROFILE%\.hanako\app-data\biaoqingbao-app\probe.log`）：今天凌晨连续 5 次非正常退出，全部 `exitCode=3221225477`（0xC0000005 access violation），崩溃前最后一行分别是：
+
+- `request_json 收到回包 /image?id=stk_266`（图片批量加载完 → 图集重建）
+- `request_json 已写出 /pinned/reorder`（拖动排序松手 → 当时走 apply_items 全量重建）
+- `request_json 收到回包 /pinned/reorder`（保存回包后下一轮轮询刷新 → 重建）
+- `update_target_info 进入`
+
+共同点都是「销毁旧图集按钮」那一刻，气泡里的 GIF 还在播。改法：
+
+- `StickerButton.dispose()`：先 `frameChanged.disconnect`、再 `QMovie.stop()`、交掉 `_movie/_movie_buffer/_movie_data`，最后才让按钮走 `deleteLater`；`clear_grid` 统一先 dispose。
+- 拖动排序松手改成 `_reslot_grid()`：只把现有按钮重新 `addWidget` 落格，不销毁不重建，避开整条销毁路径；找不到按钮才回退到全量重建。
+- `_on_movie_frame` 对 `RuntimeError`（按钮已在销毁路上）直接返回；`BallPanel.shutdown` 多停一次所有动图。
+
+命令与结果：`python -B tests/test_ball_categories.py` **1 项通过 / 0 失败**（新增断言：`_reslot_grid` 前后按钮对象 id 不变、落格顺序等于当前可见顺序、`dispose()` 后不再持有 QMovie）；`test_ball_target.py`、`test_ball_wait_state.py` 各 1 项通过；`ball_app.py` 内存 compile 通过。
+
+另做离屏压测（`L:\哈娜的工作台\_tmp_preview_ball\stress_grid.py`）：24 张图（其中 3 张真实 GIF）反复跑「全量重建 + 只重排」40 轮，运行期无崩溃（结束时故意 `os._exit(0)` 跳过析构，以区分「运行期崩」和「退出时崩」）。
+
+未覆盖：离屏平台走 raster 绘制，跟真实窗口的渲染路径不同，所以压测通过**不能**证明实机已好；本次修的是已知崩溃路径（销毁播放中的动图）与拖动重建，需玥儿重载后实测拖几次才算数。若仍崩，下一步是把 `apply_items` 的全量重建换成按 id 复用按钮。
+
+## 2026-10-22 纸飞机面板圆角 + 「管理」挪右上角 + 配图手帐入口收起（本地，版本未动）
+
+范围：`python/ball_app.py`（新增 `rounded_pixmap`，`StickerButton` 图标与 GIF 逐帧圆角，拖拽浮影与手帐/最近配图/聊天缩略图同走圆角；`HISTORY_ENTRY_VISIBLE = False` 收起配图手帐入口；顶部行新增「管理」按钮 `manageToggle`，管理态变「完成」并亮色；分类行去掉「管理」；底部批量条去掉重复的「完成」）、`tests/test_ball_categories.py`（分类行不再有「管理」、右上角按钮在、配图手帐入口隐藏、管理态文案与 `active` 属性、`rounded_pixmap` 四角透明）。
+
+命令与结果：`python -B tests/test_ball_categories.py` **1 项通过 / 0 失败**；`python -B tests/test_ball_target.py`、`python -B tests/test_ball_wait_state.py` 各 1 项通过；`python/ball_app.py` 内存 compile 通过。改前同一用例在旧断言下失败 1 项（分类行应有「管理」），确认断言跟到了新契约而不是被改松。
+
+另用 offscreen 渲染面板截图自查（
+`L:\哈娜的工作台\_tmp_preview_ball\`）：图集方图四角已圆、右上角「管理」在岗、分类行末尾不再挤着管理、管理态底部条变松。
+
+未覆盖：GIF 逐帧圆角只走了静态图路径，没拿真实动图测；真实宿主上的观感（面板圆角压在宿主背景上）待本人验收。
+
+补充（同一轮，玥儿实机一眼看到分类 tab 还是直角）：根因是 `QPushButton#catBtn` 写的 `border-radius:999px`——网页里这套能让按钮变胶囊，Qt 样式表里半径超过控件半高就直接不画圆角，退化成方角。按钮实测高 28，半径改 14（半高）后正常；图标圆角比例同步从 0.18 提到 0.22（52px 图标上 ≈11px，对齐格子自己的 12px 边框），最小半径 5→8 让横图不发尖。另外发现「自动判断 ▾」在微软雅黑 UI 里没有 `▾`/`▴` 字形（`QFontMetrics.inFont` 实测 False）会渲染成方块，换成雅黑真有的 `▼`/`▲`。`python -B tests/test_ball_categories.py`、`test_ball_target.py`、`test_ball_wait_state.py` 均通过。
+
 ## 2026-10-21 复核轮的第二个阻断项修复（本地，版本定 0.5.1）
 
 独立审查伙伴的增量复核又判 fail，两条都是真的：
@@ -841,3 +920,19 @@ node --test tests/message-card-attribution.test.mjs   # 3 项
 
 最近结果：2026-10-06，全量 98 项通过（约 2.4 秒），`validate-app.mjs` 静态 0 错 1 警（动态资源未实机证明）。
 
+
+## 2026-10-23 存档前验证（0.5.1 之后的本地改动）
+
+范围：
+ode --test --test-concurrency=1 "tests/*.test.mjs" 全量，另有纸飞机三组 Python 用例。
+
+结果：**461 项通过 / 0 失败**；python -B tests/test_ball_categories.py、	est_ball_target.py、	est_ball_wait_state.py 各 1 项 OK（offscreen，无 pyc 残留）。
+
+修掉两条过期断言（	ests/sticker-order.test.mjs，都是本轮改动改了写法、行为没退化）：
+
+- pinned 列表保手动顺序：原来盯 config.pinnedIds.map(id => serializedSticker(byId.get(id))) 这一行的排版，带分类后它展开成多行就匹配不上了。改为盯来源与输出两端——const stickers = config.pinnedIds 后接 .map(，且 pinnedIds: stickers.map(item => item.id)，顺序仍来自手动保存的 pinnedIds，不重排成 newest。
+- 拖拽回调：纸飞机改成「有分类筛选时不接拖拽」，on_drag=self._on_sticker_drag 这种写法不再出现。断言跟到新契约：on_drag = None if self._category_filter else self._on_sticker_drag。
+
+未覆盖：实机交互（面板实际观感、拖拽手感）仍需宿主里手动过一遍，测试只能守住契约与源码形态。
+
+补充（拆分提交时）：先用 git worktree 逐笔验快照，发现按「输入栏开关」单独成笔会装不上——lib/sticker-input-panel.js 同时承载面板的收藏分类接口与按钮开关，import 了下一笔才出现的 avorite-categories.js，中间快照直接 ERR_MODULE_NOT_FOUND。分类模块与开关逻辑合并成一笔后，逐笔快照均可装载、全绿。
