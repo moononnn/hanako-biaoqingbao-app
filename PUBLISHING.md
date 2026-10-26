@@ -10,7 +10,7 @@
 
 审包仅针对最终官方 ZIP 与对应 entry。主会话可先做机械检查，独立伙伴须只读核查实物入口、资源引用、依赖，以及数据写入/升级代码风险；不得碰生产数据，不要求 Builder 实测。`packageReview` 必须由独立伙伴判定，证据含 `kind=packageReview`、`status`、`method`、`scope`、`actual`、`time`、`reviewer`、`independent=true`，并绑定最终 `zipSha256` 与 `entrySha256`。一轮收齐意见；阻断问题修复后对新指纹重核，非阻断建议不扩改。派出审查或满篇未核验不算通过。
 
-普通发布不强制 Builder review/install/upgrade，也不要求卸载重装或真实数据迁移。功能声明以本人实机已测场景为限：有验收时捕获的 `files` 指纹就按指纹核验；无指纹时须有本人原会话 `reference` 且 `observedVersion` 等于本版，才可记录该场景通过并标记 `reuse=reported-scenario-only`。该记录不得跨后续代码改动复用或冒称全应用通过；完整安装/迁移无证据不得宣称通过。副本内容变换仍须对应 `releaseTests`；验证复用仅限源码、测试、依赖、检查命令、相关验证器及运行环境完全一致。Notes 或审批策略脚本变更不触发业务重测；官方打包器/发布规则变化只重核包。README 全文与 `manifest.description` 未获明确授权保持原文；实质安装/权限差异如实记录，不因此自动改稿。唯一发布包仍为官方 ZIP + entry。
+普通发布不强制 Builder review/install/upgrade，也不要求卸载重装或真实数据迁移。功能声明以本人实机已测场景为限：有验收时捕获的 `files` 指纹就按指纹核验；无指纹时须有本人原会话 `reference` 且 `observedVersion` 等于本版，才可记录该场景通过并标记 `reuse=reported-scenario-only`。该记录不得跨后续代码改动复用或冒称全应用通过；完整安装/迁移无证据不得宣称通过。副本内容变换仍须对应 `releaseTests`；验证复用仅限源码、测试、依赖、检查命令、相关验证器及运行环境完全一致。Notes 或审批策略脚本变更不触发业务重测；官方打包器/发布规则变化只重核包。README 与 `manifest.description` 不因版本号或功能更新自动改写；但**这次改动有没有让 README 里的事实描述过时，必须在动手发布之前逐条核过并请示作者**，见「发布前必须做的事」第 7 条。实质安装/权限差异如实记录，不因此自动改稿。唯一发布包仍为官方 ZIP + entry。
 
 本项目应用内更新器硬编码 `biaoqingbao-app-v<version>.zip`，由 `package.compatibilityAliases` 生成与官方 ZIP 字节相同的兼容别名；别名不是第二种包，官方名与别名的 SHA-256 必须相同。
 
@@ -62,11 +62,16 @@
 5. **核对清单里的资源路径。** 同一个 `assets/` 前缀在两处指向不同目录：顶层 `icon` 以**包根**为基址（`assets/icon.png`），而 `cards[].face.image` 与 `pageIcon` 以 **`ui/`** 为基址（清单里写 `assets/cover.png`，实指 `ui/assets/cover.png`）。核对某张图是否落盘时两个基址都要查；只查一个就断言「文件丢了」，会把本来正常的资源当成缺陷去「修」。拿解压后的 zip 对着 manifest 逐条核对卡片声明的页面与图标是否都在包里。
 5. **最终包机器核验与独立审包。** 主会话先核对最终 ZIP/entry 指纹、包内真实入口、资源引用、依赖、隐私/残留与官方静态校验；有副本内容变换时，对最终解包副本执行对应 `releaseTests`。再交独立伙伴只读检查同一 ZIP/entry 的实物与数据写入/升级代码风险，不碰生产数据、不要求 Builder 实测。证据须 `kind=packageReview`，填写 `status`、`method`、`scope`、`actual`、`time`、`reviewer`、`independent=true` 并绑定 `zipSha256`、`entrySha256`；只有独立伙伴可判 pass。意见一轮收齐，只修阻断项；ZIP/entry 变化后重做受影响包核验与审包，非阻断建议不扩改。
 6. **打包器/发布规则变更。** 官方打包器或发布规则变更只重核最终包及受影响包检查，不自动触发业务全量重测；若新包内容有变换，`releaseTests` 仍必须通过。
+7. **先核 README，再决定发不发。** 把本版改动逐条对着 `README.md` 读一遍：图标长相、按钮位置与名称、操作步骤、版本要求、权限项、界面截图里的东西。只要有一句事实描述被这版改掉了，就**先停下来问作者**「这版 README 要不要跟着改」，不许先发布再报告。
+   - 作者说改：同版改完、重新打包、重跑核验再发。
+   - 作者说这次不改：照原样发，并在市场 PR 的「已知问题」里写明哪一句与当前行为不符，留待下版。
+   - 只有版本号行不同、正文事实没变：不阻断，不用问。
+   - 这条是 2026-10-26 玥儿拍板的：旧写法让「README 不自动改」被执行成「README 不用看」，连着两版都是发完才说，她要求改成“动手前核、要改就先问”。
 
 ## 固定顺序
 
 1. 读本文件、`TESTING.md`、`PENDING_CHANGES.md`；核对 App Manager、manifest ID/版本、Git remote、tag/Release 和本版账目。开发期命名/隐私红线仍按适用规范核查；发布门禁以本文件与小工坊 `WORKFLOW.md` 为准。
-2. 整理真实待发条目进 `CHANGELOG.md`，按项目契约定版本；README 版本行不作为阻断项，也不自动编辑。
+2. 整理真实待发条目进 `CHANGELOG.md`，按项目契约定版本；README 版本行不作为阻断项，但**正文事实是否过时必须在发布前核并请示**（「发布前必须做的事」第 7 条），不得因为「不自动改」就跳过后改。
 3. 定版并稳定便携 cloud 配置，部署 workflow，执行 `notes` → `preflight` → 最终 `verify`。preflight 批量核本地隐私、Git 字节漂移、云配置与 `.cloud-build`/`.github` workflow/payload 跟踪；云上传前须显式执行一次。随后 commit/push 准确源码与 workflow/config，等待准确 CI 和候选构建，下载并 `import`。Cloud 模块未部署/不可用时才本地 `pack` 备用。
 4. 对最终官方 ZIP + entry 做机器核验，再由独立伙伴完成并记录 `packageReview`，绑定 ZIP/entry 指纹并填写 `status`、`method`、`scope`、`actual`、`time`、`reviewer`、`independent=true`；不要求 Builder review/install/upgrade 或卸载重装。功能只按本人实机已测场景记述；副本内容变换仍须 `releaseTests`。迁移风险先静态核与合成数据测试，真实数据操作另行授权。
 5. 达到 freeze 门槛后打 tag、创建 GitHub Release，上传官方 ZIP + entry 及 `biaoqingbao-app-v<version>.zip` 字节相同的兼容别名；回下载每个 ZIP 并确认 SHA-256 相同且与 entry 一致，再登记市场。
@@ -76,4 +81,4 @@
 ## 发布后
 
 - 把 `PENDING_CHANGES.md` 清空（保留文件头），从下一版重新记账。
-- README 不因版本号或每项功能更新而自动改写；若安装/使用事实发生实质变化，先取得单独授权再更新。确需替换 README 截图时，同时核对 `assets/release-screenshots/` 的公开内容。
+- README 不因版本号或每项功能更新而自动改写。发布前已按第 7 条核过并请示过的，按作者的意思处理；没核过的，视为这一轮发布流程没走完。确需替换 README 截图时，同时核对 `assets/release-screenshots/` 的公开内容。
