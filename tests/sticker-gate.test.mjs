@@ -18,8 +18,7 @@ const cfg = (patch = {}) => normalizeAgentFreqConfig({
   ...patch,
 });
 
-test('Code 窗口 + 总闸关：拒，理由是 code_window_off', () => {
-  const d = decideStickerAccess({ namespace: 'code', agentId: 'other', config: cfg({ code_enabled: false }) });
+test('Code 窗口 + 总闸关：拒，理由是 code_window_off', () => {  const d = decideStickerAccess({ namespace: 'code', agentId: 'other', config: cfg({ code_enabled: false }) });
   assert.equal(d.allowed, false);
   assert.equal(d.reason, 'code_window_off');
   assert.equal(d.window, 'code');
@@ -95,4 +94,36 @@ test('拒绝结果包成 ok:true + skipped，模型不会当成失败重试', ()
   assert.equal(payload.data.action, 'skipped');
   assert.equal(payload.data.reason, 'code_freq_zero');
   assert.match(payload.data.message, /不用再试/);
+});
+
+test('子代理会话一律不配图，总闸开着也一样', () => {
+  const d = decideStickerAccess({
+    namespace: 'home',
+    agentId: 'hanako',
+    config: cfg({ code_enabled: true }),
+    sessionPath: 'C:/Users/x/.hanako/agents/hanako/subagent-sessions/direct/2026-10-26T00-00-00Z_abc.jsonl',
+  });
+  assert.equal(d.allowed, false);
+  assert.equal(d.reason, 'subagent');
+});
+
+test('子代理会话的判定看路径，不看 namespace 能不能查到', () => {
+  // 2026-10-26 实机：子代理会话的 session:get 全部查不到，namespace 是空的。
+  const d = decideStickerAccess({
+    namespace: '',
+    agentId: 'nobody',
+    config: cfg({ code_enabled: false }),
+    sessionPath: 'D:\\HanaHome\\.hanako\\agents\\hanako\\subagent-sessions\\direct\\a.jsonl',
+  });
+  assert.equal(d.reason, 'subagent');
+});
+
+test('主会话路径不是子代理，该发还是发', () => {
+  const d = decideStickerAccess({
+    namespace: 'home',
+    agentId: 'hanako',
+    config: cfg({ code_enabled: false }),
+    sessionPath: 'C:/Users/x/.hanako/agents/hanako/sessions/2026-10-26T00-00-00Z_abc.jsonl',
+  });
+  assert.equal(d.allowed, true);
 });

@@ -93,6 +93,44 @@ export default defineApp(async (sdk) => {
 
   // ── ⚠ 临时诊断（2026-10-06）：探 App 手里的发图通道牌面。
   //   只读探测：不调用任何接口，只问「有没有这个口子」，结果写进 probe.log。
+  // ── RPC 观测（2026-10-26）────────────────────────────────
+  //   宿主给每个 App 的那条通道有 128 个待处理位，占满就回 APP_RPC_BUSY。
+  //   光看一句“通道忙”不知道是谁占着，所以这里把 bus.request 包一层只做计量：
+  //   在飞多少、峰值多少、最老一条等了多久、哪几种方法占得最多。撞上限时记一笔。
+  let rpcWatch = null;
+  try {
+    const { createRpcWatch } = await import("./lib/rpc-watch.js");
+    rpcWatch = createRpcWatch();
+    const targets = new Set();
+    if (sdk.bus && typeof sdk.bus.request === "function") targets.add(sdk.bus);
+    // 兼容：老入口可能另外把总线挂在 sdk.ctx 上，能包就一起包。
+    const extraBus = sdk.ctx?.bus;
+    if (extraBus && extraBus !== sdk.bus && typeof extraBus.request === "function") targets.add(extraBus);
+    for (const target of targets) {
+      target.request = rpcWatch.wrap(target.request.bind(target));
+    }
+    record(`rpc-watch installed targets=${targets.size}`);
+    // 一分钟看一次秤：只有真堆起来了（≥16 条在飞）或者又撞了一次上限才写日志，
+    // 安静的时候不刷屏。定时器不抱进程。
+    let reportedBusy = 0;
+    const timer = setInterval(async () => {
+      try {
+        const snap = rpcWatch.snapshot();
+        if (snap.busy !== reportedBusy) {
+          reportedBusy = snap.busy;
+          const { describeRpcBusy } = await import("./lib/rpc-watch.js");
+          record(describeRpcBusy(rpcWatch.lastBusy()));
+        } else if (snap.inflight >= 16) {
+          record(`rpc-inflight inflight=${snap.inflight} peak=${snap.peak} oldest=${Math.round(snap.oldestMs / 100) / 10}s top=${snap.top}`);
+        }
+      } catch {}
+    }, 60000);
+    timer.unref?.();
+  } catch (e) {
+    record(`rpc-watch-failed ${e?.code || ""} ${e?.message || e}`);
+    rpcWatch = null;
+  }
+
   // ── 启动健康检查：图库元数据能不能读（只读，不碰偏好与配置）──
   try {
     const shared = await import("./lib/shared.js");
@@ -201,11 +239,15 @@ export default defineApp(async (sdk) => {
   // 这里剪掉独占整行的标记；若本轮观察器确实提醒过发图（说明模型本来就想发），
   // 顺手替它把这张图投出去，走的就是 express 工具成功时那条投递通道。
   try {
+    // 子代理会话跟表情包一点关系都不该有：它的输出不剪伪标记、不补图、也不投图。
+    // 这三件事本来就轮不到子代理，但以前每轮都要白跑一趟判断。
+    const { isSubagentSession } = await import("./lib/session-kind.js");
     sdk.hooks.onDecision("messages/post-assistant", async (payload) => {
       try {
         const message = payload?.message;
         const content = message?.content;
         const sessionPath = payload?.session?.sessionPath || "";
+        if (isSubagentSession({ sessionPath, sessionKind: payload?.session?.kind })) return undefined;
 
         // v0.1.38 - 这一轮选的图排在这儿投：定稿这一刻会话可能还在收尾，
         // 所以交给 flush 自己等空闲（不 await，别拖住这条已经写好的回复）。

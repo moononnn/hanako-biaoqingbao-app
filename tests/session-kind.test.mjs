@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { createSessionMetaResolver, isCodeSession, pickWindowFreq, windowLabel } =
+const { createSessionMetaResolver, isCodeSession, isSubagentSession, pickWindowFreq, windowLabel } =
   await import('../lib/session-kind.js');
 
 function fakeBus(handler) {
@@ -52,10 +52,22 @@ test('sessionId 问不通时退回会话路径', async () => {
     throw new Error('unknown session');
   });
   const resolve = createSessionMetaResolver({ bus });
-  const meta = await resolve({ sessionId: '2026-10-25T01-36-23-921Z_abc', sessionPath: 'C:/x/sessions/a.jsonl' });
+  const meta = await resolve({ sessionId: 'sess_unknown', sessionPath: 'C:/x/sessions/a.jsonl' });
   assert.equal(meta.namespace, 'code');
   assert.equal(bus.calls.length, 2);
   assert.equal(bus.calls[1].payload.legacySessionPath, 'C:/x/sessions/a.jsonl');
+});
+
+test('时间戳形状的 sessionId 不再先撞一次必失败的查询', async () => {
+  const bus = fakeBus((name, payload) => {
+    if (payload.legacySessionPath) return { session: { namespace: 'code', title: 'Code 里的活' } };
+    throw new Error('unknown session');
+  });
+  const resolve = createSessionMetaResolver({ bus });
+  const meta = await resolve({ sessionId: '2026-10-25T01-36-23-921Z_abc', sessionPath: 'C:/x/sessions/a.jsonl' });
+  assert.equal(meta.namespace, 'code');
+  assert.equal(bus.calls.length, 1);
+  assert.equal(bus.calls[0].payload.legacySessionPath, 'C:/x/sessions/a.jsonl');
 });
 
 test('没有总线时判不出来，按聊天页算', async () => {
@@ -72,6 +84,28 @@ test('宿主报错也不抛，返回空分区', async () => {
   assert.equal(meta.namespace, '');
 });
 
+test('查不到的分区会记一分钟负缓存，不再每轮重打两遍', async () => {
+  const bus = fakeBus(() => { throw new Error('Session manifest not found'); });
+  const resolve = createSessionMetaResolver({ bus });
+  const first = await resolve({ sessionId: 'sess_neg', sessionPath: 'C:/y.jsonl' });
+  assert.equal(first.namespace, '');
+  const afterFirst = bus.calls.length;
+  assert.equal(afterFirst, 2);
+  // 第二、三次都直接吃负缓存，一次也不打宿主
+  await resolve({ sessionId: 'sess_neg', sessionPath: 'C:/y.jsonl' });
+  await resolve({ sessionId: 'sess_neg', sessionPath: 'C:/y.jsonl' });
+  assert.equal(bus.calls.length, afterFirst);
+});
+
+test('负缓存过期后会重新问一次，不会把过期的东西当永久结论', async () => {
+  const bus = fakeBus(() => { throw new Error('Session manifest not found'); });
+  const resolve = createSessionMetaResolver({ bus, negativeTtlMs: 0 });
+  await resolve({ sessionId: 'sess_neg2' });
+  const afterFirst = bus.calls.length;
+  await resolve({ sessionId: 'sess_neg2' });
+  assert.ok(bus.calls.length > afterFirst);
+});
+
 test('频率按窗口取：聊天页 daily，Code 页 task', () => {
   const settings = { daily: 50, task: 20 };
   assert.equal(pickWindowFreq(settings, false), 50);
@@ -86,4 +120,12 @@ test('没有 task 字段时跟 daily 一致，不当成 0', () => {
 test('窗口名只给两种', () => {
   assert.equal(windowLabel(true), 'Code');
   assert.equal(windowLabel(false), '聊天');
+});
+
+test('子代理会话认路径：正斜杠、反斜杠都算', () => {
+  assert.equal(isSubagentSession({ sessionPath: 'C:/x/agents/hanako/subagent-sessions/direct/a.jsonl' }), true);
+  assert.equal(isSubagentSession({ sessionPath: 'D:\\HanaHome\\.hanako\\agents\\hanako\\subagent-sessions\\direct\\a.jsonl' }), true);
+  assert.equal(isSubagentSession({ sessionPath: 'C:/x/agents/hanako/sessions/a.jsonl' }), false);
+  assert.equal(isSubagentSession({}), false);
+  assert.equal(isSubagentSession({ sessionPath: '', sessionKind: 'subagent' }), true);
 });
