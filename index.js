@@ -234,7 +234,16 @@ export default defineApp(async (sdk) => {
 
         // 补发：本轮提醒过、而且还没真的发出去，才替模型补这一张
         const info = peekInjection(sessionPath);
-        if (info && info.status === "pending" && info.emotion) {
+        // 补发这条路不经过工具注册表，准入得自己再过一次；过不去就当这一轮没提醒过。
+        let gateDenied = null;
+        if (info && info.status === "pending" && info.emotion && stickerAccess) {
+          try {
+            const d = await stickerAccess({ sessionId: payload?.session?.sessionId || null, sessionPath });
+            if (!d.allowed) gateDenied = d;
+          } catch { gateDenied = null; }
+        }
+        if (gateDenied) record(`pseudo-tag 补发被拦 ${gateDenied.reason}`);
+        else if (info && info.status === "pending" && info.emotion) {
           const agentId = agentIdFromSessionPath(sessionPath);
           const expressMod = await import("./tools/express.js");
           const result = await expressMod.execute(
@@ -337,6 +346,39 @@ export default defineApp(async (sdk) => {
   let toolOk = 0;
   const toolFails = [];
   const toolNames = [];
+
+  // ── 配图准入：Code 总闸 + 伙伴自己的 Code 档，统一走 lib/sticker-gate.js ──
+  // 为什么不放在 express 里：工具拿到的 ctx 只有会话路径，没有总线，问不到窗口分区。
+  // 这里靠 sdk.bus 查 session:get，跟观察器共用同一套解析器（进程内缓存 30 分钟）。
+  // 2026-10-25 修：原来这层只判「是不是 Code 页」，判不出来就放行，也不看伙伴的 task 档，
+  // 结果总闸关着仍然漏发了一张（probe.log 13:17:56）。现在判不出来且 Code 总闸关着时从严，
+  // 并且把 sessionId 一起带上——宿主对 sessionPath 的查询不保证回 namespace。
+  let gateMod = null;
+  const stickerAccess = await (async () => {
+    try {
+      const [{ createSessionMetaResolver }, gate] = await Promise.all([
+        import("./lib/session-kind.js"),
+        import("./lib/sticker-gate.js"),
+      ]);
+      gateMod = gate;
+      const resolveMeta = createSessionMetaResolver({ bus: sdk.bus, debug: (line) => record(`sticker-gate ${line}`) });
+      record("sticker-gate ready");
+      return async ({ sessionId, sessionPath } = {}) => {
+        const decision = await gate.resolveStickerAccess({
+          resolveMeta,
+          sessionId,
+          sessionPath,
+          agentId: agentIdFromSessionPath(sessionPath),
+        });
+        if (!decision.allowed) record(`gate-deny ${decision.reason} window=${decision.window} agent=${agentIdFromSessionPath(sessionPath) || "?"}`);
+        return decision;
+      };
+    } catch (e) {
+      record(`sticker-gate-disabled ${e?.code || ""} ${e?.message || e}`);
+      return null;
+    }
+  })();
+
   for (const rel of TOOL_MODULES) {
     try {
       const t = await import(rel);
@@ -345,6 +387,22 @@ export default defineApp(async (sdk) => {
         description: t.description,
         parameters: t.parameters,
         execute: async (input) => {
+          if (t.name === "express" && stickerAccess) {
+            let decision = null;
+            try {
+              decision = await stickerAccess({
+                sessionId: input?.context?.sessionId || null,
+                sessionPath: input?.context?.sessionPath || "",
+              });
+            } catch (e) {
+              record(`gate-error ${e?.message || e}`);
+            }
+            if (decision && !decision.allowed) {
+              record(`express-blocked ${decision.reason} ${input?.context?.sessionPath || "(无路径)"}`);
+              // 返回 ok:true + skipped，模型才不会把拒绝当成失败去重试。
+              return gateMod.skippedToolResult(decision);
+            }
+          }
           const result = await t.execute(input, legacyToolCtx(input));
           // express 的本地图卡随当前工具结果返回；QQ Bridge 仍保留 SessionFile 附件。
           // 不再为同一张伙伴配图另发一条回合外 custom 消息。
@@ -396,6 +454,42 @@ export default defineApp(async (sdk) => {
     }
   }
   record(`tools-registered ${toolOk}/${TOOL_MODULES.length} [${toolNames.join(", ")}]${toolFails.length ? " 失败：" + toolFails.join(" ; ") : ""}`);
+
+  // ── tools/pre-execute：兜底门 ──
+  // 注册表那层包装只管 express，选图、搜图、入库这些工具也是这个 App 的。
+  // Code 窗口关着的时候，整个功能在那边就不该出现，所以一律不接。
+  try {
+    await sdk.hooks.onDecision("tools/pre-execute", async (payload) => {
+      try {
+        const toolName = String(payload?.toolName || "");
+        // App 工具可能两种形态出现：直接派发（名字带 app__<id>__ 前缀），
+        // 或者经由目录层的 tool_call 间接调用（外层名就叫 tool_call，真名在 input 里）。
+        // 2026-10-25 实测：通过 tool_call 调 list_stickers 时，钩子只看得到 tool_call。
+        const input = payload?.input || {};
+        const innerName = toolName === "tool_call"
+          ? `${input.server || ""} ${input.tool || ""}`
+          : "";
+        const hit = toolName.includes("biaoqingbao-app") || innerName.includes("biaoqingbao-app");
+        if (!hit) return undefined;
+        record(`tool-gate-hit name=${toolName} inner=${innerName.trim()}`);
+        if (!stickerAccess) return undefined;
+        const session = payload?.session || {};
+        const decision = await stickerAccess({
+          sessionId: session.sessionId || null,
+          sessionPath: session.sessionPath || "",
+        });
+        if (decision.allowed) return undefined;
+        record(`tool-blocked ${toolName} ${decision.reason}`);
+        return { block: true, reason: `${decision.text}不用再试。` };
+      } catch (e) {
+        record(`tool-gate-error ${e?.message || e}`);
+        return undefined;
+      }
+    });
+    record("hook-registered tool-gate");
+  } catch (e) {
+    record(`hook-register-error tool-gate ${e?.message || e}`);
+  }
 
   // ── 路由层 ──
   // 老路由导出的是 registerRoutes(app, ctx)，内部用的是 Hono 写法（app.get(path, async (c) => …)），

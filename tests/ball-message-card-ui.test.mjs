@@ -32,7 +32,7 @@ function fakeElement(height = 0, natural = { naturalWidth: 600, naturalHeight: 4
   };
 }
 
-function ui(context, fetch, initialSearch = '', viewport = { width: 314, height: 51 }, pathname = '/paper-plane-message.html', timers = null, intervals = null, chromeSet = null, initialLifecycle = { visible: true, active: true }) {
+function ui(context, fetch, initialSearch = '', viewport = { width: 314, height: 51 }, pathname = '/paper-plane-message.html', timers = null, intervals = null, chromeSet = null, initialLifecycle = { visible: true, active: true }, displayConfig = null) {
   const elements = Object.fromEntries(['image', 'caption', 'status', 'fb-card', 'fb-pos', 'fb-fit', 'fb-neg', 'fb-toast']
     .map(key => [key, fakeElement(key === 'message' ? 240 : 0)]));
   const message = fakeElement(240);
@@ -79,7 +79,7 @@ function ui(context, fetch, initialSearch = '', viewport = { width: 314, height:
       api: { fetch: async (route, init) => {
         // 显示配置与认不出记录时的现场上报都是卡片自己的前置/诊断请求，不计入「卡片数据请求」的断言。
         if (route === '/api/display-config') {
-          return { ok: true, json: async () => ({ ok: true, data: { sizeMode: 'auto', smallImageFit: true, showFeedbackButtons: true }, ...displayConfigExtra }) };
+          return { ok: true, json: async () => ({ ok: true, data: { sizeMode: 'auto', smallImageFit: true, showFeedbackButtons: true, ...(displayConfig || {}) }, ...displayConfigExtra }) };
         }
         if (route.startsWith('/api/message-card-context')) {
           debugNotes.push(decodeURIComponent((route.match(/note=([^&]*)/) || [])[1] || ''));
@@ -355,10 +355,16 @@ test('waiting for an identity is a two-stage patience, not a fixed 12 seconds', 
 });
 
 test('compact width is reported to the host rather than only shrinking inner CSS', async () => {
+  // v0.5.4：宽度只在图片就绪后报（宿主只增不减），所以先把 load 触发一次再断言。
   const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA));
   await settle();
+  state.elements.image.naturalWidth = 600;
+  state.elements.image.naturalHeight = 400;
+  state.elements.image.events.load();
+  await settle();
   assert.ok(state.resizeRequests.length > 0);
-  assert.ok(state.resizeRequests.every(size => size.width === 316));
+  assert.ok(state.resizeRequests.some(size => typeof size.width === 'number' && size.width > 0),
+    '宽度要报给宿主，不能只靠卡内 CSS 收');
   assert.ok(state.resizeRequests.every(size => size.height > 0));
 });
 
@@ -459,7 +465,9 @@ test('feedback buttons post the tapped kind for this card record', async () => {
   assert.equal(state.elements['fb-toast'].textContent, '已记下：这次很应景');
 });
 
-test('card width follows the image size and the size mode', async () => {
+test('card width follows the content, not the size mode cap', async () => {
+  // v0.5.4（issue #2）：宿主对卡槽宽度只增不减，首帧报多窄就多窄，所以宽度按内容需求走：
+  // max(图片要的宽, 三键行要的宽)，档位只当上限。三键还在时它才是需求的大头。
   const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA));
   state.elements.image.naturalWidth = 120;
   state.elements.image.naturalHeight = 120;
@@ -467,7 +475,38 @@ test('card width follows the image size and the size mode', async () => {
   state.elements.image.events.load();
   await settle();
   const last = state.resizeRequests[state.resizeRequests.length - 1];
-  assert.equal(last.width, 132, '自适应模式：小图按原尺寸（加卡片内边距），不拉大');
+  assert.equal(last.width, 196, '三键行占 196，图片只要 132，取大的一边');
+  assert.equal(last.height, 132, '高度按图片自身宽度 120 算（120 + 卡片内边距），不按内容宽抬到 304');
+});
+
+test('三键关掉后卡片收成图片那么大，不再留一段白框', async () => {
+  // 这是 issue #2 要的效果：隐藏按钮时宽度只剩图片自己的宽 + 卡片内边距（120 + 12 = 132）。
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA),
+    '', { width: 314, height: 51 }, '/paper-plane-message.html', null, null, null,
+    { visible: true, active: true }, { showFeedbackButtons: false });
+  state.elements.image.naturalWidth = 120;
+  state.elements.image.naturalHeight = 120;
+  await settle();
+  assert.equal(state.elements['fb-card'].hidden, true, '配置说关掉，三键就不该露出来');
+  state.elements.image.events.load();
+  await settle();
+  const last = state.resizeRequests[state.resizeRequests.length - 1];
+  assert.equal(last.width, 132, '没有三键时宽度就是图片宽 + 内边距');
+  assert.equal(last.height, 132);
+});
+
+test('图片还没量到自然尺寸时不上报宽度', async () => {
+  // 宿主的宽度只增不减：自然尺寸还没到就报宽，之后再想收窄也收不回去。
+  const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA));
+  await settle();
+  const before = state.resizeRequests.length;
+  state.elements.image.naturalWidth = 0;
+  state.elements.image.naturalHeight = 0;
+  state.elements.image.hidden = false;
+  state.elements.image.events.load?.();
+  await settle();
+  const widths = state.resizeRequests.slice(before).map(item => item.width);
+  assert.ok(!widths.includes(316), '没有自然尺寸就不该报满档位宽度');
 });
 
 test('feedback state from the record is reflected on the buttons', async () => {

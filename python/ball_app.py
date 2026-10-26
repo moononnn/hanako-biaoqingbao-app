@@ -4604,6 +4604,16 @@ class Ball(QWidget):
         self.set_variant(self.variant)
         self.restore_position()
 
+        # 全屏挡帘：全屏应用铺满整块屏幕时把纸飞机和它的浮层收起来，退出全屏再放回来。
+        # 判断只看「前台窗口是不是正好铺满整块屏」，最大化窗口（被任务栏切掉一截）不算。
+        # 跟知意那只传音樱同一套做法：hide 不销毁，面板里挂着的题和地点都留着。
+        self._hidden_for_fullscreen = False
+        self._fullscreen_stash = []
+        self._fullscreen_timer = QTimer(self)
+        self._fullscreen_timer.timeout.connect(self._sync_fullscreen_visibility)
+        # 先等一会儿再开始看：球刚出来时前台往往还是刚启动它的那个窗口。
+        QTimer.singleShot(1500, self._start_fullscreen_watch)
+
     def _send_heartbeat(self):
         # daemon 线程，避免请求卡住事件循环；失败静默（Node 会按超时判失联）
         def worker():
@@ -4943,7 +4953,142 @@ class Ball(QWidget):
         self.animator.paint(painter, self.rect())
         painter.end()
 
+    # ─── 全屏挡帘 ───
+    def _start_fullscreen_watch(self):
+        # 延迟启动那一超时可能落在球已经被关掉之后，拿它没办法就算了。
+        try:
+            self._fullscreen_timer.start(1200)
+        except Exception:
+            pass
+
+    def _own_windows(self):
+        """这个进程里挂在纸飞机下的所有窗口：球、面板、各个浮层和二级弹窗。
+
+        临时弹层（分类选择、重命名输入、识图面板）是局部变量建的，没有固定的属性名，
+        所以沿 parent 链往上找，不靠记住每一个名字。
+        """
+        windows = [self]
+        try:
+            for widget in QApplication.topLevelWidgets():
+                if widget is self:
+                    continue
+                parent = widget.parentWidget()
+                while parent is not None:
+                    if parent is self:
+                        windows.append(widget)
+                        break
+                    parent = parent.parentWidget()
+        except Exception:
+            pass
+        return windows
+
+    def _foreground_is_fullscreen(self):
+        """前台窗口是不是把整块屏铺满了。
+
+        只认「窗口矩形 ≈ 显示器整块」。最大化窗口被任务栏切掉一截，
+        两者能分开，不会因为随便把窗口最大化就把球藏起来。
+        桌面、任务栏以及自己的窗口一律排除。
+        """
+        if not sys.platform.startswith("win"):
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.GetForegroundWindow.restype = ctypes.c_void_p
+            user32.MonitorFromWindow.restype = ctypes.c_void_p
+
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return False
+
+            own = set()
+            for widget in self._own_windows():
+                try:
+                    if widget.isVisible():
+                        own.add(int(widget.winId()))
+                except Exception:
+                    pass
+            if hwnd in own:
+                return False
+
+            class_name = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(ctypes.c_void_p(hwnd), class_name, 256)
+            if class_name.value in ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
+                return False
+
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect)):
+                return False
+
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD),
+                ]
+
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            monitor = user32.MonitorFromWindow(ctypes.c_void_p(hwnd), 2)  # MONITOR_DEFAULTTONEAREST
+            if not user32.GetMonitorInfoW(ctypes.c_void_p(monitor), ctypes.byref(info)):
+                return False
+
+            mon = info.rcMonitor
+            tolerance = 12
+            return (
+                abs(rect.left - mon.left) <= tolerance
+                and abs(rect.top - mon.top) <= tolerance
+                and abs(rect.right - mon.right) <= tolerance
+                and abs(rect.bottom - mon.bottom) <= tolerance
+            )
+        except Exception:
+            return False
+
+    def _sync_fullscreen_visibility(self):
+        """全屏时收球；退出全屏把刚才收起来的那几扇原样放回去。
+
+        全屏期间如果有代码又把面板叫出来，下一轮还会收，不会在游戏画面上闪烁。
+        收起来的只记第一次那一批，期间新开的弹层不记，退出时也不复活。
+        """
+        try:
+            fullscreen = self._foreground_is_fullscreen()
+        except Exception:
+            return
+        if fullscreen:
+            targets = [w for w in self._own_windows() if w.isVisible()]
+            if not targets:
+                return
+            if not self._hidden_for_fullscreen:
+                self._hidden_for_fullscreen = True
+                self._fullscreen_stash = targets
+            for widget in targets:
+                try:
+                    widget.hide()
+                except Exception:
+                    pass
+            return
+        if not self._hidden_for_fullscreen:
+            return
+        self._hidden_for_fullscreen = False
+        stash = self._fullscreen_stash
+        self._fullscreen_stash = []
+        for widget in stash:
+            try:
+                if not widget.isVisible():
+                    widget.show()
+            except Exception:
+                pass
+        try:
+            if self.isVisible():
+                self.raise_()
+        except Exception:
+            pass
+
     def closeEvent(self, event):
+        self._fullscreen_timer.stop()
         self.frame_timer.stop()
         self.stop_recent_polling()
         self.panel.shutdown()

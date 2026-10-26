@@ -15,6 +15,9 @@ body{padding:6px;min-height:100vh;display:flex;align-items:center;justify-conten
    尺寸一直在爬/重置，图还会被初始的矮框压得很小。
    高度上限只是兜底：超过它的竖图由 JS 按高度反推宽度，图片本身始终按比例完整显示。 */
 img{display:block;max-width:100%;max-height:320px;object-fit:contain;border-radius:8px;margin:0 auto}
+/* v0.5.5 - 框比图矮时宁可缩，不要裁。宿主会把内联卡的高度压到「视口里还剩多少」（现场：图片 303 高、框只有 30 高，
+   内容垂直居中所以上下各被切掉一大块）。这里让上限跟随 iframe 自己的高度，只影响渲染，不参与上报计算，不会绕成循环。 */
+img{max-height:min(320px, calc(100vh - 12px))}
 .caption{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.65}
 .caption:empty{display:none}
 /* 三键反馈：沿用插件版配图卡的样子（不套外壳、不压在图里） */

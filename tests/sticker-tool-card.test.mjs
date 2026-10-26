@@ -11,6 +11,7 @@ const delivery = await import('../lib/sticker-delivery.js');
 const viewSource = fs.readFileSync(new URL('../ui/assets/message-card-view.js', import.meta.url), 'utf8');
 const entrySource = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8');
 const { readMessageCard, setMessageCardFeedback } = await import('../lib/ball-message-card.js');
+const { skippedToolResult } = await import('../lib/sticker-gate.js');
 beforeEach(() => delivery.__resetSessionIdCacheForTests());
 const sessionPath = 'C:/fixture/agents/demo/sessions/a.jsonl';
 const imagePath = path.join(dataDir, 'fixture.png');
@@ -26,13 +27,16 @@ function fixtureSdk() {
     throw new Error('express 图卡不应走回合外投递或调用模型：' + type);
   } } } };
 }
-function registeredExpress(sdk, result, delivered) {
+function registeredExpress(sdk, result, delivered, gate = null) {
   const start = entrySource.indexOf('execute: async (input) => {', entrySource.indexOf('for (const rel of TOOL_MODULES)'));
   const end = entrySource.indexOf('\n      });', start);
   assert.ok(start >= 0 && end > start);
   const expression = entrySource.slice(start + 'execute: '.length, end).trim().replace(/,$/, '');
   return vm.runInNewContext('(' + expression + ')', {
     t: { name: 'express', execute: async () => result }, sdk,
+    // 配图准入：默认 null = 闸门没装（旧行为）；单独用例会传真闸门进来。
+    stickerAccess: gate,
+    gateMod: { skippedToolResult },
     legacyToolCtx: input => input.context,
     stripInlineBase64: vm.runInNewContext('(' + entrySource.slice(
       entrySource.indexOf('  const stripInlineBase64 = ') + '  const stripInlineBase64 = '.length,
@@ -256,4 +260,30 @@ test('未选中图片的工具结果原样返回，不造卡、不标记送达',
   assert.equal(out, result);
   assert.deepEqual(delivered, []);
   assert.deepEqual(calls, []);
+});
+
+test('Code 窗口总闸关着时 express 直接拒，不进选图、不造卡', async () => {
+  const { sdk, calls } = fixtureSdk(), delivered = [];
+  const deny = async () => ({
+    allowed: false,
+    reason: 'code_window_off',
+    window: 'code',
+    text: 'Code 窗口的总开关是关着的。',
+  });
+  const out = await registeredExpress(sdk, { content: [] }, delivered, deny)({ context: { sessionPath }, emotion: '开心' });
+  const payload = JSON.parse(out.content[0].text);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.data.action, 'skipped');
+  assert.equal(payload.data.reason, 'code_window_off');
+  assert.match(payload.data.message, /Code 窗口/);
+  assert.deepEqual(delivered, []);
+  assert.deepEqual(calls, []);
+});
+
+test('Code 窗口总闸打开时照旧走选图', async () => {
+  const { sdk } = fixtureSdk(), delivered = [];
+  const result = { content: [{ type: 'text', text: JSON.stringify({ ok: true, data: { action: 'no_match' } }) }] };
+  const allow = async () => ({ allowed: true, reason: 'ok', window: 'code', text: '' });
+  const out = await registeredExpress(sdk, result, delivered, allow)({ context: { sessionPath }, emotion: '开心' });
+  assert.equal(out, result);
 });

@@ -118,6 +118,9 @@ export function mountMessageCard({ showCaption = false } = {}) {
   let generation = 0;
   let binding = '';
   let imageUrl = null;
+  // v0.5.4 - 「设了 src、还没 load/error」这段窗口。这期间只报高度不报宽度，
+  // 因为宿主卡槽宽度只增不减，图片就绪前报一次满宽就再也收不回来（issue #2）。
+  let imagePending = false;
   let lastSize = '';
   let recordId = '';
   let boundSessionId = '';
@@ -159,41 +162,59 @@ export function mountMessageCard({ showCaption = false } = {}) {
       if (result?.ok && result.data) config = { ...DEFAULT_CONFIG, ...result.data, userName: typeof result.userName === 'string' ? result.userName : '' };
     } catch { /* 用默认值 */ }
   })();
+  // v0.5.4 - 档位和三键开关都在这份配置里，它们直接决定宽度需求：读回来必须重报一次。
+  // 不补这一拍，首帧就会按默认值（三键显示、auto 档）报宽，之后再想收窄也收不回去。
+  // 三键的显隐也要跟着配置重算：配置比图片回包晚到时，按钮会按默认值错显一遍。
+  // v0.5.5 - 图片是否放大也要补算：之前只在图片加载那条路上设一次，配置晚到就会把
+  // 「图片铺满 100%」和「宽度只报 132」搭在一起，结果是图被放大却只给了 122 高的框，上下全裁。
+  configReady.then(() => { applyImageUpscale(); syncFeedbackVisibility(); resize(true); }).catch(() => {});
 
+  // 图片是否铺满内容宽（关掉「小图自适应」时铺满）。只此一处，加载后和配置回来都走它。
+  function applyImageUpscale() {
+    if (image?.style) image.style.width = config.smallImageFit === false ? '100%' : '';
+  }
   // v0.1.23 - 图片高度上限已改回固定像素（页面 CSS 不再用 vh），这里继续按自然尺寸反推宽度。
   // 宽度跟图片自然尺寸算，不看渲染后的宽度：宿主按我们上报的值改窗宽，
   // 拿渲染宽度回算会自己卷成一个小盒子。
   // 档位（偏好设置 → 配图卡片）决定上限：auto = 小图原尺寸、大图填满聊天列；
   // small/medium/large = 对应档位宽，开着「小图自适应」时不把比档位小的图放大。
+  // 三键行真正需要的宽度：按钮 CSS 是 flex-shrink:0，加起来就是它占的地方。
+  // v0.5.4 - 不用容器 offsetWidth：iframe 被宿主开窄时它已经被压扁，拿它当基准会越量越小（插件版 v0.33.73 踩过同一个坑）。
+  // 首帧还没布局时（按钮 offsetWidth 全是 0）退到保守估算，宁可多留一点也不让「不喜欢」被裁。
+  const FB_ROW_FALLBACK_WIDTH = 196;
+  function feedbackRowWidth() {
+    if (!fbCard || fbCard.hidden || config.showFeedbackButtons === false) return 0;
+    const buttons = typeof fbCard.querySelectorAll === 'function' ? fbCard.querySelectorAll('.fb-btn') : [];
+    let sum = 0;
+    for (const button of buttons) sum += Number(button.offsetWidth) || 0;
+    if (!sum) return FB_ROW_FALLBACK_WIDTH;
+    return sum + Math.max(0, buttons.length - 1) * 6 + 8;  // gap 6px + 左右 padding 4px
+  }
+
   function targetWidth() {
     // v0.1.29 - 聊天模式下不看图片多大，面板本身需要一整条宽度（窄图卡片也撑到上限）。
     if (chatOpen) return CARD_MAX_WIDTH;
-    const naturalW = Number(image?.naturalWidth) || 0;
-    const naturalH = Number(image?.naturalHeight) || 0;
+    // v0.5.4 - 回到「卡片跟着内容走」，跟插件版 fitCard 一个口径：宽度 = max(图片要的宽, 三键行要的宽)。
+    // 宿主对 card 槽位的宽度是 max(50, 请求宽, 当前宽)，只增不减；所以首帧报多窄，卡片就多窄，
+    // 之后想收回去得等重新挂载。三键关掉时需求只剩图片宽，卡片就贴成图片那么大（issue #2 要的效果）。
+    // 档位只是上限：auto / large 封 316，small / medium 依次收窄。
     const mode = config.sizeMode || 'auto';
-    const base = mode === 'auto' ? CARD_MAX_WIDTH : (MODE_WIDTH[mode] || CARD_MAX_WIDTH);
-    const feedbackWidth = fbCard && !fbCard.hidden ? (fbCard.scrollWidth || 0) : 0;
-    const chatWidth = chatRow && !chatRow.hidden ? (chatRow.scrollWidth || 0) : 0;
-    // v0.1.42 - 这两行以前是 width:100%，scrollWidth 读到的是「宿主框宽 - 内边距」，
-    // 而宿主框又是我们上报的宽度开的：宽 → 量到更宽 → 报更宽（反过来也同样成立）。
-    // 实机就是先撑满、再一格一格缩（2026-10-09 日志：312x351 → 310x349 → … → 254x293）。
-    // 现在 CSS 里两行改成 width:max-content，这里读到的就是控件自己需要多宽，
-    // 不随宿主框变，回路断开。
-    //
-    // ⚠ 同一天还试过「图片尺寸未知时按控件行开框、不报满宽」，当场出事就撤了：
-    // 图片刚挂上时按钮行还是 hidden（宽 0），于是卡片报了 120 宽（CARD_MIN_WIDTH），
-    // 把宿主框憋小，和另一个报 316x355 的实例打架，图直接显示不出来、要切走对话再切回
-    // （那时图已在缓存里，不再走这个分支）才恢复。教训：图片尺寸未知时保持原样报满宽，
-    // 别在这个最脆弱的首帧上动心思。
-    if (config.smallImageFit === false) return base;   // 一律按档位尺寸，图片被放大填满
-    if (!naturalW || !naturalH) return base;
-    let shownW = naturalW;
-    if (naturalH > CARD_MAX_IMAGE_HEIGHT) {
-      shownW = Math.round(naturalW * CARD_MAX_IMAGE_HEIGHT / naturalH);
-    }
-    // 窄图时卡片由按钮行决定宽度，不然三个按钮会被挤掉
-    const needed = Math.max(shownW, feedbackWidth, chatWidth) + BODY_PADDING;
-    return Math.max(CARD_MIN_WIDTH, Math.min(base, Math.round(needed)));
+    const cap = Math.min(CARD_MAX_WIDTH, MODE_WIDTH[mode] || CARD_MAX_WIDTH);
+    const naturalW = Number(image?.naturalWidth) || 0;
+    // 关掉「小图自适应」时图片放大铺满上限；开着就按原尺寸，不放大防糊。
+    const imgWant = naturalW > 0 && config.smallImageFit !== false ? naturalW + BODY_PADDING : cap;
+    const want = Math.max(imgWant, feedbackRowWidth());
+    return Math.max(CARD_MIN_WIDTH, Math.min(cap, want));
+  }
+
+  // 图片在卡片里真正画多高。
+  // 「小图自适应」开着时图片不放大，宽度就是它自己的宽度（只有比内容宽时才被 max-width 压下来）；
+  // 按内容宽算会把矮图算高，多出来的高度在宿主给的框里就变成上下两条白边
+  // （2026-10-25 实机：120x110 的图被算成 165，卡片里凭空多出 55px 空白）。
+  function imageDrawHeight(contentW, naturalW, naturalH, upscale) {
+    if (!(naturalW > 0) || !(naturalH > 0)) return 0;
+    const shownW = upscale ? contentW : Math.min(contentW, naturalW);
+    return Math.min(CARD_MAX_IMAGE_HEIGHT, Math.round(shownW * naturalH / naturalW));
   }
 
   // v0.1.26 - 高度不再量渲染结果，改成按「图片自然尺寸 + 我们上报的宽度」推算。
@@ -210,10 +231,11 @@ export function mountMessageCard({ showCaption = false } = {}) {
     const naturalH = Number(image?.naturalHeight) || 0;
     if (image && !image.hidden) {
       if (naturalW > 0 && naturalH > 0) {
-        // 与 CSS 一致：图片占满内容宽（body padding 左右各 6px），高度上限 320px。
+        // 与 CSS 一致：图片占满内容宽（body padding 左右各 6px），高度上限 320px；
+        // 小图不放大时占的是它自己的宽，高就跟着它自己的比例算（见 imageDrawHeight）。
         const contentW = Math.max(1, targetWidth() - BODY_PADDING);
-        const scaled = Math.round(contentW * naturalH / naturalW);
-        parts.push(Math.min(CARD_MAX_IMAGE_HEIGHT, scaled));
+        const drawH = imageDrawHeight(contentW, naturalW, naturalH, config.smallImageFit === false);
+        if (drawH > 0) parts.push(drawH);
       } else {
         // 图片还没量到自然尺寸（比如加载中），这时才退回渲染高度当兜底。
         const rect = typeof image.getBoundingClientRect === 'function' ? image.getBoundingClientRect() : null;
@@ -254,12 +276,19 @@ export function mountMessageCard({ showCaption = false } = {}) {
     if (document.hidden || !window.innerWidth) return;
     const height = measureHeight();
     if (!height) return;
-    const width = targetWidth();
-    const size = width + 'x' + height;
-    const steady = Math.abs(width - lastW) <= 1 && Math.abs(height - lastH) <= 1;
+    // v0.5.4 - 图片还在加载时不报宽度，只报高度。
+    // 宿主算宽度是 max(50, 请求宽, 当前宽)，而当前宽的初值就是聊天列宽 315：
+    // 图片没就绪时 targetWidth 只能退到档位上限，那一下就把宽度焊死在 316，之后再报 132 会被顶回来
+    // （2026-10-25 实机：want=132x122 got=315x122）。所以宽度只等 load/error 之后再报第一次。
+    // 聊天面板例外：它的宽度就是一整条，跟图片无关。
+    const width = imagePending && !chatOpen ? null : targetWidth();
+    const size = (width == null ? 'auto' : width) + 'x' + height;
+    const steady = width == null
+      ? Math.abs(height - lastH) <= 1
+      : (Math.abs(width - lastW) <= 1 && Math.abs(height - lastH) <= 1);
     if (!force && (size === lastSize || steady)) return;
     lastSize = size;
-    lastW = width;
+    if (width != null) lastW = width;
     lastH = height;
     // 尺寸现场：记下我们报了多大、图片自然尺寸（宽x高）、宿主真正给的可视宽高。
     // v0.1.23 - 补上 vw：宽度是否被宿主采纳，看这一栏就知道（之前只记 vh，宽度全靠猜）。
@@ -267,9 +296,15 @@ export function mountMessageCard({ showCaption = false } = {}) {
     const naturalH = Number(image?.naturalHeight) || 0;
     const viewport = Number(window?.innerHeight) || 0;
     const viewportW = Number(window?.innerWidth) || 0;
-    report('SIZE ' + size + ' nat=' + natural + 'x' + naturalH + ' vw=' + viewportW + ' vh=' + viewport);
+    // v0.5.5 - 实机诊断（「关了自适应后小图被裁」）：把图片真实渲染高、内容实际高、当前开关一并记下。
+    // ih（图片盒子高）> vh 就是内容溢出被裁，能直接分清楚是算错了还是宿主压矮了。
+    const imgBoxH = Math.round(Number(image?.getBoundingClientRect?.().height) || 0);
+    const contentH = Math.round(Number(message?.scrollHeight) || 0);
+    report('SIZE ' + size + ' nat=' + natural + 'x' + naturalH + ' vw=' + viewportW + ' vh=' + viewport
+      + ' ih=' + imgBoxH + ' ch=' + contentH + ' fit=' + (config.smallImageFit === false ? 0 : 1)
+      + ' mode=' + (config.sizeMode || 'auto'));
     try {
-      const out = hana.ui.resize({ width, height });
+      const out = hana.ui.resize(width == null ? { height } : { width, height });
       if (out && typeof out.catch === 'function') {
         out.catch((error) => report('RESIZE-FAIL ' + size + ' ' + (error?.message || error)));
       }
@@ -286,13 +321,15 @@ export function mountMessageCard({ showCaption = false } = {}) {
   function verifyApplied(width, height) {
     clearTimeout(verifyTimer);
     if (verifyTries >= 2) return;
+    // v0.5.4 - 没报宽度的那一次不验宽度（宿主保留原宽是正常的，不算「没生效」）。
+    const wantW = width == null ? 0 : width;
     verifyTimer = setTimeout(() => {
       const gotW = Number(window.innerWidth) || 0;
       const gotH = Number(window.innerHeight) || 0;
       if (!gotW && !gotH) return;  // 没有真实视口信息（非浏览器环境）就不检
-      if (Math.abs(gotW - width) <= 4 && Math.abs(gotH - height) <= 4) return;
+      if ((wantW ? Math.abs(gotW - wantW) <= 4 : true) && Math.abs(gotH - height) <= 4) return;
       verifyTries++;
-      report('VERIFY-MISS want=' + width + 'x' + height + ' got=' + gotW + 'x' + gotH);
+      report('VERIFY-MISS want=' + (width == null ? 'auto' : width) + 'x' + height + ' got=' + gotW + 'x' + gotH);
       resize(true);
     }, 400);
   }
@@ -1027,6 +1064,9 @@ export function mountMessageCard({ showCaption = false } = {}) {
     resetChatState();
     const current = ++generation;
     clearImage();
+    // v0.5.4 - 从这一刻到图片 load/error 之间，一律不报宽度（只报高度）。
+    // 宿主宽度 max(50, 请求, 当前) 只增不减，这个窗口里报一次宽（只能是档位上限）就再也收不回来。
+    imagePending = true;
     if (caption) caption.textContent = '';
     if (fbCard) fbCard.hidden = true;
     showToast('');
@@ -1058,6 +1098,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
       const blob = await picture.blob();
       if (current !== generation) return;
       imageUrl = URL.createObjectURL(blob);
+      imagePending = true;   // v0.5.4 - 设了 src 到 load 之间不能报宽度（宿主宽度只增不减）
       image.src = imageUrl;
       image.hidden = false;
       // v0.1.33 - 两张流内卡合成一张后，配文按记录里的归属决定：伙伴配的图不配文（和拆卡时那张 partner 页一致）。
@@ -1068,7 +1109,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
       // 图库里还认得这张图才给反馈入口；用户把反馈按钮关掉时也不显示。
       syncFeedbackVisibility();
       // 关掉「小图自适应」时图片放大填满档位宽；开着就按原尺寸（不放大防糊）。
-      if (image.style) image.style.width = config.smallImageFit === false ? '100%' : '';
+      applyImageUpscale();
       reflectFeedback();
       // 标题用的归属、伙伴名和情绪都在这一支里才齐。
       setCardHeader(cardTitleFor({ sender: result.data.sender, agentName: result.data.agentName, emotion: result.data.emotion, userName: config.userName }));
@@ -1131,8 +1172,8 @@ export function mountMessageCard({ showCaption = false } = {}) {
   }
 
   // 图片量到真实尺寸后再报一次：只报一次容易停在加载前的旧高度。
-  image.addEventListener('load', () => { resize(true); requestAnimationFrame(() => resize(true)); });
-  image.addEventListener('error', () => { clearImage(); status.textContent = '图片暂时无法显示'; resize(true); });
+  image.addEventListener('load', () => { imagePending = false; resize(true); requestAnimationFrame(() => resize(true)); });
+  image.addEventListener('error', () => { imagePending = false; clearImage(); status.textContent = '图片暂时无法显示'; resize(true); });
   if (typeof ResizeObserver === 'function' && message) {
     new ResizeObserver(() => resize(false)).observe(message);
   }

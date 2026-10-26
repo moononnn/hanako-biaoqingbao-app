@@ -3942,7 +3942,8 @@
   }
 
   // ════════════════════════════════════════════════════════════════
-  //  v0.18.x 助手配图频率（场景维度化：日常 / 正事）
+  //   v0.18.x 助手配图频率（现在是两个窗口各一档：聊天页 / Code 页）
+  //   daily = 聊天页那档，task = Code 页那档。字段名沿用老配置，不迁移数据。
   // ════════════════════════════════════════════════════════════════
   var freqAgentsData = [];
   var freqConfigData = { version: 2, global_enabled: true, default_daily: 50, default_task: 20, agents: {} };
@@ -3953,7 +3954,7 @@
   var hiddenAgentsData = [];
 
   var FREQ_LEVELS = [
-    { value: 0, label: '不配图', desc: '这个场景不主动提示配图' },
+    { value: 0, label: '不配图', desc: '这个窗口不主动提示配图' },
     { value: 15, label: '少配图', desc: '偶尔提示' },
     { value: 50, label: '正常', desc: '大约一半合适场景会提示' },
     { value: 90, label: '经常配图', desc: '大多数合适场景会提示' },
@@ -3976,6 +3977,77 @@
     else agent.daily = value;
   }
 
+  // 当前在配哪一屏：'chat' = 聊天窗口，'code' = Code 窗口。只影响设置页，不影响保存字段。
+  var freqViewMode = 'chat';
+  // Code 窗口总开关：false = 代码窗口一张都不发（后台也跟着不注入、不放行 express）。
+  var codeWindowEnabled = true;
+
+  function applyFreqViewMode() {
+    var view = $('view-agent-freq');
+    if (view) {
+      view.dataset.mode = freqViewMode;
+      view.classList.toggle('code-off', freqViewMode === 'code' && !codeWindowEnabled);
+    }
+    var sw = $('freq-mode-switch');
+    if (sw) {
+      sw.querySelectorAll('button[data-freq-mode]').forEach(function (btn) {
+        btn.setAttribute('aria-selected', btn.getAttribute('data-freq-mode') === freqViewMode ? 'true' : 'false');
+      });
+    }
+    var master = $('code-master-row');
+    if (master) master.hidden = freqViewMode !== 'code';
+    var masterToggle = $('code-master-toggle');
+    if (masterToggle) masterToggle.checked = codeWindowEnabled;
+    var note = $('freq-mode-note');
+    if (note) {
+      note.dataset.mode = freqViewMode;
+      note.textContent = freqViewMode === 'code'
+        ? (codeWindowEnabled
+          ? '正在配「Code 窗口」的配图频率。代码窗口谈的多半是正事，这一档默认比聊天低；改这里不会动聊天那边。'
+          : 'Code 窗口总开关已经关掉，下面每位的频率先放着不生效。想单独调就在上面把开关打开。')
+        : '正在配「聊天窗口」的配图频率。切到 Code 窗口那一屏，可以给代码窗口单独调，两边互不影响。';
+    }
+  }
+
+  function setFreqViewMode(mode) {
+    var next = mode === 'code' ? 'code' : 'chat';
+    if (next === freqViewMode) return;
+    freqViewMode = next;
+    applyFreqViewMode();
+    if (freqAgentsData.length > 0) renderAgentFreqList();
+  }
+
+  function bindCodeMasterToggle() {
+    var toggle = $('code-master-toggle');
+    if (!toggle || toggle.dataset.bound === '1') return;
+    toggle.dataset.bound = '1';
+    toggle.addEventListener('change', function () {
+      var enabled = toggle.checked === true;
+      if (!globalAutoImageEnabled) {
+        toggle.checked = !enabled;
+        return;
+      }
+      codeWindowEnabled = enabled;
+      freqConfigData.code_enabled = enabled;
+      applyFreqViewMode();
+      renderAgentFreqList();
+      persistFreqConfig().then(function () {
+        toast(enabled ? 'Code 窗口配图已开' : 'Code 窗口配图已关；那边不会再有表情包');
+      });
+    });
+  }
+
+  function bindFreqModeSwitch() {
+    var sw = $('freq-mode-switch');
+    if (!sw || sw.dataset.bound === '1') return;
+    sw.dataset.bound = '1';
+    sw.addEventListener('click', function (event) {
+      var btn = event.target.closest('button[data-freq-mode]');
+      if (!btn) return;
+      setFreqViewMode(btn.getAttribute('data-freq-mode'));
+    });
+  }
+
   function freqToLevel(freq) {
     var best = FREQ_LEVELS[0];
     var minDiff = Infinity;
@@ -3990,6 +4062,8 @@
     var disabled = !globalAutoImageEnabled;
     var view = $('view-agent-freq');
     if (view) view.classList.toggle('global-off', disabled);
+    var masterToggle = $('code-master-toggle');
+    if (masterToggle) masterToggle.disabled = disabled;
     var list = $('agent-freq-list');
     if (list) {
       list.querySelectorAll('button[data-act]').forEach(function (button) {
@@ -4003,16 +4077,18 @@
       note.classList.toggle('is-off', disabled);
       note.textContent = disabled
         ? '自动配图总闸已关闭。伙伴原有的频率和图库设置仍保留，这里只展示、不能调整；方言、识图和纸飞机不受影响。'
-        : '自动配图已开启。每位伙伴的日常与正事两档都在这张卡里，改完立即生效。';
+        : '自动配图已开启。每位伙伴在聊天页和 Code 页各有一档，改完立即生效。';
     }
   }
 
   function applyGlobalAutoImageConfig(config) {
     if (config && typeof config === 'object') freqConfigData = config;
     globalAutoImageEnabled = !(freqConfigData && freqConfigData.global_enabled === false);
+    codeWindowEnabled = !(freqConfigData && freqConfigData.code_enabled === false);
     renderGlobalAutoImageState();
     if (freqAgentsData.length > 0) renderAgentFreqList();
     applyAgentFreqLock();
+    applyFreqViewMode();
   }
 
   function renderGlobalAutoImageState() {
@@ -4088,6 +4164,9 @@
       });
     }
     bindAgentHiddenModal();
+    bindFreqModeSwitch();
+    bindCodeMasterToggle();
+    applyFreqViewMode();
 
     Promise.all([
       apiFetch(withAuth(API + '/api/agents'), { signal: AbortSignal.timeout(5000) }).then(function (r) { return r.json(); }),
@@ -4106,6 +4185,7 @@
         duplicateAgentNames[name] = (duplicateAgentNames[name] || 0) + 1;
       }
       globalAutoImageEnabled = !(freqConfigData && freqConfigData.global_enabled === false);
+      codeWindowEnabled = !(freqConfigData && freqConfigData.code_enabled === false);
       renderAgentFreqList();
       bindFreqList();
       bindAgentLibraryModal();
@@ -4117,12 +4197,13 @@
     });
   }
 
-  function freqLineHtml(agentId, scene, label, selected) {
+  function freqLineHtml(agentId, scene, label, selected, disabled) {
     var html = '<div class="freq-line"><span class="freq-line-label">' + label + '</span>';
     for (var i = 0; i < FREQ_LEVELS.length; i++) {
       var level = FREQ_LEVELS[i];
       html += '<button type="button" class="freq-pill' + (level.value === selected ? ' is-active' : '') + '"'
         + ' data-act="set-freq" data-agent-id="' + escHtml(agentId) + '" data-scene="' + scene + '" data-freq="' + level.value + '"'
+        + (disabled ? ' disabled' : '')
         + ' title="' + escHtml(level.desc) + '">' + escHtml(level.label) + '</button>';
     }
     html += '</div>';
@@ -4157,14 +4238,15 @@
 
   function renderAgentFreqRow(agent) {
     var settings = getAgentFreqSettings(agent.id);
+    var scene = freqViewMode === 'code' ? 'task' : 'daily';
+    var windowFreqValue = scene === 'task' ? settings.task : settings.daily;
     var config = getLocalAgentGroupConfig(agent.id);
     var showId = duplicateAgentNames[agent.name || agent.id] > 1;
     var html = '<div class="agent-card" data-agent-row="' + escHtml(agent.id) + '">';
     html += '<div class="agent-card-head"><span class="agent-card-name">' + escHtml(agent.name || agent.id) + '</span>';
     if (showId) html += '<span class="agent-card-id">' + escHtml(agent.id) + '</span>';
     html += '<button type="button" class="agent-card-remove" data-act="remove-agent" data-agent-id="' + escHtml(agent.id) + '" title="把这位伙伴从插件里移除：清掉 ta 的配图频率、图库偏好和方言设置，并且不再出现在列表里（不影响 Hana 里的伙伴本身）。以后想找回来，点右上角的「已移除的伙伴」。">移除</button></div>';
-    html += freqLineHtml(agent.id, 'daily', '日常', freqToLevel(settings.daily));
-    html += freqLineHtml(agent.id, 'task', '正事', freqToLevel(settings.task));
+    html += freqLineHtml(agent.id, scene, freqViewMode === 'code' ? 'Code' : '聊天', freqToLevel(windowFreqValue), freqViewMode === 'code' && !codeWindowEnabled);
     html += '<div class="agent-card-foot"><span class="agent-card-lib" title="可用图库">可用图库：' + escHtml(describeAgentLibrary(config)) + '</span>'
       + '<button type="button" class="agent-card-config" data-act="open-library" data-agent-id="' + escHtml(agent.id) + '">配置图库</button></div>';
     html += '</div>';
@@ -4383,6 +4465,7 @@
       var payload = {
         version: freqConfigData.version,
         global_enabled: freqConfigData.global_enabled,
+        code_enabled: freqConfigData.code_enabled !== false,
         default_daily: freqConfigData.default_daily,
         default_task: freqConfigData.default_task,
         agents: agentsPayload,
@@ -4583,7 +4666,9 @@
       if (action === 'remove-agent') { removeAgentFromPlugin(agentId); return; }
       if (!globalAutoImageEnabled) return;
       if (action === 'open-library') { openAgentLibrary(agentId); return; }
-      if (action !== 'set-freq') return;
+      if (action !== 'set-freq' || button.disabled) return;
+      // Code 屏在总开关关着的时候整列都是灰的，双保险：真被点到也不写。
+      if (freqViewMode === 'code' && !codeWindowEnabled) return;
       var scene = button.getAttribute('data-scene') === 'task' ? 'task' : 'daily';
       setAgentSceneFreq(agentId, scene, parseInt(button.getAttribute('data-freq'), 10));
       refreshAgentFreqRow(agentId, 'set-freq', button.getAttribute('data-freq'), scene);

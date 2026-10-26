@@ -1,0 +1,89 @@
+// 会话分区判断（聊天页 / Code 页）——解析器与频率取值的单元测试
+//
+// 依据：只有 session:get 返回 namespace（home / code / app），session:list 看不到 Code 会话。
+// 这几个用例守的就是那几条容易退化的行为：缓存、路径兜底、判不出来按聊天页。
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+const { createSessionMetaResolver, isCodeSession, pickWindowFreq, windowLabel } =
+  await import('../lib/session-kind.js');
+
+function fakeBus(handler) {
+  const calls = [];
+  return {
+    calls,
+    async request(name, payload, options) {
+      calls.push({ name, payload, options });
+      return handler(name, payload, calls.length);
+    },
+  };
+}
+
+test('session:get 返回 code，就判成 Code 页', async () => {
+  const bus = fakeBus(() => ({ session: { namespace: 'code', title: '改个东西' } }));
+  const resolve = createSessionMetaResolver({ bus });
+  const meta = await resolve({ sessionId: 'sess_abc' });
+  assert.equal(meta.namespace, 'code');
+  assert.equal(meta.title, '改个东西');
+  assert.equal(bus.calls[0].name, 'session:get');
+  assert.equal(bus.calls[0].payload.sessionId, 'sess_abc');
+  assert.equal(isCodeSession(meta.namespace), true);
+});
+
+test('home 会话判成聊天页', async () => {
+  const bus = fakeBus(() => ({ session: { namespace: 'home' } }));
+  const resolve = createSessionMetaResolver({ bus });
+  const meta = await resolve({ sessionId: 'sess_home' });
+  assert.equal(isCodeSession(meta.namespace), false);
+});
+
+test('同一个会话只问一次宿主（有缓存）', async () => {
+  const bus = fakeBus(() => ({ session: { namespace: 'home', title: '随便聊聊' } }));
+  const resolve = createSessionMetaResolver({ bus });
+  await resolve({ sessionId: 'sess_cache' });
+  await resolve({ sessionId: 'sess_cache' });
+  assert.equal(bus.calls.length, 1);
+});
+
+test('sessionId 问不通时退回会话路径', async () => {
+  const bus = fakeBus((name, payload) => {
+    if (payload.legacySessionPath) return { session: { namespace: 'code', title: 'Code 里的活' } };
+    throw new Error('unknown session');
+  });
+  const resolve = createSessionMetaResolver({ bus });
+  const meta = await resolve({ sessionId: '2026-10-25T01-36-23-921Z_abc', sessionPath: 'C:/x/sessions/a.jsonl' });
+  assert.equal(meta.namespace, 'code');
+  assert.equal(bus.calls.length, 2);
+  assert.equal(bus.calls[1].payload.legacySessionPath, 'C:/x/sessions/a.jsonl');
+});
+
+test('没有总线时判不出来，按聊天页算', async () => {
+  const resolve = createSessionMetaResolver({});
+  const meta = await resolve({ sessionId: 'sess_x' });
+  assert.deepEqual(meta, { namespace: '', title: '' });
+  assert.equal(isCodeSession(meta.namespace), false);
+});
+
+test('宿主报错也不抛，返回空分区', async () => {
+  const bus = fakeBus(() => { throw new Error('busy'); });
+  const resolve = createSessionMetaResolver({ bus });
+  const meta = await resolve({ sessionId: 'sess_err', sessionPath: 'C:/x.jsonl' });
+  assert.equal(meta.namespace, '');
+});
+
+test('频率按窗口取：聊天页 daily，Code 页 task', () => {
+  const settings = { daily: 50, task: 20 };
+  assert.equal(pickWindowFreq(settings, false), 50);
+  assert.equal(pickWindowFreq(settings, true), 20);
+});
+
+test('没有 task 字段时跟 daily 一致，不当成 0', () => {
+  assert.equal(pickWindowFreq({ daily: 60 }, true), 60);
+  assert.equal(pickWindowFreq({}, false), 0);
+});
+
+test('窗口名只给两种', () => {
+  assert.equal(windowLabel(true), 'Code');
+  assert.equal(windowLabel(false), '聊天');
+});

@@ -949,3 +949,21 @@ ode --test --test-concurrency=1 "tests/*.test.mjs" 全量，另有纸飞机三�
 - 包体积从 5,192,043 字节涨到 7,088,484 字节，增量全部来自新增的 `assets/release-screenshots/sticker-sakura-girl.png`（1,990,281 字节）。尝试用 GDI+ 无损重存 PNG 反而涨到 3,163,273 字节，放弃压缩，保留原图。
 - 文档修正：`TESTING.md` 里有一处 `favorite-categories.js` 的首字母 `f` 曾被换成 form feed（0x0C）控制字符，已修回；该文件与其他发布文档已全文扫过，无同类残留。
 - 未覆盖：本版收藏分类与纸飞机交互仍未由作者实机验收；包体未做极限压缩。
+
+## 2026-10-26 定版 0.6.0 的发布验证
+
+本版把 0.5.4 / 0.5.5 两段积压合并成一版（版本按「有新功能走 minor」定为 0.6.0）：配图频率按窗口区分、Code 窗口总开关、配图准入收成 `lib/sticker-gate.js` 与 `tools/pre-execute` 钩子、纸飞机全屏让位、小图卡片白边修复。
+
+结果：
+
+- `verify`：Node 全量 496 项通过 / 0 失败；Python 纸飞机三组用例各 1 项 OK。验证 key `52ce813683a0cf532eccc3a6f3c033fd843b888b3ad77fd08064f7193132a795`，耗时 77.9 秒。
+- `pack`（官方打包器 1.2.1-beta）：剥内测 `index.js` 1 个块；发布副本变换为 `index.js`、`lib/sticker-delivery.js`；ZIP `0d419b7f…`、entry `27fc4900…`。
+- `release-tests`（对最终解包副本）：496 项通过，已自动绑定 ZIP/entry 双指纹。
+- 工具链 pin 从 `1.1.35-beta` 更新到本机已装的 `1.2.1-beta`（sha256 `aea6af37…`，size 264093164），与官方 channel manifest（train 41）逐项核对一致。不跟着对齐会导致 preflight 报「工具链 sha256 不匹配」并拒绝静默换用另一份安装。
+
+本轮修掉两处测试自身的问题（都是上一轮改了实现、测试没跟上，不是产品行为退化）：
+
+- `tests/sticker-gate.test.mjs` 把一个真实伙伴 id 当作 fixture 的 agentId，撞上发布隐私红线；全区换成中性 id `other`，断言不变。
+- `tests/sticker-tool-card.test.mjs` 两个用例还在给注入上下文传旧的 `codeWindowGate`，而 `index.js` 已改用 `stickerAccess` + `gateMod.skippedToolResult`；改完后拒绝形状从旧的 `ok:false/action:code_window_disabled` 变为真实契约的 `ok:true/data.action:skipped`。
+
+未覆盖：双窗口对照的实机验收仍不完整（窗口分档的两屏切换与小图白边只有源码用例与实机观感核对）；安装、真实数据迁移、真实模型调用均未做。
