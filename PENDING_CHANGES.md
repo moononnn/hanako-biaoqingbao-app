@@ -28,13 +28,16 @@
 
 <!-- 版本号纪律（2026-10-12 起）：开发过程中不动 manifest.version，只在这里记一行；发布那一刻才定版本。 -->
 
-## ⚠️ 待修（2026-10-27 记，未修）：关掉输入栏按钮后，Code 页的会话不会被盖上
+## 本次待发（开发中，版本号未动）
 
-- **现象**：把「输入栏显示表情按钮」关掉，聊天页的图标消失了，但 **Code 页输入框里那个笑脸还在**。反方向（重新打开）看不出问题（默认就是显示）。
-- **根因**：`lib/input-button.js:45` 的 `syncInputButton` 用 `sdk.bus.request('session:list', { scope: 'all' })` 拿会话清单，再逐个 `inputStatus.set({ visible: false })`。但宿主给 v2 App 的 `session:list` 只开 `namespace: ["home", "app"]`，**Code 页的会话根本不在返回结果里**，所以那些会话永远拿不到显隐覆盖，停在默认的「显示」。
-- **本仓库其实早就知道这件事**：`lib/session-kind.js` 开头就写着「Code 页的会话不在 session:list 的名单里（2026-10-25 实机确认），只有 session:get 查得到」。只是那个结论当时用在配图分区判断上，没往回套到 `input-button.js`。
-- **不完全失效的部分**：`input-button.js:155` 附近有 `session_created` 单会话补盖（`syncInputButtonSession`）。**若**宿主对 Code 会话也发这个事件，那么「关掉开关之后新建的 Code 会话」会被正确盖上。这一点尚未实测，别当成已经有救。
-- **影响面**：只影响显隐（图标还杵在那儿），不影响点击、不影响发送。但界面上「关了还看得见」本身就是在拿一半的成功冒充全部——这正是这个开关最初的老毛病（见文件头注释）。
-- **修的方向（未实现，别照抄不改就发）**：宿主没有全局开关，覆盖只能按会话写。可以考虑：① 建会话时（`session_created`，若 Code 也发）和切到 Code 页时对那一个会话补盖；② 查清宿主是否有按 Agent 或全局维度的覆盖入口，有就直接用它，别继续数会话；③ 兜底：面板上说清「Code 页的图标需单独关」，而不是让人以为全关了。
-- **待验**：宿主对 Code 会话是否发 `session_created`；Code 页的会话 id 能否在别处拿到（`session:get` 需要先有路径）。
+- 2026-10-27 | 修复 | 关掉输入栏按钮时，Code 页的会话现在也会被盖上：应用自己记一份「已见过的 Code 会话」名单（session_created 事件 + 钩子里解析出的会话分区），关开关时跟宿主名单里的会话一起盖。
+
+## ✅ 已修（2026-10-27）：关掉输入栏按钮后，Code 页的会话不会被盖上
+
+- **根因（已实测确认）**：宿主给 v2 App 的 `session:list` 只开 `namespace: ["home", "app"]`，Code 页的会话根本不在返回结果里（实测同一时刻宿主有 19 个 Code 会话，App 名单里一个都没有），所以按名单同步永远盖不到 Code 页。宿主也没有别的枚举入口：`session:search` 只回本应用自己的会话。
+- **实测到的两件可用事实**：① 宿主对 Code 会话**会**发 `session_created`，且平铺负载里带稳定 id 与 `namespace: "code"`（实机日志：补盖 `sess_0mvqptqip…` 成功）；② `session:get` 按会话路径查得到 Code 页会话，回包带 `namespace` 与稳定 `sessionId`。
+- **改法**（`lib/input-button.js`）：应用自己记一份「已见过的 Code 会话」名单并落盘（`input-button-code-sessions.json`），两个来源：session_created 事件里的 `namespace: "code"`，以及 `agent/pre-step` 钩子里解析出的当前会话分区（`lib/session-kind.js` 的解析器现在一并返回稳定 `sessionId`，且全进程共用一份缓存）。关开关时这份名单和 `session:list` 的名单一起盖，覆盖数会报在同步结果里（`codeSessions`），面板上写明「含 Code 页 N 个会话」。
+- **顺手修的两处毛病**：① `session_created` 负载塞在 `session` 字段里时（旧代码只看平铺的 `event.sessionId` 与 `payload`/`data`），认不到 id 就退化成全量重刷——而全量名单里又没有 Code 会话，那条退路对 Code 页等于什么都没盖；现在两种形状都认。② 失败分类分清三种：会话没了（不算失败，从名单里清掉）、那个伙伴里没启用本应用（那里本来就没这个按钮，不算「没盖上」）、真失败（照旧报出来）。
+- **仍然存在的边界（如实记下）**：宿主**在应用启动前**就存在、期间没在 Code 页聊过、也没被 `session_created` 事件覆盖到的 Code 会话，第一次不会被盖到——那个会话一旦被用到（钩子认出它），或新建时会话（事件），就进名单了，之后关开关都能盖到。宿主不给 App 枚举 Code 会话的入口，这一条没法在应用侧补齐。
+
 

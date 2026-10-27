@@ -307,9 +307,17 @@
     if (sync.total) {
       status.title = '上次同步：盖成 ' + (sync.synced || 0) + '/' + sync.total
         + (sync.failed ? '，失败 ' + sync.failed : '')
+        + (sync.codeSessions ? '，含 Code 页 ' + sync.codeSessions + ' 个' : '')
         + (sync.truncated ? '，超出上限 ' + sync.truncated : '');
     }
   }
+  // Code 页的会话不在宿主名单里，是本应用自己认下来再盖的；
+  // 盖了几个要说出来，否则用户只能猜「到底藏住了没有」。
+  function codeNoteOf(sync) {
+    var n = (sync && sync.codeSessions) || 0;
+    return n > 0 ? '（含 Code 页 ' + n + ' 个会话）' : '';
+  }
+
   // 打开页面时问一次后端：这个开关上次同步到底成没成。
   async function loadInputButtonSync() {
     try {
@@ -386,7 +394,7 @@
         } else if (final.failed > 0) {
           toast('已保存，但有 ' + final.failed + ' 个会话没盖上（盖成 ' + final.synced + '/' + final.total + '）', true);
         } else {
-          toast(next ? '已开启：聊天输入栏会出现表情包按钮' : '已关闭：聊天输入栏不再显示表情包按钮，纸飞机照旧');
+          toast((next ? '已开启：聊天输入栏会出现表情包按钮' : '已关闭：聊天输入栏不再显示表情包按钮，纸飞机照旧') + codeNoteOf(final));
         }
         return;
       }
@@ -400,7 +408,7 @@
       } else if (sync.failed > 0) {
         toast('已保存，但有 ' + sync.failed + ' 个会话没盖上（盖成 ' + sync.synced + '/' + sync.total + '）', true);
       } else {
-        toast(next ? '已开启：聊天输入栏会出现表情包按钮' : '已关闭：聊天输入栏不再显示表情包按钮，纸飞机照旧');
+        toast((next ? '已开启：聊天输入栏会出现表情包按钮' : '已关闭：聊天输入栏不再显示表情包按钮，纸飞机照旧') + codeNoteOf(sync));
       }
     } catch (e) {
       renderInputButtonState();

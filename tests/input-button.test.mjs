@@ -6,9 +6,13 @@ import path from 'node:path';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bqb-input-button-'));
 process.env.BQB_DATA_DIR = root;
-const { readInputButtonEnabled, syncInputButton, syncInputButtonSession, installInputButtonWatcher, isInputButtonSyncPending, INPUT_STATUS_ID } =
+const { readInputButtonEnabled, syncInputButton, syncInputButtonSession, installInputButtonWatcher, isInputButtonSyncPending, INPUT_STATUS_ID,
+  readCodeSessions, rememberCodeSession, noteInputButtonSession } =
   await import('../lib/input-button.js');
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+const ledgerFile = () => path.join(root, 'input-button-code-sessions.json');
+function clearLedger() { fs.rmSync(ledgerFile(), { force: true }); }
 
 function writeConfig(value) {
   fs.writeFileSync(path.join(root, 'display-config.json'), JSON.stringify(value));
@@ -61,6 +65,7 @@ test('同步：每个会话都盖一遍，id 用清单里那个，单个会话�
 });
 
 test('列会话失败时报出来，不假装同步成功', async () => {
+  clearLedger();
   const sdk = fakeSdk();
   sdk.bus.request = async () => { throw new Error('denied'); };
   const result = await syncInputButton(sdk, false);
@@ -219,4 +224,108 @@ test('返回结果带上失败原因，不把没盖成当成盖好', async () =>
   assert.equal(result.synced, 0);
   assert.equal(result.reason, 'not-declared-yet');
   assert.equal(result.total, 1);
+});
+
+// ── Code 页的会话：宿主名单里没有，得自己认下来 ──
+// 依据：宿主给 App 的 session:list 只开 home / app 两个分区，
+// Code 页的会话既不在名单里，也没有别的枚举入口（session:search 只回本应用自己的会话）。
+
+test('事件里带 namespace=code 的会话要记进名单，下次同步一并盖上', async () => {
+  clearLedger();
+  writeConfig({ inputButton: false });
+  const sdk = fakeSdk({ sessions: ['s1'] });
+  await installInputButtonWatcher(sdk);
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  await sdk.listeners[0].fn({ type: 'session_created', session: { sessionId: 'sess_code9', namespace: 'code' } });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(readCodeSessions().includes('sess_code9'), 'Code 会话要进名单，不然关开关时盖不到它');
+
+  const sdk2 = fakeSdk({ sessions: ['s1'] });
+  const result = await syncInputButton(sdk2, false);
+  assert.equal(result.codeSessions, 1, '同步结果要报出盖了几个 Code 会话');
+  assert.ok(sdk2.calls.some(call => call.sessionId === 'sess_code9' && call.visible === false),
+    '名单里的 Code 会话要跟宿主名单里的会话一起盖');
+});
+
+test('事件负载塞在 session 里时也认得出 sessionId，不用退化成全量重刷', async () => {
+  clearLedger();
+  writeConfig({ inputButton: false });
+  const sdk = fakeSdk({ sessions: ['s1'] });
+  await installInputButtonWatcher(sdk);
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  const before = sdk.calls.length;
+  await sdk.listeners[0].fn({ type: 'session_created', session: { sessionId: 's8', namespace: 'code' } });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(sdk.calls.length, before + 1, '只该多盖一次，不是把全部会话重刷');
+  assert.equal(sdk.calls.at(-1).sessionId, 's8');
+});
+
+test('钩子认出 Code 页的会话：记进名单，并按当前开关盖一次', async () => {
+  clearLedger();
+  writeConfig({ inputButton: false });
+  const sdk = fakeSdk({ sessions: ['s1'] });
+  sdk.bus.request = async (verb) => {
+    if (verb === 'session:get') return { session: { namespace: 'code', sessionId: 'sess_code1', title: 'Code' } };
+    if (verb === 'session:list') return { sessions: [{ sessionId: 's1' }] };
+    throw new Error('unexpected ' + verb);
+  };
+  const noted = await noteInputButtonSession(sdk, {
+    sessionId: '2026-10-27T13-22-40-743Z_abc',
+    sessionPath: 'C:/x/sessions/abc.jsonl',
+  });
+  assert.equal(noted.noted, true);
+  assert.equal(noted.sessionId, 'sess_code1');
+  assert.equal(sdk.calls.at(-1).sessionId, 'sess_code1', '新认到的 Code 会话要立刻盖一次');
+  assert.equal(sdk.calls.at(-1).visible, false);
+
+  const sdk2 = fakeSdk({ sessions: ['s1'] });
+  const result = await syncInputButton(sdk2, false);
+  assert.equal(result.codeSessions, 1);
+  assert.ok(sdk2.calls.some(call => call.sessionId === 'sess_code1' && call.visible === false));
+});
+
+test('聊天页的会话不进名单（宿主名单里本来就有）', async () => {
+  clearLedger();
+  const sdk = fakeSdk({ sessions: ['s1'] });
+  sdk.bus.request = async (verb) => {
+    if (verb === 'session:get') return { session: { namespace: 'home', sessionId: 'sess_home1' } };
+    if (verb === 'session:list') return { sessions: [{ sessionId: 's1' }] };
+    throw new Error('unexpected ' + verb);
+  };
+  const noted = await noteInputButtonSession(sdk, { sessionId: 'sess_home1' });
+  assert.equal(noted.noted, false);
+  assert.deepEqual(readCodeSessions(), []);
+});
+
+test('会话没了不算失败，而且从名单里清掉', async () => {
+  clearLedger();
+  writeConfig({ inputButton: false });
+  rememberCodeSession('sess_dead');
+  const sdk = fakeSdk({ sessions: [] });
+  sdk.inputStatus.set = async () => { throw new Error('Input status target session is unavailable'); };
+  const result = await syncInputButton(sdk, false);
+  assert.equal(result.failed, 0, '会话没了不是失败');
+  assert.equal(result.gone, 1);
+  assert.equal(result.ok, true, '没有按钮可藏，本来就没东西要藏');
+  assert.equal(readCodeSessions().includes('sess_dead'), false, '死会话要从名单里清掉');
+});
+
+test('那个伙伴里没启用本应用：那里本来就没这个按钮，不算没盖上', async () => {
+  clearLedger();
+  const sdk = fakeSdk({ sessions: ['s1'] });
+  sdk.inputStatus.set = async () => { throw new Error('App biaoqingbao-app needs app/input.status and activation in the target Agent'); };
+  const result = await syncInputButton(sdk, false);
+  assert.equal(result.failed, 0, '不是失败');
+  assert.equal(result.skipped, 1);
+  assert.equal(result.ok, true);
+});
+
+test('名单写坏了也不能把同步搞崩：读不到就当空名单', async () => {
+  clearLedger();
+  fs.writeFileSync(ledgerFile(), '{ 这不是 json');
+  assert.deepEqual(readCodeSessions(), []);
+  const sdk = fakeSdk({ sessions: ['s1'] });
+  const result = await syncInputButton(sdk, false);
+  assert.equal(result.ok, true);
+  assert.equal(result.codeSessions, 0);
 });

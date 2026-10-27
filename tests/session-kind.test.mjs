@@ -21,11 +21,12 @@ function fakeBus(handler) {
 }
 
 test('session:get 返回 code，就判成 Code 页', async () => {
-  const bus = fakeBus(() => ({ session: { namespace: 'code', title: '改个东西' } }));
+  const bus = fakeBus(() => ({ session: { namespace: 'code', title: '改个东西', sessionId: 'sess_abc' } }));
   const resolve = createSessionMetaResolver({ bus });
   const meta = await resolve({ sessionId: 'sess_abc' });
   assert.equal(meta.namespace, 'code');
   assert.equal(meta.title, '改个东西');
+  assert.equal(meta.sessionId, 'sess_abc', '稳定会话 id 要一并带出来');
   assert.equal(bus.calls[0].name, 'session:get');
   assert.equal(bus.calls[0].payload.sessionId, 'sess_abc');
   assert.equal(isCodeSession(meta.namespace), true);
@@ -73,7 +74,7 @@ test('时间戳形状的 sessionId 不再先撞一次必失败的查询', async 
 test('没有总线时判不出来，按聊天页算', async () => {
   const resolve = createSessionMetaResolver({});
   const meta = await resolve({ sessionId: 'sess_x' });
-  assert.deepEqual(meta, { namespace: '', title: '' });
+  assert.deepEqual(meta, { namespace: '', title: '', sessionId: '' });
   assert.equal(isCodeSession(meta.namespace), false);
 });
 

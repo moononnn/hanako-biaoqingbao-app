@@ -194,6 +194,7 @@ export default defineApp(async (sdk) => {
   // 接管插件版 observer 的职责：让 App 独立完成「发现该配图 → 提示模型调 express → 模型发图」。
   try {
     const { observeBeforeStep } = await import("./lib/observer.js");
+    const { noteInputButtonSession } = await import("./lib/input-button.js");
     const { resolveExpressToolName, getExpressToolNameDiag, pickExpressToolNameFromMessages } = await import("./lib/tool-name.js");
     sdk.hooks.onDecision("agent/pre-step", async (payload) => {
       try {
@@ -220,6 +221,10 @@ export default defineApp(async (sdk) => {
           messages,
           session: payload?.session,
         });
+        // 输入栏按钮：Code 页的会话不在宿主名单里（session:list 对 App 只开 home / app），
+        // 得在这里把当前会话认下来，关开关时才知道要盖哪些 Code 页的会话。
+        // 不 await：这事只影响按钮显隐，不该拖住这一轮。
+        void noteInputButtonSession(sdk, payload?.session).catch(() => {});
         record(`hook-pre-step session=${payload?.session?.sessionId ?? "?"} messages=${count} tool=${toolName ?? "?"} diag=${getExpressToolNameDiag()} injected=${decision ? "yes" : "no"}`);
         return decision;
       } catch (e) {
