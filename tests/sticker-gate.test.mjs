@@ -101,7 +101,7 @@ test('子代理会话一律不配图，总闸开着也一样', () => {
     namespace: 'home',
     agentId: 'hanako',
     config: cfg({ code_enabled: true }),
-    sessionPath: 'C:/Users/x/.hanako/agents/hanako/subagent-sessions/direct/2026-10-26T00-00-00Z_abc.jsonl',
+    sessionPath: 'C:/app-home/.hanako/agents/hanako/subagent-sessions/direct/2026-10-26T00-00-00Z_abc.jsonl',
   });
   assert.equal(d.allowed, false);
   assert.equal(d.reason, 'subagent');
@@ -113,7 +113,7 @@ test('子代理会话的判定看路径，不看 namespace 能不能查到', () 
     namespace: '',
     agentId: 'nobody',
     config: cfg({ code_enabled: false }),
-    sessionPath: 'D:\\HanaHome\\.hanako\\agents\\hanako\\subagent-sessions\\direct\\a.jsonl',
+    sessionPath: 'D:\\app-home\\.hanako\\agents\\hanako\\subagent-sessions\\direct\\a.jsonl',
   });
   assert.equal(d.reason, 'subagent');
 });
@@ -123,7 +123,7 @@ test('主会话路径不是子代理，该发还是发', () => {
     namespace: 'home',
     agentId: 'hanako',
     config: cfg({ code_enabled: false }),
-    sessionPath: 'C:/Users/x/.hanako/agents/hanako/sessions/2026-10-26T00-00-00Z_abc.jsonl',
+    sessionPath: 'C:/app-home/.hanako/agents/hanako/sessions/2026-10-26T00-00-00Z_abc.jsonl',
   });
   assert.equal(d.allowed, true);
 });

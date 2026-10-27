@@ -1,5 +1,5 @@
 {
-  "installedAt": "2026-10-21T07:10:35.692Z",
+  "installedAt": "2026-10-27T14:18:33.665Z",
   "source": "cloud/install-workflow.mjs",
   "repo": ".",
   "files": [
@@ -14,6 +14,7 @@
     ".cloud-build\\lib\\resources.mjs",
     ".cloud-build\\lib\\toolchain.mjs",
     ".cloud-build\\lib\\verify.mjs",
+    ".cloud-build\\lib\\stage.mjs",
     ".cloud-build\\config.json"
   ],
   "remove": "node cloud/install-workflow.mjs -Repo <path> -Remove -Confirm"
