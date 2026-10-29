@@ -12,6 +12,12 @@ let managing = false, selectedManage = new Set();
 let categoryMode = 'single', categoryBatchIds = [];
 // 分类弹层：正在给哪张图分类、勾了哪些、弹层里新建的分类名
 let categoryTarget = '', categoryDraft = new Set(), categorySaving = false, categoryArmedDelete = '';
+// 点图动作的纯逻辑在 sticker-compose-pick.js（普通脚本，挂全局），跟搜索模块一样从全局取。
+function pickApi() {
+  if (typeof globalThis !== 'undefined' && globalThis.stickerComposePick) return globalThis.stickerComposePick;
+  if (typeof window !== 'undefined' && window.stickerComposePick) return window.stickerComposePick;
+  return null;
+}
 // 搜索与筛选的纯逻辑在 sticker-compose-search.js（普通脚本，挂全局）。
 // 这个文件会被 UI 测试塞进 vm 跑，vm 不认 import 语句，所以只能从全局取，不能 import。
 function searchApi() {
@@ -96,9 +102,9 @@ function button(text, action) { const el = document.createElement('button'); el.
 function editable() { if (busy) return false; if (requestId) { note('上次发送还未确认。请先重试或检查对话；文字和选图暂时保留。'); return false; } return true; }
 function toggle(id) {
   if (!editable()) return;
-  if (selected.includes(id)) selected = selected.filter(value => value !== id);
-  else { if (selected.length >= 8) return note('一次最多选 8 张'); selected.push(id); }
-  note(''); render();
+  if (selected.includes(id)) { selected = selected.filter(value => value !== id); note('已移出待发送区'); }
+  else { if (selected.length >= 8) return note('一次最多选 8 张'); selected.push(id); note('已加入待发送区，可以只发图片'); }
+  render();
 }
 async function reload(quiet = false) {
   if (!ticket) return;
@@ -183,9 +189,12 @@ function render() {
   $('gallery').replaceChildren();
   for (const item of filtered) {
     const tile = document.createElement('div'); tile.className = 'tile';
+    // 点图一律是「加入待发送区」，两个页签一个动作：从图库挑图也能直接发，不用先收藏。
+    const rules = pickApi();
+    const pickAction = rules ? rules.pickAction(managing) : (managing ? 'manage' : 'queue');
     const pick = button('', () => {
-      if (managing) { toggleManagePick(item.id); return; }
-      return mode === 'library' ? pin(item.id, !pinnedIds.includes(item.id)) : toggle(item.id);
+      if (pickAction === 'manage') { toggleManagePick(item.id); return; }
+      toggle(item.id);
     });
     stickerPreview.bind(pick, item.id);
     pick.addEventListener('contextmenu', event => openContextMenu(event, item.id, pick));
@@ -204,17 +213,34 @@ function render() {
     });
     pick.addEventListener('dragend', () => { draggedId = ''; tile.classList.remove('dragging', 'drop-target'); });
     pick.className = 'pick'; pick.disabled = busy || !!requestId;
-    pick.setAttribute('aria-pressed', String(mode === 'library' ? pinnedIds.includes(item.id) : selected.includes(item.id)));
-    pick.title = mode === 'library' ? (pinnedIds.includes(item.id) ? '已加入，点一下移出收藏' : '加入我的收藏') : '加入或移出待发送区';
+    pick.setAttribute('aria-pressed', String(selected.includes(item.id)));
+    pick.title = '加入或移出待发送区';
     pick.append(makeImage(item.id, true));
-    const label = document.createElement('span'); label.className = 'caption'; label.textContent = (mode === 'library' && pinnedIds.includes(item.id) ? '✓ ' : '') + (item.description || '表情包'); pick.append(label); tile.append(pick);
-    // 管理态：图角上是一个勾选圈，点一下选一张，可以批量操作
+    const label = document.createElement('span'); label.className = 'caption'; label.textContent = item.description || '表情包'; pick.append(label); tile.append(pick);
+    // 图角上的标记：管理态是「勾选圈」，图库页是「收藏角标」。两个都是能点的按钮。
     if (managing) {
       const on = selectedManage.has(item.id);
-      const mark = document.createElement('span');
+      const mark = document.createElement('button');
+      mark.type = 'button';
       mark.className = on ? 'pick-mark on' : 'pick-mark';
       mark.textContent = on ? '✓' : '';
+      mark.title = on ? '取消选中这张' : '选中这张';
+      mark.setAttribute('aria-pressed', String(on));
+      mark.setAttribute('aria-label', '选中这张图');
+      mark.addEventListener('click', event => { event.stopPropagation(); if (busy || requestId) return; toggleManagePick(item.id); });
       tile.append(mark);
+    } else if (mode === 'library') {
+      const pinned = pinnedIds.includes(item.id);
+      const favAction = rules ? rules.favoriteAction(pinned) : (pinned ? 'unpin' : 'pin');
+      const fav = document.createElement('button');
+      fav.type = 'button';
+      fav.className = pinned ? 'fav-mark on' : 'fav-mark';
+      fav.textContent = pinned ? '♥' : '♡';
+      fav.title = pinned ? '已收藏，点一下移出收藏' : '加入我的收藏';
+      fav.setAttribute('aria-pressed', String(pinned));
+      fav.setAttribute('aria-label', fav.title);
+      fav.addEventListener('click', event => { event.stopPropagation(); pin(item.id, favAction === 'unpin' ? false : true); });
+      tile.append(fav);
     }
     $('gallery').append(tile);
   }
@@ -222,7 +248,7 @@ function render() {
     const empty = document.createElement('p'); empty.className = 'empty';
     empty.textContent = mode === 'pinned'
       ? (collected.length === 0
-        ? '收藏还空着，点「从图库添加」挑几张吧。'
+        ? '收藏还空着，点「从图库挑图」挑几张吧。'
         : (source.length === 0
           ? '这个分类还没有图。右键一张图就能把它分进来。'
           : '没有匹配的表情包。换个词，或者点一下上面的分类。'))

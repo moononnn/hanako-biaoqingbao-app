@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>表情包</title><link rel="stylesheet" href="./assets/sticker-compose.css"></head>
 <body><main><header><strong>表情包</strong><span id="count" class="count"></span><span class="spacer"></span><button id="refresh" title="刷新共享图库">刷新</button></header>
-<nav><button id="pinned" class="active">我的收藏</button><button id="library">从图库添加</button><input id="search" type="search" placeholder="搜描述 / 关键词 / 情绪 / 场景" aria-label="搜索表情包"></nav>
+<nav><button id="pinned" class="active">我的收藏</button><button id="library">从图库挑图</button><input id="search" type="search" placeholder="搜描述 / 关键词 / 情绪 / 场景" aria-label="搜索表情包"></nav>
 <div id="cats" class="cats" role="tablist" aria-label="收藏分类" hidden></div>
 <div id="manage-bar" class="manage-bar" hidden></div>
 <section id="gallery" aria-label="共享表情图库" tabindex="0"></section>
@@ -12,4 +12,4 @@
 <dialog id="title-dialog"><form id="title-form"><h3>修改标题</h3><input id="title-value" type="text" aria-label="表情包标题" required><p>和主页共用保存与识图纠正流程，供后续识图参考。</p><div class="dialog-actions"><button id="title-cancel" type="button">取消</button><button id="title-save" type="submit" class="primary">保存</button></div><p id="title-status" role="status" aria-live="polite"></p></form></dialog>
 <dialog id="delete-dialog"><form method="dialog"><h3>删除原图？</h3><p>会从整个表情图库和纸飞机收藏中删除这张图，伙伴之后也不能再选用。已发送的图片记录保留。</p><div class="dialog-actions"><button value="cancel">算了</button><button value="delete" class="primary">确认删除</button></div></form></dialog>
 <dialog id="reset-dialog"><form method="dialog"><h3>先检查一下对话</h3><p>上一条可能已经部分或全部送达。确认查看过对话后再重新编辑，避免把已经收到的图片重复发送。文字和选图都会保留。</p><div class="dialog-actions"><button value="cancel">继续保留</button><button value="edit" class="primary">已检查，重新编辑</button></div></form></dialog>
-<script src="./assets/sticker-compose-search.js"></script><script type="module" src="./assets/sticker-compose.js"></script></body></html>
+<script src="./assets/sticker-compose-pick.js"></script><script src="./assets/sticker-compose-search.js"></script><script type="module" src="./assets/sticker-compose.js"></script></body></html>

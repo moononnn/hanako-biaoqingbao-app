@@ -15,7 +15,11 @@
 .cat-tool.manage{border-color:var(--primary);color:var(--primary)}
 .cat-tool.manage.on{background:var(--primary);border-color:var(--primary);color:#fff;font-weight:600}
 /* 管理态：图角上的勾选圈（多选），底部换成批量操作条 */
-.pick-mark{position:absolute;top:4px;right:4px;z-index:2;width:20px;height:20px;border-radius:999px;border:1.5px solid #fff;background:#31443c66;color:#fff;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px #31443c33}
+.pick-mark{position:absolute;top:4px;right:4px;z-index:2;width:20px;height:20px;padding:0;border-radius:999px;border:1.5px solid #fff;background:#31443c66;color:#fff;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px #31443c33;cursor:pointer}
+.pick-mark:hover,.fav-mark:hover{background:#5dae8e}
+/* 图库页的收藏角标：空心是还没收藏，实心是已收藏，点它直接收藏或移出收藏。 */
+.fav-mark{position:absolute;top:4px;right:4px;z-index:2;width:20px;height:20px;padding:0;border-radius:999px;border:1.5px solid #fff;background:#31443c66;color:#fff;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px #31443c33;cursor:pointer}
+.fav-mark.on{background:var(--primary);border-color:var(--primary);font-weight:700}
 .pick-mark.on{background:var(--primary);border-color:var(--primary);font-weight:700}
 .manage-bar{flex:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0 2px;border-top:1px solid var(--line)}
 .manage-bar[hidden]{display:none}
