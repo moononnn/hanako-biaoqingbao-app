@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { createSessionMetaResolver, isCodeSession, isSubagentSession, pickWindowFreq, windowLabel } =
+const { createSessionMetaResolver, isCodeSession, isSubagentSession, pickWindowFreq, shouldSkipForCodeWindow, windowLabel } =
   await import('../lib/session-kind.js');
 
 function fakeBus(handler) {
@@ -129,4 +129,43 @@ test('子代理会话认路径：正斜杠、反斜杠都算', () => {
   assert.equal(isSubagentSession({ sessionPath: 'C:/x/agents/hanako/sessions/a.jsonl' }), false);
   assert.equal(isSubagentSession({}), false);
   assert.equal(isSubagentSession({ sessionPath: '', sessionKind: 'subagent' }), true);
+});
+
+test('宿主回的不是同一个会话时，按没查到处理（2026-10-29 实测踩过）', async () => {
+  // 按 id 查 Code 页的会话，宿主可能回一个别的 home 会话（scope=all 时不报错）。
+  // 那会把「这个会话在 Code 页」错判成「在聊天页」，于是 Code 配图总闸在注入层失效：
+  // 总闸都关了，模型还是被塞了「配一张表情包」的提示，然后又被工具层拒掉。
+  const bus = fakeBus((name, payload) => {
+    if (payload.legacySessionPath) return { session: { namespace: 'code', title: 'Code 里的活', sessionId: 'sess_code' } };
+    return { session: { namespace: 'home', title: '聊天页的另一个会话', sessionId: 'sess_other' } };
+  });
+  const resolve = createSessionMetaResolver({ bus });
+  const meta = await resolve({ sessionId: 'sess_code', sessionPath: 'C:/x/sessions/a.jsonl' });
+  assert.equal(meta.namespace, 'code', '身份对不上的结果要丢掉，继续试下一条路');
+  assert.equal(meta.sessionId, 'sess_code');
+  assert.equal(bus.calls.length, 2, 'id 查的那次被丢掉后，要接着试路径');
+});
+
+test('身份对不上的结果不进缓存（不能把错答案记 8 小时）', async () => {
+  const bus = fakeBus((name, payload) => {
+    if (payload.legacySessionPath) return { session: { namespace: 'code', sessionId: 'sess_code' } };
+    return { session: { namespace: 'home', sessionId: 'sess_other' } };
+  });
+  const resolve = createSessionMetaResolver({ bus });
+  await resolve({ sessionId: 'sess_code', sessionPath: 'C:/x/sessions/a.jsonl' });
+  const after = bus.calls.length;
+  await resolve({ sessionId: 'sess_code', sessionPath: 'C:/x/sessions/a.jsonl' });
+  assert.equal(bus.calls.length, after, '第二次直接吃缓存，不该再打宿主');
+});
+
+test('Code 总闸关着：明确是 Code 就收手，判不出分区也收手（从严）', () => {
+  assert.equal(shouldSkipForCodeWindow({ namespace: 'code', codeEnabled: false }), true);
+  assert.equal(shouldSkipForCodeWindow({ namespace: '', codeEnabled: false }), true, '判不出就按 Code 处理');
+  assert.equal(shouldSkipForCodeWindow({ namespace: 'home', codeEnabled: false }), false, '明确是聊天页照常');
+  assert.equal(shouldSkipForCodeWindow({ namespace: 'app', codeEnabled: false }), false);
+});
+
+test('Code 总闸开着：谁都不收手', () => {
+  assert.equal(shouldSkipForCodeWindow({ namespace: 'code', codeEnabled: true }), false);
+  assert.equal(shouldSkipForCodeWindow({ namespace: '', codeEnabled: true }), false);
 });
