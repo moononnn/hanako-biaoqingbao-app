@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { createSessionMetaResolver, isCodeSession, isSubagentSession, pickWindowFreq, shouldSkipForCodeWindow, windowLabel } =
+const { createSessionMetaResolver, isCodeSession, isSubagentSession, pickWindowFreq, resolveEffectiveNamespace, shouldSkipForCodeWindow, windowLabel } =
   await import('../lib/session-kind.js');
 
 function fakeBus(handler) {
@@ -168,4 +168,35 @@ test('Code 总闸关着：明确是 Code 就收手，判不出分区也收手（
 test('Code 总闸开着：谁都不收手', () => {
   assert.equal(shouldSkipForCodeWindow({ namespace: 'code', codeEnabled: true }), false);
   assert.equal(shouldSkipForCodeWindow({ namespace: '', codeEnabled: true }), false);
+});
+
+test('自记 Code 名单能兜住「解析把 Code 会话说成 home」', () => {
+  // 聊天页会话不在名单里 → 照旧是聊天页（这道防线对聊天页零影响）。
+  assert.equal(resolveEffectiveNamespace({ namespace: 'home', sessionId: 'sess_chat', knownCodeSessionIds: ['sess_code'] }), 'home');
+  // 名单里的会话一定是 Code 页出现过 → 即使解析说 home 也按 Code 处理。
+  assert.equal(resolveEffectiveNamespace({ namespace: 'home', sessionId: 'sess_code', knownCodeSessionIds: ['sess_code'] }), 'code');
+  // 名单为空 / 没有 id 时不乱动。
+  assert.equal(resolveEffectiveNamespace({ namespace: 'home', sessionId: 'sess_chat', knownCodeSessionIds: [] }), 'home');
+  assert.equal(resolveEffectiveNamespace({ namespace: 'home', sessionId: '', knownCodeSessionIds: ['sess_code'] }), 'home');
+  // 明确是 code 的照旧。
+  assert.equal(resolveEffectiveNamespace({ namespace: 'code', sessionId: 'sess_x', knownCodeSessionIds: [] }), 'code');
+});
+
+test('身份校验只在请求 id 是宿主稳定 id 时严格比对（聊天页不能被误伤）', async () => {
+  // 请求是 sess_xxx、返回的也是 sess_xxx 但不是同一个 → 查到了别的会话，丢弃。
+  const bus = fakeBus((name, payload) => {
+    if (payload.legacySessionPath) return { session: { namespace: 'code', sessionId: 'sess_target' } };
+    return { session: { namespace: 'home', sessionId: 'sess_other' } };
+  });
+  const resolve = createSessionMetaResolver({ bus });
+  const meta = await resolve({ sessionId: 'sess_target', sessionPath: 'C:/x/sessions/a.jsonl' });
+  assert.equal(meta.namespace, 'code');
+  assert.equal(bus.calls.length, 2);
+});
+
+test('请求 id 是文件名形状时，返回 UUID 形状也算同一个会话（不能误丢）', async () => {
+  const bus = fakeBus(() => ({ session: { namespace: 'home', sessionId: '01a189e1-c6c9-711c-9a3a-e1727240d660' } }));
+  const resolve = createSessionMetaResolver({ bus });
+  const meta = await resolve({ sessionId: '2026-10-29T14-45-22-352Z_01a1881f-6930-71e7-bcd9-07ec961f86b7' });
+  assert.equal(meta.namespace, 'home', '形状不同的 id 仍按查到了处理，不误伤');
 });
