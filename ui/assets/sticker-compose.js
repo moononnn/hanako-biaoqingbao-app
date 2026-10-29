@@ -168,6 +168,21 @@ async function reorder(source, target) {
   catch (error) { await reload(true); note(error.message); }
   finally { busy = false; render(); }
 }
+// 收藏角标里的心：用矢量画，不靠字符。字符心形在 15px 上会糊成一个点，
+// 颜色和粗细也控不住；画出来的路径能给出干净的描边和实心两态。
+function favoriteGlyph(pinned) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', '15');
+  svg.setAttribute('height', '15');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', 'M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z');
+  svg.append(path);
+  return svg;
+}
 function render() {
   closeContextMenu();
   stickerPreview.hide();
@@ -235,7 +250,7 @@ function render() {
       const fav = document.createElement('button');
       fav.type = 'button';
       fav.className = pinned ? 'fav-mark on' : 'fav-mark';
-      fav.textContent = pinned ? '♥' : '♡';
+      fav.append(favoriteGlyph(pinned));
       fav.title = pinned ? '已收藏，点一下移出收藏' : '加入我的收藏';
       fav.setAttribute('aria-pressed', String(pinned));
       fav.setAttribute('aria-label', fav.title);

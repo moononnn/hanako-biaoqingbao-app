@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mergeDisplayConfig, displayConfigSwitchesDiffer } from '../lib/display-config-merge.js';
+import { resolveInputButtonSwitches } from '../lib/input-button.js';
 
 test('本机关掉的输入栏按钮，导入搬家包后不会被重新打开', () => {
   const current = { inputButton: false, agentSelfNote: false, sizeMode: 'small' };
@@ -81,4 +82,55 @@ test('本机缺分页键时，包里带 false 不能静默把按钮关掉', () =
   const merged = mergeDisplayConfig({ sizeMode: 'auto' }, { inputButtonChat: false, inputButtonCode: false });
   assert.equal(merged.inputButtonChat, true, '本机生效值是开，就不能被包里的 false 带回去');
   assert.equal(merged.inputButtonCode, true);
+});
+
+test('本机还是老形状（只有总闸）且用户按过关时，包里的分页键不能把按钮打开', () => {
+  // 用户在 0.6.2 时代把输入栏按钮关掉了：配置里只有 inputButton:false。
+  // 这时候导入一个来自 0.6.3 机器的搬家包（带 inputButtonChat/Code:true），
+  // 合并侧若不按读取侧那条链回落，就会把用户按过的「关」静默打开，
+  // 而且回执还会说「没差异」，用户完全不知情。
+  const current = { inputButton: false, sizeMode: 'small' };
+  const incoming = { inputButtonChat: true, inputButtonCode: true, sizeMode: 'auto' };
+  const merged = mergeDisplayConfig(current, incoming);
+  assert.equal(merged.inputButtonChat, false, '聊天页的老总闸是关的，不能被包里的分页键打开');
+  assert.equal(merged.inputButtonCode, false, 'Code 页同理');
+  assert.equal(merged.inputButton, false, '旧的总闸也要留着');
+  assert.equal(displayConfigSwitchesDiffer(current, incoming), true, '这种差异必须在回执里说出来');
+});
+
+test('本机老形状且开关是开着的时，包里的分页键同样带不回来', () => {
+  const current = { inputButton: true };
+  const incoming = { inputButtonChat: false, inputButtonCode: false };
+  const merged = mergeDisplayConfig(current, incoming);
+  assert.equal(merged.inputButtonChat, true);
+  assert.equal(merged.inputButtonCode, true);
+});
+
+test('本机自己写过分页键时，以本机的分页键为准（老键不再插手）', () => {
+  const current = { inputButton: false, inputButtonChat: true, inputButtonCode: false };
+  const incoming = { inputButtonChat: false, inputButtonCode: true };
+  const merged = mergeDisplayConfig(current, incoming);
+  assert.equal(merged.inputButtonChat, true, '本机自己写过聊天页的键，就按本机的');
+  assert.equal(merged.inputButtonCode, false);
+});
+
+test('合并后的生效值必须跟读取侧算出来的一模一样', () => {
+  // 这是本条规则真正要守的不变量：合并侧与读取侧的回落链不许分叉。
+  // 分叉了就会出现「合并时以为保留住了、读出来却是开的」。
+  const cases = [
+    [{ inputButton: false }, { inputButtonChat: true, inputButtonCode: true }],
+    [{ inputButton: true }, { inputButtonChat: false }],
+    [{ inputButton: false }, { inputButtonChat: false }],
+    [{ inputButtonChat: false }, { inputButtonCode: true }],
+    [{ inputButtonChat: true, inputButtonCode: false }, { inputButtonChat: false, inputButtonCode: true }],
+    [{}, { inputButtonChat: false, inputButtonCode: false }],
+    [{ sizeMode: 'small' }, { inputButton: false }],
+  ];
+  for (const [current, incoming] of cases) {
+    const merged = mergeDisplayConfig(current, incoming);
+    const read = resolveInputButtonSwitches(merged);
+    const expect = resolveInputButtonSwitches(current);
+    assert.equal(read.chat, expect.chat, `聊天页开关应与本机一致：${JSON.stringify(current)} ← ${JSON.stringify(incoming)}`);
+    assert.equal(read.code, expect.code, `Code 页开关应与本机一致：${JSON.stringify(current)} ← ${JSON.stringify(incoming)}`);
+  }
 });

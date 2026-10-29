@@ -52,12 +52,20 @@ test("管理态的勾选圈是真按钮，点了就选中（不用点图本体�
 test("图库页另有收藏角标，收藏动作挪到它上面", () => {
   assert.match(PANEL_JS, /fav\.addEventListener\('click'[\s\S]*?pin\(item\.id/);
   assert.match(PANEL_CSS, /\.fav-mark\{/);
-  assert.match(PANEL_CSS, /\.fav-mark\.on\{/);
+  assert.match(PANEL_CSS, /\.fav-mark\.on svg\{/);
 });
 
 test("页签改名叫「从图库挑图」，说的就是它现在做的事", () => {
   assert.match(PANEL_HTML, /id="library">从图库挑图</);
   assert.doesNotMatch(PANEL_HTML, /从图库添加/);
+});
+
+test("收藏角标画的是矢量心形，不是字符心（字符缩到 15px 会糊成一块饼）", () => {
+  assert.match(PANEL_JS, /const ns = 'http:\/\/www\.w3\.org\/2000\/svg'/);
+  assert.match(PANEL_JS, /createElementNS\(ns, 'svg'\)/);
+  assert.doesNotMatch(PANEL_JS, /fav\.textContent = pinned \? '♥' : '♡'/, "不能再用字符心形");
+  assert.match(PANEL_CSS, /\.fav-mark svg\{[^}]*fill:none/, "没收藏是白描边的空心");
+  assert.match(PANEL_CSS, /\.fav-mark\.on svg\{[^}]*fill:#ff5c7a/, "已收藏是粉色实心");
 });
 
 test("规则脚本先加载，面板模块后加载（模块是 defer 的，普通脚本立即执行）", () => {
