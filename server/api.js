@@ -106,7 +106,7 @@ import { appendBoundedLog } from '../lib/log-trim.js';
 import { isCodexVisionProvider } from '../lib/vision-codex.js';
 import { applyPreferenceFeedback, mutatePreferences, snapshotMapping, ensureUser } from '../lib/feedback.js';
 import { removeStickerExposure } from '../lib/exposure.js';
-import { syncInputButton, isInputButtonSyncPending } from '../lib/input-button.js';
+import { syncInputButton, isInputButtonSyncPending, resolveInputButtonSwitches } from '../lib/input-button.js';
 import { mergeDisplayConfig, displayConfigSwitchesDiffer } from '../lib/display-config-merge.js';
 
 // 输入栏按钮显隐的最近一次同步结果。
@@ -1223,7 +1223,7 @@ export default async function registerRoutes(app, ctx) {
             // 开跑前先置为「在跑」：不然这几秒里首页状态字显示的还是上一次的旧结论，
             // 那结论与本轮重盖无关。
             latestInputButtonSync = { ok: false, synced: 0, failed: 0, total: 0, reason: 'pending', seq: importSeq };
-            void syncInputButton(ctx, after.inputButton !== false, () => importSeq !== inputButtonSyncSeq)
+            void syncInputButton(ctx, resolveInputButtonSwitches(after), () => importSeq !== inputButtonSyncSeq)
               .then(result => {
                 // 结果也写回最近一次同步状态：只落在日志里的话，首页状态字看不到。
                 if (importSeq === inputButtonSyncSeq) {
@@ -1974,17 +1974,20 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
     } catch { return ''; }
   }
   app.get('/api/display-config', (c) => {
-    let cfg = { smallImageFit: true, sizeMode: 'auto', agentSelfNote: true, gallerySort: 'added_desc', inputButton: true };
+    let cfg = { smallImageFit: true, sizeMode: 'auto', agentSelfNote: true, gallerySort: 'added_desc', inputButton: true, inputButtonChat: true, inputButtonCode: true };
     try {
       cfg = { ...cfg, ...JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'display-config.json'), 'utf-8')) };
     } catch {}
+    // 输入栏按钮分两页：聊天页和 Code 页各一个开关。
+    // 老配置里只有 inputButton，这里把它落到两页上，前端拿到的永远是分开的两个值。
+    const inputButtonSwitches = resolveInputButtonSwitches(cfg);
     // ⚠ 在跑的状态必须带 pending:true。
     //   页面靠这个标记判断「还没完，再等等」；只给 reason:'pending' 的话，
     //   前端第一次轮询就会把「还在跑」当成最终结果，界面立刻说「没盖上」。
     const syncView = isInputButtonSyncPending(latestInputButtonSync)
       ? { ...latestInputButtonSync, pending: true }
       : latestInputButtonSync;
-    return json({ ok: true, data: { ...cfg, inputButton: cfg.inputButton !== false }, userName: ownerDisplayName(), inputButtonSync: syncView });
+    return json({ ok: true, data: { ...cfg, inputButtonChat: inputButtonSwitches.chat, inputButtonCode: inputButtonSwitches.code, inputButton: inputButtonSwitches.chat && inputButtonSwitches.code }, userName: ownerDisplayName(), inputButtonSync: syncView });
   });
 
   // ═══ POST /api/display-config — 保存配图卡片显示配置 ═══
@@ -1997,6 +2000,8 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
       try { old = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'display-config.json'), 'utf-8')); } catch {}
       const threshold = Math.max(50, Math.min(500, Number(body.smallImageThreshold) || old.smallImageThreshold || 200));
       const validModes = ['auto', 'small', 'medium', 'large'];
+      // 本机原来的两档（老配置只有 inputButton 时也要能落回来）
+      const oldInputButtonSwitches = resolveInputButtonSwitches(old);
       const cfg = {
         smallImageFit: typeof body.smallImageFit === 'boolean' ? body.smallImageFit : (typeof old.smallImageFit === 'boolean' ? old.smallImageFit : true),
         smallImageThreshold: threshold,
@@ -2007,7 +2012,17 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
         // v0.2.12 - 图库排序档位：added_desc/added_asc/tagged_desc/description/untagged_first/group
         gallerySort: GALLERY_SORT_MODES.includes(body.gallerySort) ? body.gallerySort : (GALLERY_SORT_MODES.includes(old.gallerySort) ? old.gallerySort : 'added_desc'),
         // 输入栏表情按钮显隐：宿主只给按会话覆盖，改完得把已知会话同步一遍
-        inputButton: typeof body.inputButton === 'boolean' ? body.inputButton : (typeof old.inputButton === 'boolean' ? old.inputButton : true),
+        // 聊天页和 Code 页各一个开关；老键 inputButton 仍收，
+        // 收到就同时改两页，免得老前端保存一次就把分开的两档拉平。
+        inputButtonChat: typeof body.inputButtonChat === 'boolean'
+          ? body.inputButtonChat
+          : (typeof body.inputButton === 'boolean' ? body.inputButton : oldInputButtonSwitches.chat),
+        inputButtonCode: typeof body.inputButtonCode === 'boolean'
+          ? body.inputButtonCode
+          : (typeof body.inputButton === 'boolean' ? body.inputButton : oldInputButtonSwitches.code),
+        // 旧键只当镜像：两边都开才算开。降级到老版本时宁可两边都藏着。
+        inputButton: (typeof body.inputButtonChat === 'boolean' ? body.inputButtonChat : (typeof body.inputButton === 'boolean' ? body.inputButton : oldInputButtonSwitches.chat))
+          && (typeof body.inputButtonCode === 'boolean' ? body.inputButtonCode : (typeof body.inputButton === 'boolean' ? body.inputButton : oldInputButtonSwitches.code)),
       };
       atomicWriteJson(path.join(DATA_DIR, 'display-config.json'), cfg);
       // 同步失败不抹掉保存：偏好已经落盘，下次启动会再盖一遍。
@@ -2022,7 +2037,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
       const seq = latestInputButtonSync.seq;
       void (async () => {
         try {
-          const result = await syncInputButton(ctx, cfg.inputButton, () => seq !== inputButtonSyncSeq);
+          const result = await syncInputButton(ctx, { chat: cfg.inputButtonChat, code: cfg.inputButtonCode }, () => seq !== inputButtonSyncSeq);
           // 已经有更新的请求了，这次的结果作废：不许拿旧结果盖掉新状态。
           if (seq !== inputButtonSyncSeq) return;
           latestInputButtonSync = { ...result, seq };

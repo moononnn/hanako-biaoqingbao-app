@@ -66,3 +66,19 @@ test('包里带的总闸和本机不一样时，要能说出来', () => {
   assert.equal(displayConfigSwitchesDiffer({ inputButton: false }, {}), false, '包里没带就不算差异');
   assert.equal(displayConfigSwitchesDiffer(null, { agentSelfNote: true }), false, '本机缺键时生效值就是 true');
 });
+
+test('分页开关也算本机总闸：包里带来的分页值不能改本机的', () => {
+  const current = { inputButtonChat: false, inputButtonCode: true, inputButton: false, agentSelfNote: true };
+  const incoming = { inputButtonChat: true, inputButtonCode: false, inputButton: true, agentSelfNote: true };
+  const merged = mergeDisplayConfig(current, incoming);
+  assert.equal(merged.inputButtonChat, false, '聊天页的开关要留本机的');
+  assert.equal(merged.inputButtonCode, true, 'Code 页的开关也要留本机的');
+  assert.equal(merged.inputButton, false, '旧的总闸同样留本机的');
+  assert.equal(displayConfigSwitchesDiffer(current, incoming), true, '差异要说出来');
+});
+
+test('本机缺分页键时，包里带 false 不能静默把按钮关掉', () => {
+  const merged = mergeDisplayConfig({ sizeMode: 'auto' }, { inputButtonChat: false, inputButtonCode: false });
+  assert.equal(merged.inputButtonChat, true, '本机生效值是开，就不能被包里的 false 带回去');
+  assert.equal(merged.inputButtonCode, true);
+});

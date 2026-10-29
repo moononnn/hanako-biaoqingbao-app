@@ -967,3 +967,19 @@ ode --test --test-concurrency=1 "tests/*.test.mjs" 全量，另有纸飞机三�
 - `tests/sticker-tool-card.test.mjs` 两个用例还在给注入上下文传旧的 `codeWindowGate`，而 `index.js` 已改用 `stickerAccess` + `gateMod.skippedToolResult`；改完后拒绝形状从旧的 `ok:false/action:code_window_disabled` 变为真实契约的 `ok:true/data.action:skipped`。
 
 未覆盖：双窗口对照的实机验收仍不完整（窗口分档的两屏切换与小图白边只有源码用例与实机观感核对）；安装、真实数据迁移、真实模型调用均未做。
+
+## 2026-10-29 输入栏表情按钮拆成聊天页 / Code 页两个开关
+
+需求：原来只有一个总闸管着输入栏里的表情包按钮，聊天页和 Code 页得分别控制。
+
+改法：
+
+- 配置：`display-config.json` 新增 `inputButtonChat`（聊天页）与 `inputButtonCode`（Code 页）。旧键 `inputButton` 不删，只当镜像：两边都开才算开。读的时候新键优先，没写就退回旧键，再没写按默认显示算——老配置迁上来不用改文件。
+- 同步（`lib/input-button.js`）：宿主只有一个输入栏项（`sticker-compose`），按会话盖，所以「分页」靠盖的时候用哪一档值。宿主 `session:list` 里的会话（home / app 分区）算聊天页，本应用自记的 Code 会话名单（`input-button-code-sessions.json`）算 Code 页。
+- 判定顺序（`session_created` 事件）：先看事件自带的 `namespace` → 再看本应用记下的 Code 名单 → 最后问一次 `session:get`（进程内共用的解析器，带缓存）→ 都判不出来才按聊天页算。判不出来就按聊天页算，是有意的：宁可多显示一次，也不要把 Code 页的会话按错的那一档盖掉。
+- 接口：`GET /api/display-config` 返回分开的两档；`POST` 收两档，旧前端只发 `inputButton` 时两页一起改，免得老前端保存一次就把分开的两档拉平。搬家包导入后重盖也改用分页值。
+- 界面：首页顶栏原来那个「输入栏按钮」开关拆成「输入栏·聊天」「输入栏·Code」两个，状态字显示「聊天开 · Code 关」。
+
+命令与结果：`node --test --test-concurrency=1 "tests/*.test.mjs"` **529 项通过 / 0 失败**（本轮新增 8 项：按页读开关、旧键只当镜像、两页分开盖、反向组合、Code 事件按 Code 档盖、单会话按分区取值、分页键算本机总闸、包里带 false 不能静默关掉）；`node --check lib/input-button.js server/api.js server/boot.js lib/display-config-merge.js ui/assets/sticker-manager.js tests/input-button.test.mjs tests/display-config-merge.test.mjs` 通过。
+
+未覆盖：实机验收（两页分别开关、Code 页会话显隐、新建 Code 会话是否自动按 Code 那档盖）待作者在宿主里跑；Python 纸飞机用例本轮没动、没跑。

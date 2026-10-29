@@ -68,7 +68,10 @@ export function buildBootData() {
       // v0.2.12：图库排序档位，新装/旧数据都落到「加入时间 新→旧」
       gallerySort: 'added_desc',
       // 2026-10-21：聊天输入栏那个表情按钮的显隐开关，首页与后端共用同一份真值
+      // 2026-10-29：拆成聊天页 / Code 页两个开关，inputButton 只当旧版镜像
       inputButton: true,
+      inputButtonChat: true,
+      inputButtonCode: true,
     }),
     __DECISION_LOG__: readJson('decision-log.json', { version: 1, entries: [] }),
     __CONTEXT_FEEDBACK__: readContextFeedback({ dataDir: DATA_DIR }),

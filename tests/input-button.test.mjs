@@ -6,7 +6,7 @@ import path from 'node:path';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bqb-input-button-'));
 process.env.BQB_DATA_DIR = root;
-const { readInputButtonEnabled, syncInputButton, syncInputButtonSession, installInputButtonWatcher, isInputButtonSyncPending, INPUT_STATUS_ID,
+const { readInputButtonSwitches, resolveInputButtonSwitches, legacyInputButtonValue, syncInputButton, syncInputButtonSession, installInputButtonWatcher, isInputButtonSyncPending, INPUT_STATUS_ID,
   readCodeSessions, rememberCodeSession, noteInputButtonSession } =
   await import('../lib/input-button.js');
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -40,14 +40,83 @@ function fakeSdk({ sessions = ['s1', 's2'], failOn = '' } = {}) {
 
 test('默认显示；配置里明确关掉才算隐藏', () => {
   fs.rmSync(path.join(root, 'display-config.json'), { force: true });
-  assert.equal(readInputButtonEnabled(), true);
+  assert.deepEqual(readInputButtonSwitches(), { chat: true, code: true });
   writeConfig({ inputButton: false });
-  assert.equal(readInputButtonEnabled(), false);
+  assert.deepEqual(readInputButtonSwitches(), { chat: false, code: false }, '旧配置只有一个总闸，两页都按它算');
   writeConfig({ inputButton: true });
-  assert.equal(readInputButtonEnabled(), true);
+  assert.deepEqual(readInputButtonSwitches(), { chat: true, code: true });
   writeConfig({ smallImageFit: true });
-  assert.equal(readInputButtonEnabled(), true, '没写这个字段按显示算');
+  assert.deepEqual(readInputButtonSwitches(), { chat: true, code: true }, '没写这个字段按显示算');
   writeConfig({});
+});
+
+test('开关按页读：分页键写定后，旧的总闸不再牵着另一边', () => {
+  writeConfig({ inputButton: false, inputButtonChat: true });
+  assert.deepEqual(readInputButtonSwitches(), { chat: true, code: false }, '聊天页自己开就是开，Code 页没分页键就跟着旧总闸');
+  writeConfig({ inputButton: true, inputButtonCode: false });
+  assert.deepEqual(readInputButtonSwitches(), { chat: true, code: false }, 'Code 页自己关就是关');
+  writeConfig({ inputButtonChat: false, inputButtonCode: true });
+  assert.deepEqual(readInputButtonSwitches(), { chat: false, code: true });
+});
+
+test('旧键只当镜像：两边都开才算开', () => {
+  assert.equal(legacyInputButtonValue({ chat: true, code: true }), true);
+  assert.equal(legacyInputButtonValue({ chat: true, code: false }), false, '只有一边开着时降级宁可两边都藏');
+  assert.equal(legacyInputButtonValue({ chat: false, code: true }), false);
+  assert.equal(resolveInputButtonSwitches({}).chat, true, '空配置按默认显示');
+  assert.equal(resolveInputButtonSwitches({ inputButtonChat: 'false' }).chat, true, '脏值按默认算');
+});
+
+test('两页分开盖：聊天页会话用聊天页那档，Code 会话用 Code 页那档', async () => {
+  clearLedger();
+  rememberCodeSession('sess_code1');
+  const sdk = fakeSdk({ sessions: ['s1', 's2'] });
+  const result = await syncInputButton(sdk, { chat: true, code: false });
+  assert.equal(result.ok, true);
+  const byId = Object.fromEntries(sdk.calls.map(call => [call.sessionId, call.visible]));
+  assert.equal(byId.s1, true, '聊天页的会话按聊天页的开关显示');
+  assert.equal(byId.s2, true);
+  assert.equal(byId.sess_code1, false, 'Code 会话按 Code 页的开关藏住');
+  assert.equal(result.chatSynced, 2);
+  assert.equal(result.codeSynced, 1);
+  assert.deepEqual(result.applied, { chat: true, code: false });
+  clearLedger();
+});
+
+test('反过来也一样：聊天页关、Code 页开，两边各按各的来', async () => {
+  clearLedger();
+  rememberCodeSession('sess_code1');
+  const sdk = fakeSdk({ sessions: ['s1'] });
+  await syncInputButton(sdk, { chat: false, code: true });
+  const byId = Object.fromEntries(sdk.calls.map(call => [call.sessionId, call.visible]));
+  assert.equal(byId.s1, false, '聊天页的会话按聊天页的开关藏住');
+  assert.equal(byId.sess_code1, true, 'Code 会话按 Code 页的开关显示');
+  clearLedger();
+});
+
+test('新会话事件带 namespace=code 时按 Code 页那档盖', async () => {
+  clearLedger();
+  writeConfig({ inputButtonChat: true, inputButtonCode: false });
+  const sdk = fakeSdk({ sessions: ['s1'] });
+  await installInputButtonWatcher(sdk);
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  await sdk.listeners[0].fn({ type: 'session_created', session: { sessionId: 'sess_codeX', namespace: 'code' } });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const call = sdk.calls.find(item => item.sessionId === 'sess_codeX');
+  assert.ok(call, '新 Code 会话要盖一次');
+  assert.equal(call.visible, false, 'Code 页那档是关的，新 Code 会话就该是藏着的');
+  clearLedger();
+});
+
+test('单会话同步按分区取对应那档开关', async () => {
+  const sdk = fakeSdk();
+  const chat = await syncInputButtonSession(sdk, 's7', { chat: false, code: true }, 'chat');
+  assert.equal(chat.ok, true);
+  assert.deepEqual(sdk.calls[0], { sessionId: 's7', id: INPUT_STATUS_ID, visible: false });
+
+  const codeSdk = fakeSdk();
+  await syncInputButtonSession(codeSdk, 's8', { chat: false, code: true }, 'code');
+  assert.deepEqual(codeSdk.calls[0], { sessionId: 's8', id: INPUT_STATUS_ID, visible: true });
 });
 
 test('同步：每个会话都盖一遍，id 用清单里那个，单个会话失败不影响其他', async () => {

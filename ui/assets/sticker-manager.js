@@ -267,8 +267,16 @@
   // 2026-10-21 从偏好设置页挑到首页，放在纸飞机开关旁边：这个开关是「聊天时随手调」的，
   // 藏在设置里没人会去翻。状态一律从 window.__DISPLAY_CONFIG__ 读，两处共用同一份真值。
   var inputButtonSyncSeq = 0;
-  function inputButtonEnabled() {
+  // 读某一页的开关。kind: 'chat' | 'code'
+  // 老配置里只有 inputButton 一个总闸，这时两页都按它算；
+  // 新配置写过分页键之后就只认分页键，总闸不再牵着另一边。
+  function inputButtonEnabled(kind) {
     var cfg = window.__DISPLAY_CONFIG__ || {};
+    if (kind === 'code') {
+      if (typeof cfg.inputButtonCode === 'boolean') return cfg.inputButtonCode;
+      return cfg.inputButton !== false;
+    }
+    if (typeof cfg.inputButtonChat === 'boolean') return cfg.inputButtonChat;
     return cfg.inputButton !== false;
   }
   // 最近一次同步结果（后端带的）。没有它就不知道「保存了」到底有没有真盖到会话上。
@@ -276,21 +284,25 @@
     return window.__INPUT_BUTTON_SYNC__ || null;
   }
   function renderInputButtonState() {
-    var enabled = inputButtonEnabled();
-    var toggle = $('input-button-toggle-top');
-    var status = $('input-button-status-top');
-    if (toggle) {
-      toggle.classList.toggle('on', enabled);
-      toggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    var chatOn = inputButtonEnabled('chat');
+    var codeOn = inputButtonEnabled('code');
+    // 两个开关各自上色：一眼能看出是哪一页开着。
+    [
+      { id: 'input-button-chat-toggle-top', on: chatOn, page: '聊天页' },
+      { id: 'input-button-code-toggle-top', on: codeOn, page: 'Code 页' },
+    ].forEach(function (item) {
+      var toggle = $(item.id);
+      if (!toggle) return;
+      toggle.classList.toggle('on', item.on);
+      toggle.setAttribute('aria-pressed', item.on ? 'true' : 'false');
       var switchEl = toggle.querySelector('.ball-toggle-switch');
-      if (switchEl) switchEl.classList.toggle('on', enabled);
-      toggle.title = enabled
-        ? '关闭聊天输入栏里的表情包按钮；主页和纸飞机不受影响'
-        : '开启聊天输入栏里的表情包按钮；主页和纸飞机不受影响';
-    }
+      if (switchEl) switchEl.classList.toggle('on', item.on);
+      toggle.title = (item.on ? '关闭' : '开启') + item.page + '输入栏里的表情包按钮；主页和纸飞机不受影响';
+    });
+    var status = $('input-button-status-top');
     if (!status) return;
     var sync = inputButtonSyncState();
-    var base = enabled ? '已开启' : '已关闭';
+    var base = '聊天' + (chatOn ? '开' : '关') + ' · Code ' + (codeOn ? '开' : '关');
     if (!sync) { status.textContent = base; return; }
     // 「还在跑」的两种说法都要认：服务端给的是 pending 标记，
     // 而在跑的那份状态里带的是 reason:'pending'。只认一个就会把「还在跑」当成最终结果。
@@ -350,22 +362,28 @@
     }
     return null;
   }
-  async function toggleInputButtonTop() {
-    var toggle = $('input-button-toggle-top');
+  // kind: 'chat' | 'code'，两个开关共用这一段。
+  async function toggleInputButtonTop(kind) {
+    var toggle = $(kind === 'code' ? 'input-button-code-toggle-top' : 'input-button-chat-toggle-top');
     var status = $('input-button-status-top');
     if (!toggle || toggle.disabled) return;
-    var next = !inputButtonEnabled();
+    var next = !inputButtonEnabled(kind);
+    var pageName = kind === 'code' ? 'Code 页' : '聊天页';
     // 序号：用户连点或者又切了一次时，旧的轮询结果不能盖掉新的操作。
     var seq = ++inputButtonSyncSeq;
     toggle.disabled = true;
     if (status) status.textContent = '处理中…';
     // 先按新状态上色，失败再回回去，保证点了就有反应
     toggle.classList.toggle('on', next);
+    // 两页都发过去：后端才知道另一边保持原样。
+    // 只发改动的那一档也行，但发全了更不容易出错。
+    var payload = { inputButtonChat: inputButtonEnabled('chat'), inputButtonCode: inputButtonEnabled('code') };
+    if (kind === 'code') payload.inputButtonCode = next; else payload.inputButtonChat = next;
     try {
       var resp = await apiFetch(withAuth(API + '/api/display-config'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputButton: next }),
+        body: JSON.stringify(payload),
       });
       var data = await resp.json();
       if (!data || !data.ok) throw new Error((data && data.error) || '保存失败');
@@ -377,7 +395,7 @@
       // 没盖成就得说清楚，不能让「已隐藏」这句把没生效的事吞掉。
       if (sync.pending) {
         // 同步在后台跑，界面不干等。
-        toast('已保存，正在同步聊天栏的按钮…');
+        toast('已保存，正在同步' + pageName + '输入栏的按钮…');
         toggle.disabled = false;
         var final = await waitInputButtonSync(20000, seq);
         if (final && final.stale) return;
@@ -387,28 +405,28 @@
         }
         if (final.ok === false) {
           toast(next
-            ? '已保存，但聊天栏的按钮没能同步显示：' + (final.error || final.reason || '未知原因')
-            : '已保存，但聊天栏的按钮暂时没藏住：' + (final.error || final.reason || '未知原因') + '；重开窗口或重启后会再盖一遍', true);
+            ? '已保存，但' + pageName + '输入栏的按钮没能同步显示：' + (final.error || final.reason || '未知原因')
+            : '已保存，但' + pageName + '输入栏的按钮暂时没藏住：' + (final.error || final.reason || '未知原因') + '；重开窗口或重启后会再盖一遍', true);
         } else if (final.truncated > 0) {
           toast('已保存，但有 ' + final.truncated + ' 个会话超出上限没盖到（已盖 ' + final.synced + '）', true);
         } else if (final.failed > 0) {
           toast('已保存，但有 ' + final.failed + ' 个会话没盖上（盖成 ' + final.synced + '/' + final.total + '）', true);
         } else {
-          toast((next ? '已开启：聊天输入栏会出现表情包按钮' : '已关闭：聊天输入栏不再显示表情包按钮，纸飞机照旧') + codeNoteOf(final));
+          toast((next ? '已开启：' + pageName + '输入栏会出现表情包按钮' : '已关闭：' + pageName + '输入栏不再显示表情包按钮，纸飞机照旧') + codeNoteOf(final));
         }
         return;
       }
       if (seq !== inputButtonSyncSeq) return;
       if (sync.ok === false) {
         toast(next
-          ? '已保存，但聊天栏的按钮没能同步显示：' + (sync.error || sync.reason || '未知原因')
-          : '已保存，但聊天栏的按钮暂时没藏住：' + (sync.error || sync.reason || '未知原因') + '；重开窗口或重启后会再盖一遍', true);
+          ? '已保存，但' + pageName + '输入栏的按钮没能同步显示：' + (sync.error || sync.reason || '未知原因')
+          : '已保存，但' + pageName + '输入栏的按钮暂时没藏住：' + (sync.error || sync.reason || '未知原因') + '；重开窗口或重启后会再盖一遍', true);
       } else if (sync.truncated > 0) {
         toast('已保存，但有 ' + sync.truncated + ' 个会话超出上限没盖到（已盖 ' + sync.synced + '）', true);
       } else if (sync.failed > 0) {
         toast('已保存，但有 ' + sync.failed + ' 个会话没盖上（盖成 ' + sync.synced + '/' + sync.total + '）', true);
       } else {
-        toast((next ? '已开启：聊天输入栏会出现表情包按钮' : '已关闭：聊天输入栏不再显示表情包按钮，纸飞机照旧') + codeNoteOf(sync));
+        toast((next ? '已开启：' + pageName + '输入栏会出现表情包按钮' : '已关闭：' + pageName + '输入栏不再显示表情包按钮，纸飞机照旧') + codeNoteOf(sync));
       }
     } catch (e) {
       renderInputButtonState();
@@ -6696,8 +6714,11 @@ function formatUserstyleTime(iso) {
     var ballToggleBtn = $('ball-toggle-top');
     if (ballToggleBtn) ballToggleBtn.addEventListener('click', toggleBall);
     // 2026-10-21 - 输入栏表情按钮开关从偏好页挑到首页，跟纸飞机开关排在一行
-    var inputButtonTopBtn = $('input-button-toggle-top');
-    if (inputButtonTopBtn) inputButtonTopBtn.addEventListener('click', toggleInputButtonTop);
+    // 2026-10-29 - 拆成聊天页 / Code 页两个开关，各管各的
+    var inputButtonChatTopBtn = $('input-button-chat-toggle-top');
+    if (inputButtonChatTopBtn) inputButtonChatTopBtn.addEventListener('click', function () { toggleInputButtonTop('chat'); });
+    var inputButtonCodeTopBtn = $('input-button-code-toggle-top');
+    if (inputButtonCodeTopBtn) inputButtonCodeTopBtn.addEventListener('click', function () { toggleInputButtonTop('code'); });
     // v0.19.5 - 检查更新按钮（v0.34.18 收进设置菜单）
     if ($('btn-check-update')) {
       $('btn-check-update').addEventListener('click', function () { closeHomeMenu(); checkUpdate(); });
@@ -7025,6 +7046,7 @@ function formatUserstyleTime(iso) {
     }
 
     // 偏好设置页：输入栏表情按钮开关已于 2026-10-21 挑到首页（上面那行），
+    // 2026-10-29 又拆成聊天页 / Code 页两个，也都在首页那一行，
     // 这里不再留那一格，也就没有对应事件可挂。
 
     // v0.34.57 - 偏好设置页：伙伴配图自评开关 + 记录行上的移除按钮
