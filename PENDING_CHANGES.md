@@ -36,3 +36,8 @@
 
 <!-- 0.7.0 发布内容已并入 CHANGELOG.md：图库一键导入闲聊表情包（导入模式 + 宿主分类、宿主转码、发送后自查、两层去重、分块上传）、输入栏面板列出宿主表情包、Code 页总闸注入与工具准入同口径、分类读不到的几种死法，这里清空重新记。 -->
 
+- 2026-11-01 | 修复 | 宿主表情包路由的凭据标记从「只记日志」改成「不过就拒」（403）：原来那三条本机写路由只校验 Host、Host 缺失也放行，网页朝本机端口发一个 text/plain 简单请求就能借应用内存里的 token 代写宿主包。本 App 的页面本来就会带 appSurfaceSession / token 查询参数（withAuth），所以收紧不断链；宿主接口那层 owner token 仍是真正的安全边界
+- 2026-11-01 | 修复 | 去重索引的形状容错：`loadIndex` 只挡非对象/null，包的值被写成字符串时 `reconcile` / `record` 会抛 TypeError，那个包就再也发不出去。现在读的时候把非对象的值归一成「没记过」，`reconcile` / `lookup` / `record` 各加一道形状防御，坏的那条不连坐其它包
+- 2026-11-01 | 调整 | 删掉无调用方的接口与函数：`POST /api/host-stickers/create` 与 `host-sticker-writer.js` 的 `deletePack`（分类管理按 0.7.0 发布说明已撤，UI 里 0 处调用）。建分类仍走 send 路由里的 packName 分支
+- 2026-11-01 | 修复 | 发图读源文件前加路径包含性校验：`path.resolve` 后必须落在自己的 `stickers` 目录内，否则跳过并记一行诊断（file 来自本应用的 stickers.json、非请求可控，这是多一道兜底）
+

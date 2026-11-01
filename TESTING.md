@@ -1,5 +1,24 @@
 # 自动测试
 
+## 2026-11-01 审包四条非阻断项修复（0.7.1-dev.1）
+
+来源：v0.7.0 独立审包给出的四条非阻断项。按「非阻断不扩改」没赶上那一版，这轮一并修。
+
+改法：
+
+- `lib/host-sticker-routes.js`：凭据标记不过就拒（403），不再只记日志；`badRequest` 让带 `status` 的错误用自己的状态码。本 App 页面本来就带 `appSurfaceSession` / `token`（`withAuth` 给每个请求缀参数），所以不断链。
+- `lib/host-sticker-index.js`：`loadIndex` 把非对象的包值归一成「没记过」；`reconcile` / `lookup` / `record` 各加一道形状防御，一个坏条目不再让整个包发不出去。
+- `lib/host-sticker-writer.js`：删掉无调用方的 `deletePack`；路由层删掉 `POST /api/host-stickers/create`（建分类仍走 send 的 `packName` 分支）。
+- `lib/host-sticker-routes.js` 读源图前加 `path.resolve` + 包含性校验，越界就跳过并记诊断。
+
+验证：
+
+- `node --test tests/host-sticker-routes.test.mjs tests/host-sticker-index.test.mjs tests/host-sticker-writer.test.mjs tests/host-packs.test.mjs` **54 项通过 / 0 失败**（重写一条：没带凭据从「放行」改成「403」；新增三条：Host 缺失但带凭据仍放行、索引包值为字符串时归一并能继续记、索引被直接写成字符串时对账不抛）。
+- 全量 `node --test "tests/*.test.mjs"` **603 项通过 / 0 失败**。
+- `node --check` 过改动文件与两个测试文件。
+
+未覆盖：收紧后的凭据要求只做了单元测试，没有在宿主界面重新点一遍发图链路（需要重载应用后手动验收）。
+
 ## 2026-11-01 作者实机验收：「导入到闲聊」整条链路通了
 
 作者原话：表情包应用现在可以正确导入到闲聊的表情包里了。
