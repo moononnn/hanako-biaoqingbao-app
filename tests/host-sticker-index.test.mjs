@@ -51,6 +51,26 @@ test('索引文件坏了也当空索引', () => {
   assert.deepEqual(index.packs, {});
 });
 
+test('包的值被写成字符串：归一成空对象，不再抛 TypeError', () => {
+  const dir = tempDir();
+  const file = path.join(dir, 'host-sticker-index.json');
+  fs.writeFileSync(file, JSON.stringify({ version: 1, packs: { 'pack-1': 'oops', 'pack-2': { 'hash-a': 'a.webp' } } }));
+  const index = loadIndex(dir);
+  assert.equal(index.packs['pack-1'], undefined, '坏的那一条当没记过');
+  assert.equal(lookup(index, 'pack-2', 'hash-a'), 'a.webp', '好的那条不能连坐');
+  assert.doesNotThrow(() => reconcile(index, 'pack-1', ['a.webp']));
+  assert.doesNotThrow(() => record(index, 'pack-1', 'hash-b', 'b.webp'));
+  assert.equal(lookup(index, 'pack-1', 'hash-b'), 'b.webp', '修好之后能继续记');
+});
+
+test('索引直接被写成字符串时，对账与记录也不抛', () => {
+  const index = { version: 1, packs: { 'pack-1': 'broken-string' } };
+  assert.equal(reconcile(index, 'pack-1', ['a.webp']), 0);
+  assert.equal(index.packs['pack-1'], undefined, '坏形状直接摘掉');
+  record(index, 'pack-1', 'hash-a', 'a.webp');
+  assert.equal(lookup(index, 'pack-1', 'hash-a'), 'a.webp');
+});
+
 test('查一个没记过的：返回空串', () => {
   const index = emptyIndex();
   record(index, 'pack-1', 'hash-a', 'a.webp');

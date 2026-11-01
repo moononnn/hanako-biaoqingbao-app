@@ -145,7 +145,7 @@ test('分类列表：宿主接口断、目录里也没包 → 空列表 + 说清
   assert.match(ctx.out.body.warnings.join(' '), /宿主接口没读通/);
 });
 
-test('分类列表：请求没带凭据标记也放行（宿主实测就是不带），但会记一笔诊断', async () => {
+test('分类列表：请求没带凭据标记 → 不接（本机来源也不例外）', async () => {
   const app = fakeApp();
   registerHostStickerRoutes(app, fakeSdk({
     fetch: async () => hostResponse([hostPack('stickers-1', '收藏', 3, true)]),
@@ -155,7 +155,26 @@ test('分类列表：请求没带凭据标记也放行（宿主实测就是不�
   const ctx = fakeCtx(false);
   await app.handler('/api/host-stickers/packs')(ctx);
 
-  assert.equal(ctx.out.status, 200);
+  assert.equal(ctx.out.body.ok, false);
+  assert.equal(ctx.out.status, 403);
+  assert.match(ctx.out.body.error, /凭据/);
+});
+
+test('分类列表：Host 头缺失但带了凭据 → 放行（凭证才是通行证）', async () => {
+  const app = fakeApp();
+  registerHostStickerRoutes(app, fakeSdk({
+    fetch: async () => hostResponse([hostPack('stickers-1', '收藏', 3, true)]),
+    resources: fakeResources({ serverInfo: { port: 12345, token: 'tok' } }),
+  }));
+
+  const ctx = fakeCtx(true);
+  const base = ctx.req.header;
+  ctx.req.header = (name) => {
+    if (name === undefined) { const all = base(); delete all.host; return all; }
+    return name.toLowerCase() === 'host' ? '' : base(name);
+  };
+  await app.handler('/api/host-stickers/packs')(ctx);
+
   assert.equal(ctx.out.body.ok, true);
 });
 
