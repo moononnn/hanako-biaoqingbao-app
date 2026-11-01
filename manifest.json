@@ -2,9 +2,9 @@
   "manifestVersion": 2,
   "id": "biaoqingbao-app",
   "name": "表情包",
-  "version": "0.6.5-dev.1",
+  "version": "0.7.0",
   "entry": "index.js",
-  "description": "让小花在回复里根据具体的情绪带出表情包！导入你收藏的表情包，ta 会挑着合情绪的往回复里贴。点“喜欢、应景、不喜欢”，让选图越来越合你口味。另外还能让小花说不同地区的方言，顺便总结你的发言习惯，学你说话！",
+  "description": "让小花在回复里根据具体的情绪带出表情包！导入你收藏的表情包，ta 会挑着合情绪的往回复里贴。挑几张一键导入闲聊自带的那个表情包面板，聊天框里随手就能发。点“喜欢、应景、不喜欢”，让选图越来越合你口味。还能让小花说不同地区的方言，顺便总结你的发言习惯，学你说话！",
   "capabilities": [
     "app/tools.expose-to-model",
     "app/hooks.agent-pre-step",
@@ -78,12 +78,16 @@
     "allowedHosts": [
       "api.siliconflow.cn",
       "api.typesafe.ai",
-      "api.github.com"
+      "api.github.com",
+      "127.0.0.1"
     ],
     "methods": [
       "GET",
-      "POST"
+      "POST",
+      "PUT",
+      "DELETE"
     ],
+    "allowLocalhost": true,
     "defaultTimeoutMs": 30000
   },
   "minAppVersion": "0.1059.0"

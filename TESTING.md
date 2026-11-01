@@ -1,5 +1,96 @@
 # 自动测试
 
+## 2026-11-01 作者实机验收：「导入到闲聊」整条链路通了
+
+作者原话：表情包应用现在可以正确导入到闲聊的表情包里了。
+
+覆盖到的真实链路：图库页顶栏「导入到闲聊」→ 勾图 → 横幅「导入这 N 张」→ 弹层选分类或当场新建 → 发送 → 闲聊表情面板里能挑到这批图。
+
+这一条补上了 2026-10-31 多条记录里反复出现的「未在宿主界面点测」缺口（当时桌面控制点不动宿主 Electron 侧边栏）。之前的代码层与路由层实测仍然有效，两者不互相替代：分块上传、去重、发送后自查这些分支仍以自动测试与路由实测为准。
+
+## 2026-10-31 图库发到闲聊表情包（lib/host-sticker-writer.js / lib/host-sticker-routes.js）
+
+需求：图库里自由选图（不限收藏），一键发进宿主闲聊面板的分类；分类可选已有的，也可以当场新建一个。
+
+### 通道验证（先验证通道再写代码，结论来自真机）
+
+宿主那边有一整套给「用户自己的界面」用的接口，这一轮先用 shell 直连实测（绕开 App 沙箱）：
+
+| 动作 | 接口 | 实测 |
+| --- | --- | --- |
+| 列分类 | `GET /api/casual/stickers` | 读到 3 个包 |
+| 新建分类 | `POST /api/casual/stickers/packs` | 201，建出的包 `editable=true` |
+| 加图 | `POST /api/casual/stickers/packs/:id/stickers`（multipart，字段名 `files`） | 200，宿主自己转成 webp |
+| 写备注 | `PUT /api/casual/stickers/:packId/:file` | ok |
+| 删单张 | `DELETE /api/casual/stickers/packs/:packId/stickers/:file` | ok |
+| 删整个包 | `DELETE /api/casual/stickers/packs/:packId` | ok |
+
+探针建的测试包已删净，宿主面板回到原来的三个分类。
+
+走 App 沙箱的实测（临时探针路由，验完已删）：
+
+- `ctx.resources.read` 读 `<HANA_HOME>/server-info.json`：**通**，拿到 port 14500 与 32 位 owner token。
+- 裸 fs 读同一个文件：**被拒**（`Access to this API has been restricted. Use --allow-fs-read to manage permissions.`）。跟只读适配层那轮结论一致——盘外读只有 `ctx.resources` 这条正门。
+- `ctx.network.fetch` 打 `127.0.0.1`：manifest 补上 `allowLocalhost` + `127.0.0.1` + `PUT/DELETE` 之后**通**。宿主按新增权限处理，重载要本人确认（这一条卡过一次，是设计如此）。
+- 探针跑完整链路：建包 201 → 上传 200（宿主转 webp）→ 清理 200，全程无残留。
+
+### 两条关键设计取舍
+
+- **转码交给宿主**。宿主的 `addStickers` 会把图缩到 512 以内转成 WebP q85，并校验单张 ≤2MiB、单边 ≤1024px、每包 ≤300 张。应用图库里那批超尺寸超体积的原图直接传就行，不用自己搞一套转码（上一轮那个 Python 脚本可以退休）。
+- **增量而不是快照**。往已有分类里加图是宿主接口的原生能力（`addStickers` 原地追加），不是「导出整个包再装一遍」。这解掉了「改了分类宿主那边不同步」的老问题——但注意：**只有 local-created 的包能加图**，`editable=false` 的装进来的包宿主只让导出。前端下拉里只列 editable 的包，后端再挡一道。
+
+### 权限边界
+
+- token 只在应用进程内存里用，不落盘、不外传，目标地址固定 `127.0.0.1`，宿主那边还会按 manifest 白名单再卡一道。
+- 三条路由都要求 `X-Hana-App-Surface-Session` 头（宿主渲染 App 页面时签发），外面直接打本机端口没有这个头，会被挡回。这层是双保险：真正要紧的是 token 不出进程。
+
+### 测试
+
+命令与结果：`node --test tests/host-sticker-writer.test.mjs` **15 项通过 / 0 失败**（覆盖 server-info 的三种内容形态、缺字段报错、空内容报错、无资源通道报错、token 去空白、multipart 的字段名与 boundary 闭合、多文件拼接、空文件报错、上传文件名转义、备注的两级回退、空备注、兜底文件名、两个上限常量）。
+
+全量 `node --test --test-concurrency=1 "tests/*.test.mjs"` **582 项通过 / 0 失败**。
+
+**未实机验收的部分**（需要人在宿主界面里点）：图库页批量工具栏上「发到闲聊表情包」按钮的完整交互——弹层打开、分类下拉加载、新建分类、发出去后宿主面板真的多出这个分类。桌面控制工具点不动宿主的 Electron 侧边栏，这条链路没走完。
+
+## 2026-10-31 宿主表情包只读适配层（lib/host-packs.js）
+
+需求：让装了本应用的人，能同时看到宿主闲聊自带的表情包（sticker-pack 扩展）。这一轮只做「看见」，不碰发送链路。
+
+先验证通道，再写代码（结论都来自真机，不是读文档推的）：
+
+- 裸 fs 读 `<HANA_HOME>`：`ERR_ACCESS_DENIED`。App 子进程的 `--allow-fs-read` 只有三条（安装目录、自己的 app-data、宿主语言包），主目录不在其中。
+- `ctx.resources`：`list` 列 `<HANA_HOME>/stickers/`、`read` 读包里的 `stickers.json` 与 `.notes/<packId>.json`、`stat` 探图片，全部通过。
+- `ctx.network.fetch` 打 `127.0.0.1`：`PLUGIN_NETWORK_PRIVATE_HOST_FORBIDDEN`，要 `manifest.network.allowLocalhost` 才放行。既然 resources 够用，这层不走网络，也刻意不读 `server-info.json`（那里面有 owner token）。
+
+改法：
+
+- 新增 `lib/host-packs.js`：`readHostPacks({ resources, dataDir, log, force })` 扫包、读清单与备注、拼成与图库同构的清单（`hostId` 为 `<packId>/<file>`、`source: 'host'`）；`invalidateHostPacks()` 失效，`summarizeHostPacks()` 给一行摘要；`HOST_INJECT_LIMIT = 60` 对应宿主注入上限，超出的仍进清单但算进 `truncated`。缓存 30 秒，并发调用共用同一次扫描。
+- 目录不存在（`ENOENT`）归为 `no-packs`，授权被拒归为 `list-failed`，两种不能混——混了就会把「没授权」显示成「没装包」。
+- `index.js` 的 `apply` 里在 persona-io 注入后扫一次，写 `host-packs state=…` 进 probe.log。
+
+命令与结果：`node --test tests/host-packs.test.mjs` **14 项通过 / 0 失败**（覆盖 Buffer 形态的 content、.notes 缺失、清单内联备注优先、坏包只坏自己、`.notes` 不当包、自有收藏排序、TTL/失效/并发/force、60 张截断、摘要）。另跑 `node --test tests/entry-syntax.test.mjs tests/observer.test.mjs tests/persona-io.test.mjs` **62 项通过 / 0 失败**。
+
+实机验收（2026-10-31）：临时 `_dev` 路由实测返回 `state=ok packs=1 stickers=6 [收藏(6)]`，note 与 tags 都正确；同一次调用两次 readAt 相同（缓存生效），`force=1` 能重扫；启动日志 `host-packs state=ok packs=1 stickers=6 [收藏(6)]`。临时路由验完已删，重载后八个工具全注册、persona-io 正常、探针 404。
+
+未覆盖：用户一个包都没装时的空目录（单测用假宿主模拟，真机没造过）、多包与 >60 张的真机场景。
+
+## 2026-10-31 宿主表情包接进输入栏面板（分类 + 发送）
+
+需求（作者原话）：闲聊页输入栏那个表情包按钮里，装了就多出一个分类，能直接发到闲聊里。
+
+改法：
+
+- `lib/host-packs.js` 新增 `readHostStickerBytes()` 与 `isHostStickerId()`：宿主 id 只认 `<packId>/<file>`（两段都不许带路径分隔与 `..`，防穿越），字节走 `resources.read`。
+- `server/api.js`：`/api/image` 改成 async，id 带斜杠时走上面的函数把字节代理出去；本应用图库那条路不变。
+- `lib/sticker-input-panel.js`：新增 `GET /api/sticker-compose/host-packs`（按 ticket 归属校验，返回每个包的 id/名称/张数与每张的 note）；`deliverCompose` 加 `findHostSticker` 参数，宿主 id 分流取字节，本应用图库照旧 `fs.readFileSync`。
+- `ui/assets/sticker-compose.js`：收藏页分类行在「全部收藏」后按包名插最多每条宿主包（`host:<packId>`，带张数），首次 `reload` 时拉一次并缓存；宿主包里的图可点选进待发送区，但不开右键菜单、不能拖拽排序、不出收藏心、不进管理态（`selectCategory` 会退出管理态）。选中驱动自动放开时也认 `host:` 前缀，不会把宿主分类误清掉。
+
+命令与结果：`node --test tests/host-packs.test.mjs` **18 项通过 / 0 失败**（新增四条：id 形状校验、宿主图只走 findHostSticker 且纯图仍唤起一轮、读失败整批拦下不先发一半、没接通道时不静默变成别的图）。另跑 `sticker-compose-search` / `sticker-input-panel` / `entry-syntax` 共 **52 项通过 / 0 失败**。
+
+实机验收（2026-10-31）：`/api/image?id=<packId>/<file>` 返回 `image/webp`、41646 字节，文件头 `RIFF....WEBP`，与源文件字节数一致；`/api/sticker-compose/host-packs` 无 ticket 时返回 400「面板已失效」，说明路由已注册；重载后八个工具全注册、`host-packs state=ok packs=1 stickers=6 [收藏(6)]`。
+
+未覆盖：面板里的实际渲染与点选发送未由人工验收（需要点输入栏按钮开面板）、多包同时存在时的分类行宽度、宿主包装/卸后不重开面板能否看到变化（缓存 30 秒 + 本次进程内只拉一次）。
+
 ## 2026-10-22 输入栏表情按钮改成开关（再按一下收起）
 
 需求：输入栏那个表情按钮按一下打开面板，希望再按一下能关掉。
@@ -983,3 +1074,136 @@ ode --test --test-concurrency=1 "tests/*.test.mjs" 全量，另有纸飞机三�
 命令与结果：`node --test --test-concurrency=1 "tests/*.test.mjs"` **529 项通过 / 0 失败**（本轮新增 8 项：按页读开关、旧键只当镜像、两页分开盖、反向组合、Code 事件按 Code 档盖、单会话按分区取值、分页键算本机总闸、包里带 false 不能静默关掉）；`node --check lib/input-button.js server/api.js server/boot.js lib/display-config-merge.js ui/assets/sticker-manager.js tests/input-button.test.mjs tests/display-config-merge.test.mjs` 通过。
 
 未覆盖：实机验收（两页分别开关、Code 页会话显隐、新建 Code 会话是否自动按 Code 那档盖）待作者在宿主里跑；Python 纸飞机用例本轮没动、没跑。
+
+## 2026-10-31 图库「发到闲聊表情包」弹层重做 + 分类读取兜底
+
+需求：弹层按表情包页面的整体风格重做（尤其下拉），并且「读不到分类」要修。
+
+改法：
+
+- 弹层结构（ui/panel.html）：原来整块写在闭合标签之后（靠浏览器容错才进 DOM），类名沿用插件版的 form-select / form-input / btn-cancel / btn-confirm —— 这几个在应用版样式里都不存在，于是原生 select、原生按钮、输入框被宿主全局样式放大。现在挪进 body 内，改用面板同一套 modal-box fixed-modal-box / modal-head / modal-body / modal-foot / btn btn-primary 结构，并补一组只服务于这个弹层的样式（宽度、字段间距、输入框、状态行）。
+- 下拉（ui/assets/sticker-manager.js）：分类选择换成面板同款 beautify-select 组件（原生 select 只留值和 change，选项左侧打勾、面板按内容撑开）。组件盯着 DOM 变化，程序改 value 它看不见，所以改完值手动叫它刷新一次；这个弹层的 modal-body 与弹层本身放开 overflow，否则下拉面板会被裁掉。
+- 分类列表双路（lib/host-sticker-routes.js）：主路 loopback 调宿主 /api/casual/stickers；主路不通就退回 lib/host-packs.js 走 ctx.resources 读 <HANA_HOME>/stickers（不需要 token）。返回里带 source / warnings / writable，界面据此说明「能看见但发不过去」。新增 tests/host-sticker-routes.test.mjs 4 项用例把三种组合钉住。
+- 诊断：App 启动时自检一次写入通道（host-write 通道自检），失败原因写进 app-data/biaoqingbao-app/probe.log；路由层的异常也落同一份日志。
+
+命令与结果：
+
+- node --test tests/host-sticker-routes.test.mjs 4 项通过 / 0 失败。
+- node --test tests/host-packs.test.mjs tests/host-sticker-writer.test.mjs tests/beautify-select.test.mjs tests/entry-syntax.test.mjs 41 项通过 / 0 失败。
+- node --check ui/assets/sticker-manager.js index.js 通过；路由模块可正常 import。
+- 实机（宿主内 reload 后的启动日志）：host-packs state=ok packs=3 stickers=148；host-write 通道自检 ok packs=3 可加图=1 —— 写入通道在真机上通，宿主三个包里只有「收藏」可加图，另两个是装进来的包。
+
+未覆盖：弹层在宿主里的最终观感与「点发过去」这一步仍需在宿主界面里点一次确认（桌面控制点不动宿主界面的导航点击，这条没走完）。
+
+## 2026-10-31 「读不到分类」的真凶：接口自己把请求挡了
+
+现象：弹层重做后界面样式对了，但下拉里只有「读不到分类」，红字写「这个接口只接受来自 Hana 界面的请求」。
+
+原因：路由层原来硬性要求请求头 X-Hana-App-Surface-Session，而宿主页面发过来的请求根本没有这个头。请求确实到了后端（probe.log 里能看到 400 的记录：07:13:50、07:27:20 两次），只是被鉴权挡掉。上一版界面把后端的错误吞成一句「读不到分类」，所以一直以为是「读不到」，其实是被拒。
+
+改法：
+
+- 鉴权口径改成只接本机来源的请求（路由本来就挂在宿主给本机 App 面板用的那个端口上），凭据标记有没有都放行；没有凭据标记时把入站的头名与 query 键名记进 probe.log，等摸清宿主的真实鉴权方式再收紧。
+- 写操作的安全边界没动：真正能写宿主包的是 owner token，那个 token 只存在 App 进程内存里，外部即便调到这条路由也换不来。
+- 测试用例跟着改：没带凭据标记仍放行（并留诊断），非本机来源照旧拒绝。
+
+命令与结果：node --test tests/host-sticker-routes.test.mjs 5 项通过 / 0 失败；node --check lib/host-sticker-routes.js 通过；宿主内 reload 后启动自检 host-write 通道自检 ok packs=3 可加图=1。
+
+未覆盖：仍然需要人在宿主里点一次「发过去」，确认宿主面板真的多出这个分类。
+
+## 2026-10-31 宿主分类直接删除 + 面板裂图清理
+
+### 新增能力
+- `lib/host-sticker-routes.js`：新增 `DELETE /api/host-stickers/packs/:packId`。先 `listPacks()` 确认分类还在并拿到名字，再调宿主 `DELETE /api/casual/stickers/packs/:id`；分类已不在 → 400「那个分类已经不在宿主面板里了」；宿主拒绝（装进来的包）→ 把宿主错误原样带回来。
+- `ui/panel.html` + `ui/assets/sticker-manager.js`：弹层里加分类管理列表（`#host-sticker-packs` / `#host-sticker-pack-list`），每个分类一行：名字、张数、装进来的标记、删按钮。删按钮两下点确认（第一下变「再点一次」），删完刷新下拉与列表。
+
+### 验证
+- `node --test tests/host-sticker-routes.test.mjs` **8 项通过 / 0 失败**（新增三条：删分类成功回名字并确认调了宿主 DELETE、分类已不在、宿主不让删时原因原样带回）。
+- `node --check lib/host-sticker-routes.js`、`node --check ui/assets/sticker-manager.js` 均通过。
+- 实机（宿主 loopback，token 取自 server-info.json）：建包 `POST /api/casual/stickers/packs` → 加图 `POST /api/casual/stickers/packs/:id/stickers`（multipart 字段名必须是 `files`）→ 宿主转码成 `977e08b8cd368409356a.webp` → `GET /api/casual/stickers/file/:pack/:file?token=…` 返回 **200 image/webp 13768 字节** → `DELETE` 删包 → `packs=0`。整条建/发/取/删链路通。
+- 实机清理：宿主 `/api/casual/stickers` 现为 `packs=0`；`<HANA_HOME>/stickers/` 下只剩空的 `.notes`；删除前已把「收藏」包（10 张图 + stickers.json + 备注）备份到本地工作台的备份目录（`表情包删除备份-20261031_165953/收藏`），大肥鱼与应用收藏（144 张）此前备份在 `表情包删除备份-20261031`。
+- reload 后启动自检：`host-packs state=empty packs=0 stickers=0 [无]`、`host-write 通道自检 ok packs=0 可加图=0`。
+
+### 裂图根因（记录备查）
+宿主面板里那几个分类是本应用先前通过扩展装的包：扩展卸载删掉了包目录（文件没了），但宿主分类列表还留着旧记录，宿主面板照旧渲染 tab，取图 404 → 满屏裂图。所以「有分类但图裂了」不是转码或格式问题，是**列表记录与包目录不同步**。清空分类后不再出现；新分类走宿主自建包（source=local-created），文件与记录同生共死。
+
+## 2026-10-31 发送后自查（verifyStickerFiles）
+
+### 为什么加
+「宿主接口说收到了」和「面板里能显示出来」是两件事。以前界面只回一句「导入成功」，实际面板空着也看不出来。现在发完按宿主给的文件名逐张去取，取得到才算数，取不到的名字直接报出来。
+
+### 改动
+- `lib/host-sticker-writer.js`：新增 `verifyStickerFiles(packId, files)`，逐个 GET `/api/casual/stickers/file/:pack/:file`（走 loopback + owner token），返回 `{ total, ok, missing[] }`。
+- `lib/host-sticker-routes.js`：send 路由在写完备注后调用自查，结果随 `verify` 字段回给前端，并记一行 `发送自查 pack=… ok=x/y 缺=n` 进 probe.log。
+- `ui/assets/sticker-manager.js`：toast 与弹层状态栏报「N/N 张已确认能取到」，取不到的说清缺几张；并提示宿主面板可能要关掉重开才刷新分类列表。
+
+### 验证
+- `node --test tests/host-sticker-writer.test.mjs tests/host-sticker-routes.test.mjs` **25 项通过 / 0 失败**（新增两条：逐个取图、取不到的被记进 missing；空列表不报错）。
+- 实机：宿主现有一个「收藏」包、10 张；逐张按 `?token=` 形式取图 **10 张全 200 `image/webp`**（这正是渲染层 `<img>` 用的 URL 形式）；旧包 id 取图 404（已删除，符合预期）。
+- reload 后启动自检：`host-packs state=ok packs=1 stickers=10 [收藏(10)]`、`host-write 通道自检 ok packs=1 可加图=1`。
+
+## 2026-10-31 重复导入去重 + 撤掉弹层里的删分类
+
+### 改动
+- 撤掉弹层里的「宿主面板里现有的分类 + 删」那块（`ui/panel.html` 的 `.host-sticker-packs`、`ui/assets/sticker-manager.js` 的 `renderHostStickerPackList` / `deleteHostStickerPack`），后端 `DELETE /api/host-stickers/packs/:packId` 也一并撤掉，对应三条测试删除。
+- 新增 `lib/host-sticker-index.js`：去重索引。键是「宿主包 id → 源文件内容哈希 → 宿主那边的文件名」。`reconcile()` 拿宿主当前文件清单对账，把「宿主里已经删掉的」记录清掉，避免误判成重复；分类被整个删掉时索引里的那一项也一并清掉。
+- `lib/host-sticker-writer.js`：`listPacks()` 多返回 `files`；新增 `fetchStickerBytes(packId, file)`（取宿主那边的字节，去重要比字节）。
+- `lib/host-sticker-routes.js` 的 send 路由：两层去重（索引层跳过 / 真相层传完比对字节、相同就删掉刚传的那张），返回体多 `duplicates[]`；界面 toast 与状态栏写明「跳过 N 张重复的」。
+- **修掉一个真 bug**：宿主上传接口回的是整个包的清单（新文件排在最后），原先直接把它当「新加的文件」用，导致写备注写到别的图上、比对也拿错对象（第一次实机自测就把包从 15 张变成 16 张，还把重复判成没重复）。现在改成发前记下包里有哪些文件、发完再拉一次清单取差集。
+
+### 验证
+- `node --test tests/host-sticker-index.test.mjs tests/host-sticker-writer.test.mjs tests/host-sticker-routes.test.mjs` **31 项通过 / 0 失败**（新增 8 条索引用例：写入读出、坏文件当空、查不到、对账清掉、对账清空整个包、对账不动别的包、空键不记）。
+- 实机（走真正的 send 路由，宿主通道换本机 fetch）：
+  - 临时包第一次发 → `sent=1, noted=1, verify 1/1`；同一张再发 → `sent=0, duplicates=[{how:索引}]`，包里仍是 1 张。
+  - 真相层：清掉索引后，把「收藏包里已经有、索引里没有」的那张（`stk_629`）再发一次 → `sent=0, duplicates=[{how:内容相同}]`，包还是 13 张；再跑一次 → `how=索引`，仍是 13 张。
+- 顺手清理了宿主里的重复：删掉 `9bbff581…`（自测误加的）、`4b4a0b3c…`、`1955ce15…` 三张与其它字节完全相同的副本，「收藏」从 15 张变 13 张，内容重复组归零。
+- reload 后启动自检：`host-packs state=ok packs=1 stickers=13 [收藏(13)]`、`host-write 通道自检 ok packs=1 可加图=1`。
+
+## 2026-10-31 图库卡片「导入闲聊」按钮
+
+- `ui/assets/sticker-manager.js`：`renderGrid` 里每张卡片加一个 `.host-import-btn`（「导入闲聊」），点击走 `startHostImport(id)`：不在多选模式就先 `toggleBatchMode()` 进多选，再把这一张加进 `selectedIds` 并给卡片与按钮加高亮（`.selected` / `.is-picked`），弹一句提示「已勾上这张，再点几张就一起发；然后点上面的『发到闲聊表情包』」，并把批量工具条滚进视野。`toggleSelect` / `clearSelection` 同步维护按钮高亮。
+- `ui/panel.html`：`.card-actions .host-import-btn` 的 hover / 已选配色（跟 `.ball-pin-btn` 同一套薄荷绿）。
+- 验证：`node --check ui/assets/sticker-manager.js` 通过；`node --test` 三组宿主相关用例 31 项全绿；残留引用检查（已撤掉的删分类相关符号）为空。
+- **没做实机点测**：验收时宿主窗口被游戏（Phantom Blade Zero）占着前台，`SetForegroundWindow` 拉不起来，硬点会打到游戏窗口，所以只做了代码层与静态检查，界面效果等刷新表情包页后由用户确认。
+
+## 2026-10-31 顶栏「导入到闲聊」按钮
+
+- `ui/panel.html`：图库页页头加 `<button class="back-btn host-import-top" id="btnHostImport">导入到闲聊</button>`（在「分组管理」和「多选」之间），配色跟卡片按钮一致（薄荷绿描边底）。
+- `ui/assets/sticker-manager.js`：新增 `startHostImportFromTop()`——已经在多选模式且有勾选 → 直接 `openHostStickerModal()`；否则 `toggleBatchMode()` 进多选、滚工具条进视野、toast 提示「勾几张图，再点一次这个按钮就发进闲聊表情包」。
+- 验证：`node --check ui/assets/sticker-manager.js` 通过；host-sticker-index / host-sticker-writer / host-sticker-routes 三组用例 31 项全绿。
+- 仍未实机点测：宿主窗口被游戏占前台，拉不起来，只能靠用户刷新页面确认。
+
+## 2026-10-31 导入模式（独立于多选）
+
+- `ui/panel.html`：新增 `#host-import-banner`（横幅：说明文案 + `#host-import-count` 已选张数 + `#host-import-done`「导入这 N 张」+ `#host-import-exit`「退出导入」），放在图库页页头与筛选栏之间；新增 `body.host-import-mode` 下的卡片描边、勾选圈配色，以及在导入模式下隐藏卡片上编辑/识图/分组/纸飞机/删除/导入这些不相干按钮的规则。
+- `ui/assets/sticker-manager.js`：新增 `hostImportMode` 状态与 `setHostImportMode(on)` / `toggleHostImportMode()` / `exitHostImportMode()` / `updateHostImportCount()`；`toggleBatchMode()` 先退出导入模式；顶栏按钮 `startHostImportFromTop()` 改为「进/出导入模式」，模式内已有勾选时再按一次直接开发图弹层；卡片上的「导入闲聊」进入导入模式并勾上该图；发完自动退出导入模式。
+- 验证：`node --check ui/assets/sticker-manager.js` 通过；宿主相关三组用例 31 项全绿。
+- 未实机点测：宿主窗口被游戏占前台拉不起来，界面效果等用户刷新后确认。
+
+## 2026-10-31 导入模式勾选圈修掉
+
+- 问题：上一版 CSS `body.host-import-mode .sticker-check{background:var(--primary);color:#fff;...}` 把导入模式下**每张**卡片的勾选圈都涂成实心绿白勾，没选中的也像选中了；而且它还压过了 `.sticker-card.selected .sticker-check` 的原生语义。
+- 改法：删掉这条覆盖，勾选圈完全用原生规则（`color:transparent` 的空心圈 → 选中才是实心绿白勾）；导入模式的卡片区分改成 `body.host-import-mode #sticker-grid .sticker-card:not(.selected){background:#fbfdfc}`（只影响未选中的，不碰描边、不碰勾选圈）。
+- 验证：`rg` 复查导入模式相关规则，只剩底色与按钮隐藏两条，没有再覆盖 `.sticker-check`。
+
+## 2026-10-31 大批量发送分块 + 单张失败不连坐
+
+### 问题
+- 一次勾 7 张一起发 → 报 `App RPC message exceeds the 32 MiB limit`，整批失败。
+- 根因：宿主往我们这边发消息（App RPC）有 32 MiB 上限；我们把选中的原图一次性拼成一个 multipart 发过去，一堆大图就撑爆了。
+- 顺带查明：宿主对单张图也有硬限制——12MB 的动图直接被拒（`sticker compression failed … image exceeds 2 MiB`），3.5MB 的 PNG 能过。图库里超过 2MiB 的有 68 张（多为动图）。
+
+### 改动
+- `lib/host-sticker-routes.js`：新增 `splitUploadChunks()`（每块 ≤8MB 且 ≤6 张）与 `uploadCandidates()`（分块上传；一块失败就退回去逐张重试，把能发的挑出来，失败的记成 `failed[]`）。send 路由改用它，返回体多 `failed[]`。
+- `ui/assets/sticker-manager.js`：toast 与状态栏报「N 张发不过去」并列出文件名与宿主给的原因。
+
+### 实机验证（走真正的 send 路由）
+- 一批 8 张、合计 33.3MB（含 12MB / 5.8MB / 3.9MB 动图 + 3.5MB PNG 等）→ **sent=6，failed=2**（`stk_610.gif`、`stk_439.gif` 被宿主拒，原因原样带回来），`verify 6/6`，包里实际 6 张，整批没有挂。
+- 去重两条路仍然正常：临时包同一张连发两次 → 第二次 `sent=0, duplicates=[{how:索引}]`；清掉索引后把「收藏」里已有、索引里没有的那张再发一次 → `sent=0, duplicates=[{how:内容相同}]`，「收藏」还是 13 张。
+- `node --test`（index / writer / routes）**31 项通过 / 0 失败**。
+
+## 2026-10-31 导入入口去重
+
+- 撤掉卡片上的「导入闲聊」小按钮（331 张图 = 331 个按钮，太吵）与横幅里的「退出导入」。
+- 导入模式下工具条不再显示「发到闲聊表情包」（横幅的「导入这 N 张」就是它），只留已选 / 全选当前 / 清空。
+- 最终入口：顶栏「导入到闲聊」（进/出模式，模式里变「退出导入」）+ 横幅「导入这 N 张」。
