@@ -119,7 +119,7 @@ async function reload(quiet = false) {
     catalog = data.data; pinnedIds = data.pinnedIds;
     categories = Array.isArray(data.categories) ? data.categories : [];
     if (data.categoryError) note('收藏分类没读出来：' + data.categoryError);
-    if (changed || completed) render();
+    if (changed || completed || !quiet) render();
     if (!quiet) note('收藏已刷新，与纸飞机共用');
   } catch (error) { if (ticket === current && !quiet) note(error.message); }
 }

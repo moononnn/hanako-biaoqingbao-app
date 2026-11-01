@@ -23,6 +23,7 @@ import {
   resolveAgentId,
   readUserName,
 } from '../lib/shared.js';
+import { isHostStickerId, readHostStickerBytes } from '../lib/host-packs.js';
 import { upsertTeachingSample, removeTeachingSample } from '../lib/teaching.js';
 import {
   GROUPS_FILE_NAME,
@@ -807,9 +808,18 @@ export default async function registerRoutes(app, ctx) {
   });
 
   // ═══ GET /api/image — 返回图片 ═══
-  app.get('/api/image', (c) => {
+  // id 带斜杠的是宿主表情包（<packId>/<file>）：那些图不在本应用目录里，
+  // 裸 fs 读不到，只能走 sdk.resources 取字节。
+  app.get('/api/image', async (c) => {
     const id = c.req.query('id');
     if (!id) { c.status(400); return c.text('missing id'); }
+    if (isHostStickerId(id)) {
+      const read = await readHostStickerBytes(ctx, id);
+      if (!read.ok) { c.status(404); return c.text(read.error); }
+      c.header('Content-Type', read.mimeType);
+      c.header('Cache-Control', 'max-age=86400');
+      return c.body(read.bytes);
+    }
     const s = readMeta().find(x => x.id === id);
     if (!s) { c.status(404); return c.text('not found'); }
     try {

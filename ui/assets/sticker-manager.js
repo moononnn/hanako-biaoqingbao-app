@@ -5610,6 +5610,7 @@ function formatUserstyleTime(iso) {
   //  多选模式 + 批量操作
   // ═══════════════════════════════════
   function toggleBatchMode() {
+    if (hostImportMode) setHostImportMode(false);
     batchMode = !batchMode;
     document.body.classList.toggle('batch-mode', batchMode);
     var btn = $('btnToggleMulti');
@@ -5624,12 +5625,74 @@ function formatUserstyleTime(iso) {
     if (!batchMode) clearSelection();
   }
 
+  // ── 导入模式 ────────────────────────────────────────────────
+  // 「导入到闲聊」不是「多选」的另一个名字，它是一条单独的流程：
+  // 进模式 → 勾图 → 直接发进宿主分类。所以界面得跟普通多选长得不一样，
+  // 否则按了跟没按一样，看不出自己在哪个流程里。
+  var hostImportMode = false;
+
+  function updateHostImportCount() {
+    if (!hostImportMode) return;
+    var n = selectedIds.size;
+    var count = $('host-import-count');
+    if (count) count.textContent = String(n);
+    var done = $('host-import-done');
+    if (done) { done.textContent = '导入这 ' + n + ' 张'; done.disabled = n === 0; }
+    var send = $('batch-send-host');
+    if (send) send.textContent = '导入这 ' + n + ' 张';
+  }
+
+  function setHostImportMode(on) {
+    hostImportMode = !!on;
+    document.body.classList.toggle('host-import-mode', hostImportMode);
+    var banner = $('host-import-banner');
+    if (banner) banner.hidden = !hostImportMode;
+    var top = $('btnHostImport');
+    if (top) top.classList.toggle('is-on', hostImportMode);
+    // 导入模式只留跟导入有关的动作：AI 识图/分组/删除先收起来，
+    // 「发到闲聊表情包」也收起来——横幅上那个「导入这 N 张」就是它，别摆两份。
+    ['batch-auto-tag', 'batch-groups', 'batch-delete', 'batch-send-host'].forEach(function (id) {
+      var el = $(id);
+      if (el) el.hidden = hostImportMode;
+    });
+    var send = $('batch-send-host');
+    if (send && !hostImportMode) send.textContent = '发到闲聊表情包';
+    var multi = $('btnToggleMulti');
+    if (multi) multi.textContent = hostImportMode ? '退出导入' : (batchMode ? '退出多选' : '多选');
+    updateHostImportCount();
+    updateBatchCount();
+  }
+
+  function toggleHostImportMode() {
+    if (hostImportMode) { exitHostImportMode(); return; }
+    if (!batchMode) toggleBatchMode();
+    setHostImportMode(true);
+    toast('导入模式：勾几张要发进闲聊表情包的图，再点「导入这 N 张」');
+  }
+
+  function exitHostImportMode() {
+    setHostImportMode(false);
+    if (batchMode) toggleBatchMode();
+  }
+
   function toggleSelect(id) {
     if (selectedIds.has(id)) selectedIds.delete(id);
     else selectedIds.add(id);
     var card = document.querySelector('.sticker-card[data-id="' + id + '"]');
     if (card) card.classList.toggle('selected', selectedIds.has(id));
     updateBatchCount();
+  }
+
+  /**
+   * 顶栏的「导入到闲聊」：进/出导入模式。
+   * 导入模式里已经有勾选时，再按一下就直接开发图弹层。
+   */
+  function startHostImportFromTop() {
+    if (hostImportMode && selectedIds.size > 0) {
+      openHostStickerModal();
+      return;
+    }
+    toggleHostImportMode();
   }
 
   function clearSelection() {
@@ -5714,6 +5777,169 @@ function formatUserstyleTime(iso) {
   function updateBatchCount() {
     var el = $('batch-count');
     if (el) el.textContent = selectedIds.size;
+    updateHostImportCount();
+  }
+
+  // ═══════════════════════════════════
+  //  发到闲聊表情包
+  //  把图库里的图发进宿主闲聊面板的分类，不限收藏，图库里选哪张发哪张。
+  // ═══════════════════════════════════
+  var hostStickerPacks = null;
+  var hostStickerSelectReady = false;
+
+  function setHostStickerStatus(text, kind) {
+    var el = $('host-sticker-status');
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = 'host-sticker-status' + (kind ? ' is-' + kind : '');
+  }
+
+  function setHostStickerHint(text) {
+    var el = $('host-sticker-target-hint');
+    if (el) el.textContent = text || '';
+  }
+
+  // 下拉换成面板同款的自定义组件（beautify-select）：原生 select 只留值和 change。
+  // 组件初始化后会自己同步选项，但它盯着的是 DOM 变化，程序改 value 它看不见，
+  // 所以改完值要手动叫它刷新一次。
+  function refreshHostStickerSelect() {
+    var select = $('host-sticker-target');
+    if (!select) return;
+    var wrap = select.parentNode;
+    if (wrap && typeof wrap._ddRefresh === 'function') wrap._ddRefresh();
+  }
+
+  async function loadHostStickerPacks(force) {
+    if (hostStickerPacks && !force) return hostStickerPacks;
+    var resp = await apiFetch(withAuth(API + '/api/host-stickers/packs'), { noAbort: true, timeout: 20000 });
+    var json = await resp.json();
+    if (!resp.ok || !json.ok) throw new Error(json.error || ('HTTP ' + resp.status));
+    hostStickerPacks = {
+      packs: json.packs || [],
+      source: json.source || '',
+      warnings: json.warnings || [],
+      writable: json.writable !== false,
+    };
+    return hostStickerPacks;
+  }
+
+  async function openHostStickerModal() {
+    if (selectedIds.size === 0) { toast('请先勾选表情包', true); return; }
+    var modal = $('host-sticker-modal');
+    var select = $('host-sticker-target');
+    if (!modal || !select) return;
+    modal.hidden = false;
+    setHostStickerStatus('');
+    setHostStickerHint('正在读宿主面板里的分类…');
+    if ($('host-sticker-new')) $('host-sticker-new').value = '';
+
+    if (!hostStickerSelectReady && typeof window.beautifySelect === 'function') {
+      try { window.beautifySelect(select); hostStickerSelectReady = true; } catch (e) { /* 组件起不来就退回原生 select */ }
+    }
+    select.innerHTML = '<option value="">读取中…</option>';
+    refreshHostStickerSelect();
+
+    try {
+      var data = await loadHostStickerPacks(true);
+      var packs = data.packs || [];
+      var editable = [];
+      var locked = 0;
+      for (var i = 0; i < packs.length; i++) {
+        // 装进来的包宿主不让往里加图，选了也会被后端挡回来
+        if (packs[i].editable) editable.push(packs[i]); else locked += 1;
+      }
+      editable.sort(function (a, b) { return String(a.name).localeCompare(String(b.name), 'zh'); });
+
+      var html = '';
+      for (var j = 0; j < editable.length; j++) {
+        var p = editable[j];
+        html += '<option value="host:' + escHtml(p.id) + '">' + escHtml(p.name) + '（' + (p.count || 0) + ' 张）</option>';
+      }
+      if (!editable.length) html += '<option value="" disabled>（没有能加图的分类）</option>';
+      select.innerHTML = html;
+      if (editable.length) select.value = 'host:' + editable[0].id;
+      refreshHostStickerSelect();
+
+      var hint = editable.length
+        ? '宿主面板里现在有 ' + editable.length + ' 个能加图的分类。'
+        : '宿主面板里现在没有能加图的分类，填个名字新建一个吧。';
+      if (locked) hint += '另有 ' + locked + ' 个装进来的包不能往里加图。';
+      setHostStickerHint(hint);
+
+      if (!data.writable && data.warnings && data.warnings.length) {
+        setHostStickerStatus(data.warnings[0] + '（分类列表是从本机目录读到的，发过去可能还是会失败）', 'error');
+      } else if (!editable.length) {
+        setHostStickerStatus('没有能加图的分类了，填个名字新建一个。', 'error');
+      }
+    } catch (e) {
+      select.innerHTML = '<option value="">读不到分类</option>';
+      refreshHostStickerSelect();
+      setHostStickerHint('读不到宿主面板里的分类。');
+      setHostStickerStatus(e.message, 'error');
+    }
+  }
+
+  async function sendSelectedToHost() {
+    if (selectedIds.size === 0) { toast('请先勾选表情包', true); return; }
+    var button = $('host-sticker-send');
+    var ids = Array.from(selectedIds);
+    var newName = ($('host-sticker-new') && $('host-sticker-new').value || '').trim();
+    var target = ($('host-sticker-target') && $('host-sticker-target').value) || '';
+    if (!newName && !target) { toast('先选个分类，或者给新分类起个名字', true); return; }
+    if (button) { button.disabled = true; button.textContent = '发送中…'; }
+    setHostStickerStatus('正在发…');
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/host-stickers/send'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stickerIds: ids,
+          packId: newName ? '' : target,
+          packName: newName,
+        }),
+        timeout: 180000,
+      });
+      var json = await resp.json();
+      if (!resp.ok || !json.ok) throw new Error(json.error || '发送失败');
+      // 自查结果一并报出来：取不到的那些得让她知道，不能只说一句「导入成功」。
+      var verify = json.verify || null;
+      var dupCount = (json.duplicates || []).length;
+      var failed = json.failed || [];
+      var panelRefreshed = json.panelRefreshed !== false;
+      var dupText = dupCount ? '，跳过 ' + dupCount + ' 张重复的' : '';
+      var failText = failed.length ? '，' + failed.length + ' 张发不过去' : '';
+      // 宿主面板的列表是缓存的，只有收到广播才会重拉。
+      // 我们已经代为广播了；万一广播失败，面板会停在旧列表，得说清楚。
+      var refreshText = panelRefreshed ? '' : '（宿主面板还没刷新，可能要关掉重开一次表情面板才看得见）';
+      if (verify && verify.total && verify.ok < verify.total) {
+        toast('已发到「' + json.pack.name + '」，' + json.sent + ' 张' + dupText + failText + '，但有 ' + (verify.total - verify.ok) + ' 张取不到' + refreshText);
+      } else {
+        toast('已发到「' + json.pack.name + '」，' + json.sent + ' 张' + dupText + failText
+          + '（' + (verify && verify.ok ? verify.ok + '/' + verify.total + ' 张已确认能取到' : '已交给宿主') + '）' + refreshText);
+      }
+      // 宿主面板的分类列表是它自己缓存的：分类是在面板外面新建的，
+      // 面板不重新拉一次就还拿着旧列表（旧的分类已经删了，图自然取不到）。
+      var statusText = '已发到「' + json.pack.name + '」，新增 ' + json.sent + ' 张' + dupText
+        + (verify && verify.total ? '，' + verify.ok + '/' + verify.total + ' 张已确认能取到' : '');
+      if (failed.length) {
+        statusText += '。有 ' + failed.length + ' 张发不过去：'
+          + failed.slice(0, 3).map(function (f) { return f.file + '（' + (f.error || '宿主拒收') + '）'; }).join('；')
+          + (failed.length > 3 ? ' 等' : '');
+      }
+      statusText += panelRefreshed
+        ? '。宿主面板已通知刷新，分类列表会重新拉一次。'
+        : '。宿主面板没能刷新，如果还看不见这个分类，把表情面板关掉重新打开一次，它会重新拉分类列表。';
+      setHostStickerStatus(statusText, failed.length ? 'error' : 'ok');
+      closeModal('host-sticker-modal');
+      clearSelection();
+      // 发完就退出导入模式，别让人卡在一个已经用完的流程里。
+      if (hostImportMode) exitHostImportMode();
+      hostStickerPacks = null;   // 分类里的张数变了，下次读的时候重新拿
+    } catch (e) {
+      setHostStickerStatus(e.message, 'error');
+    } finally {
+      if (button) { button.disabled = false; button.textContent = '发过去'; }
+    }
   }
 
   async function batchDelete() {
@@ -6940,6 +7166,10 @@ function formatUserstyleTime(iso) {
 
     // 多选模式
     $('btnToggleMulti').addEventListener('click', toggleBatchMode);
+    var btnHostImport = $('btnHostImport');
+    if (btnHostImport) btnHostImport.addEventListener('click', startHostImportFromTop);
+    var hostImportDone = $('host-import-done');
+    if (hostImportDone) hostImportDone.addEventListener('click', function () { openHostStickerModal(); });
     $('batch-select-all').addEventListener('click', selectAllVisible);
     $('batch-select-untagged').addEventListener('click', selectAllUntagged);
     var quickUntaggedButton = $('batch-tag-untagged-btn');
@@ -6948,6 +7178,10 @@ function formatUserstyleTime(iso) {
     $('batch-auto-tag').addEventListener('click', batchAutoTag);
     var batchGroupsBtn = $('batch-groups');
     if (batchGroupsBtn) batchGroupsBtn.addEventListener('click', function () { openGroupMembershipModal(Array.from(selectedIds)); });
+    var batchSendHostBtn = $('batch-send-host');
+    if (batchSendHostBtn) batchSendHostBtn.addEventListener('click', openHostStickerModal);
+    var hostStickerSendBtn = $('host-sticker-send');
+    if (hostStickerSendBtn) hostStickerSendBtn.addEventListener('click', sendSelectedToHost);
     $('batch-delete').addEventListener('click', batchDelete);
 
     // 批量任务角标

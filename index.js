@@ -153,6 +153,33 @@ export default defineApp(async (sdk) => {
     record(`persona-io-failed ${e?.code || ""} ${e?.message || e}`);
   }
 
+  // ── 宿主表情包：只读适配层 ──
+  //   宿主闲聊自带一套表情包（sticker-pack 扩展，落在 <HANA_HOME>/stickers/），
+  //   这里把它读出来拼成和图库同构的清单，给后续兼容用。
+  //   通道：走 sdk.resources（盘外读的正门），不走网络也不读 token——
+  //   裸 fs 读主目录会被沙箱拒（ERR_ACCESS_DENIED），这个坑探针里实测过。
+  try {
+    const { readHostPacks, summarizeHostPacks } = await import("./lib/host-packs.js");
+    const hostPacks = await readHostPacks({ resources: sdk.resources, dataDir: sdk.dataDir, log: record });
+    record(`host-packs ${summarizeHostPacks(hostPacks)}`);
+  } catch (e) {
+    record(`host-packs-failed ${e?.code || ""} ${e?.message || e}`);
+  }
+
+  // 宿主闲聊表情包 · 写入通道自检
+  //   「发到闲聊表情包」这条链路要经 loopback 调宿主自己的接口，动线是
+  //   resources 读 server-info.json 取 token → network.fetch 打 127.0.0.1。
+  //   两步任何一步被沙箱或宿主挡下，界面就只会停在「读不到分类」，
+  //   原因光看界面猜不出来。这里启动时先探一次，把结果写进日志。
+  try {
+    const { createHostStickerClient } = await import("./lib/host-sticker-writer.js");
+    const client = await createHostStickerClient({ sdk, dataDir: sdk.dataDir });
+    const packs = await client.listPacks();
+    record(`host-write 通道自检 ok packs=${packs.length} 可加图=${packs.filter((p) => p.editable).length}`);
+  } catch (e) {
+    record(`host-write 通道自检 失败 ${e?.code || ""} ${e?.message || e}`);
+  }
+
   // 伙伴显示名：App 沙箱只能碰自己的数据目录，读不到 <hana 主目录>/agents/...，
   // 自己拼路径取名字会一路失败、最后退化成英文 id（hanako）。宿主名单里带着中文名，
   // 启动时拉一次存进 lib/agent-name.js，卡片标题和纸飞机都走它。
@@ -560,10 +587,15 @@ export default defineApp(async (sdk) => {
     // ⚠ 这个 await 不能省：宿主可能把注册回调延后执行（SDK 会等 registration.ready 回执，
     //   见 sdk/app-contract/server-client.js）。不 await 的话，下面那步 tagged_at 回填
     //   就可能抢在迁移之前落盘，顺序保证落空（2026-10-11 发布前交叉审查指出）。
+    // 宿主闲聊表情包的写入层：把本 App 图库里的图发到宿主面板的分类里。
+    const { registerHostStickerRoutes } = await import("./lib/host-sticker-routes.js");
+
     await sdk.routes.register((app) => {
       apiRoutes(app, sdk);
       registerMessageCardRoutes(app, sdk.dataDir);
       stickerInputPanel.registerRoutes(app);
+      registerHostStickerRoutes(app, sdk);
+
       // 页面启动数据：App 版页面是静态的，改由页面自己来取（替代老版的服务端注入）
       app.get("/api/boot", (c) => c.json({ ok: true, data: boot.buildBootData() }));
       /* #release-strip-start 构建发布包时这段会被删掉，见 scripts/build-release.mjs */
