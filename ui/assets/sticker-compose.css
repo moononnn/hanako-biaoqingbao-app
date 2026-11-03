@@ -60,3 +60,12 @@
 .sheet .category-new button{border:1px solid var(--line);background:var(--surface);color:var(--primary);padding:8px 14px;border-radius:10px}
 .sheet .category-new button:hover{background:var(--soft)}
 #sticker-preview{position:fixed;z-index:1000;pointer-events:none;margin:0;padding:10px;display:flex;flex-direction:column;gap:6px;border:1px solid var(--line);border-radius:14px;background:var(--surface);box-shadow:0 8px 28px #315c4b30}#sticker-preview[hidden]{display:none}#sticker-preview img{display:block;width:100%;height:0;min-height:0;flex:1;object-fit:contain;border-radius:6px}#sticker-preview figcaption{flex:none;font-size:12px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)}
+/* 收起交给宿主：新版宿主在面板右上角自绘一颗关闭叉叉（28px 见方、离边 4px，
+   覆在 iframe 上面，合计压住右侧 32px）。本面板不再自绘收起按钮。
+   顶栏跟叉叉排在同一行：主区上内边距收到 4px，标题行定高 28px，跟叉叉顶边齐平；
+   「刷新」做成同高的按钮，右缘让出 24px（叠 main 的 16px），跟叉叉隔 8px。*/
+main{padding-top:4px}
+header{height:28px;padding-right:24px}
+#refresh{height:28px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);font-size:13px;line-height:1}
+#refresh:hover{background:var(--soft);border-color:#c3d8cc}
+@media(max-width:420px){header{padding-right:28px}}
