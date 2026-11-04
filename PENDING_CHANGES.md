@@ -35,11 +35,3 @@
 <!-- 版本号纪律（2026-10-29 起）：开发过程中把 manifest.version 递增成 <正式号>-dev.N（N 从 1 起），打包前再改成同一个正式号；正式号一轮只涨一次，不留没发布过的空号。 -->
 
 <!-- 0.7.0 发布内容已并入 CHANGELOG.md：图库一键导入闲聊表情包（导入模式 + 宿主分类、宿主转码、发送后自查、两层去重、分块上传）、输入栏面板列出宿主表情包、Code 页总闸注入与工具准入同口径、分类读不到的几种死法，这里清空重新记。 -->
-
-- 2026-11-01 | 修复 | 宿主表情包路由的凭据标记从「只记日志」改成「不过就拒」（403）：原来那三条本机写路由只校验 Host、Host 缺失也放行，网页朝本机端口发一个 text/plain 简单请求就能借应用内存里的 token 代写宿主包。本 App 的页面本来就会带 appSurfaceSession / token 查询参数（withAuth），所以收紧不断链；宿主接口那层 owner token 仍是真正的安全边界
-- 2026-11-01 | 修复 | 去重索引的形状容错：`loadIndex` 只挡非对象/null，包的值被写成字符串时 `reconcile` / `record` 会抛 TypeError，那个包就再也发不出去。现在读的时候把非对象的值归一成「没记过」，`reconcile` / `lookup` / `record` 各加一道形状防御，坏的那条不连坐其它包
-- 2026-11-01 | 调整 | 删掉无调用方的接口与函数：`POST /api/host-stickers/create` 与 `host-sticker-writer.js` 的 `deletePack`（分类管理按 0.7.0 发布说明已撤，UI 里 0 处调用）。建分类仍走 send 路由里的 packName 分支
-- 2026-11-01 | 修复 | 发图读源文件前加路径包含性校验：`path.resolve` 后必须落在自己的 `stickers` 目录内，否则跳过并记一行诊断（file 来自本应用的 stickers.json、非请求可控，这是多一道兜底）
-
-- 2026-11-04 | 修复 | 输入面板顶栏跟宿主自绘的关闭叉叉排平：新版宿主在面板右上角画一颗 28px 的叉叉（离边 4px，覆在 iframe 上，压住右侧 32px），面板这边不自绘收起；主区上内边距收到 4px、标题行定高 28px 跟叉叉齐平，「刷新」改成同高的描边按钮，右缘让出 24px（叠 main 的 16px）与叉叉隔 8px，按钮不再被盖也不会一高一低；另加 tests/sticker-compose-chrome.test.mjs 守这条排版
-- 2026-11-04 | 新功能 | 输入面板跟上宿主的深色主题：面板配色原来整套写死浅绿，宿主换成夜间主题也不变。现在页头内联脚本先按 iframe 地址上的 hana-theme-appearance（宿主没给就跟系统偏好）在样式表之前定首帧，面板再订阅 hana.theme，换主题不用重开；CSS 把规则里零散的十六进制收成变量（新增 --ink-strong/--accent/--danger*/--thumb/--chip*/--scrim/--shadow-*/--refresh-line/--fav），深色只换一套变量，布局一条不动。加 tests/sticker-compose-theme.test.mjs 守这条
