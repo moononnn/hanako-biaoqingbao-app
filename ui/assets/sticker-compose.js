@@ -2,6 +2,17 @@ import { hana } from './sdk.js';
 import { createStickerPreview } from './sticker-preview.js';
 import { moveSticker } from './sticker-reorder.js';
 const $ = id => document.getElementById(id);
+// 深浅色跟宿主走：页头那段内联脚本先按地址上的 hana-theme-appearance 定好首帧，
+// 这里接宿主的主题变更（换主题不用重开面板）；宿主没这接口就用系统偏好定下的那个。
+function applyAppearance(snapshot) {
+  const next = snapshot?.appearance === 'dark' ? 'dark' : snapshot?.appearance === 'light' ? 'light' : '';
+  const root = document.documentElement;
+  if (next && root.dataset.appearance !== next) root.dataset.appearance = next;
+}
+try {
+  applyAppearance(hana.theme.getSnapshot());
+  hana.theme.subscribe(applyAppearance);
+} catch { /* 老宿主没有主题接口 */ }
 let active = false;
 let ticket = '', catalog = [], pinnedIds = [], selected = [], mode = 'pinned', busy = false, requestId = '', generation = 0;
 // 收藏分类：我的收藏里自己分的类。空 = 全部收藏，其余是分类 id。

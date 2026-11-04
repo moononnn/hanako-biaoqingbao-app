@@ -65,7 +65,8 @@ test("收藏角标画的是矢量心形，不是字符心（字符缩到 15px �
   assert.match(PANEL_JS, /createElementNS\(ns, 'svg'\)/);
   assert.doesNotMatch(PANEL_JS, /fav\.textContent = pinned \? '♥' : '♡'/, "不能再用字符心形");
   assert.match(PANEL_CSS, /\.fav-mark svg\{[^}]*fill:none/, "没收藏是白描边的空心");
-  assert.match(PANEL_CSS, /\.fav-mark\.on svg\{[^}]*fill:#ff5c7a/, "已收藏是粉色实心");
+  assert.match(PANEL_CSS, /\.fav-mark\.on svg\{[^}]*fill:var\(--fav\)/, "已收藏是粉色实心（颜色走变量，深色主题会换一档）");
+  assert.match(PANEL_CSS, /--fav:#ff5c7a/, "浅色下的粉还是这个粉");
 });
 
 test("规则脚本先加载，面板模块后加载（模块是 defer 的，普通脚本立即执行）", () => {

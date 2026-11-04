@@ -1,5 +1,21 @@
 # 自动测试
 
+## 2026-11-04 输入面板跟宿主的深色主题（0.7.1-dev.3）
+
+### 问题
+- 面板的配色是自绘的一整套（`sticker-compose.css` 里 `:root` 写死浅绿底、墨绿字），吃不到宿主主题样式表：宿主切到「青夜」这类深色主题，面板还是那片浅绿，亮得扎眼。
+
+### 改动
+- `ui/sticker-compose.html`：页头加一段内联脚本，趁样式表加载前先读 iframe 地址上的 `hana-theme-appearance`（宿主构造 app 地址时会带，取不到就跟 `prefers-color-scheme`），把结果写进 `<html data-appearance>`，首帧就是对的颜色，不会先亮一下再变暗。
+- `ui/assets/sticker-compose.js`：`hana.theme.getSnapshot()` 取一次 + `subscribe` 订阅，主题一换就改 `data-appearance`，面板不用重开。
+- `ui/assets/sticker-compose.css`：规则里零散的十六进制全收成变量（新增 `--ink-strong`、`--accent`、`--accent-ring`、`--danger`、`--danger-soft`、`--danger-line`、`--thumb`、`--chip-ink`、`--chip-shadow`、`--scrim`、`--shadow-dialog/menu/preview`、`--refresh-line`、`--fav`、`--fav-shadow`）；新增 `:root[data-appearance=dark]` 一整套深色值（墨绿底 `#1f2b26`、卡片面 `#28352f`、薄荷主色 `#3f8c6f`、提亮标题色 `#a7e3c6`、深色阴影与遮罩），并给 `color-scheme` 上锁，原生控件和滚动条一起变暗。
+- `tests/sticker-compose-pick.test.mjs`：粉色心的断言从写死十六进制改成认 `var(--fav)`，另加一条确认浅色还是那个粉。
+
+### 验证
+- `node --test "tests/*.test.mjs"` **613 项通过 / 0 失败**（新增 5 条主题回归 + 改 1 条旧断言）。
+- 用 Edge 无头渲染真面板与一份含图块/分类/管理条/待发送区的假数据样张截图对比深浅两套，确认规则里已无写死颜色、深色下标题、分类胶囊、图块描边、危险按钮都能看清。
+- 实机验收（待做）：作者把宿主切到深色主题，在输入栏开面板看观感。
+
 ## 2026-11-04 输入面板顶栏给宿主的关闭叉叉让位（0.7.1-dev.2）
 
 ### 问题

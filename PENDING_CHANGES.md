@@ -42,3 +42,4 @@
 - 2026-11-01 | 修复 | 发图读源文件前加路径包含性校验：`path.resolve` 后必须落在自己的 `stickers` 目录内，否则跳过并记一行诊断（file 来自本应用的 stickers.json、非请求可控，这是多一道兜底）
 
 - 2026-11-04 | 修复 | 输入面板顶栏跟宿主自绘的关闭叉叉排平：新版宿主在面板右上角画一颗 28px 的叉叉（离边 4px，覆在 iframe 上，压住右侧 32px），面板这边不自绘收起；主区上内边距收到 4px、标题行定高 28px 跟叉叉齐平，「刷新」改成同高的描边按钮，右缘让出 24px（叠 main 的 16px）与叉叉隔 8px，按钮不再被盖也不会一高一低；另加 tests/sticker-compose-chrome.test.mjs 守这条排版
+- 2026-11-04 | 新功能 | 输入面板跟上宿主的深色主题：面板配色原来整套写死浅绿，宿主换成夜间主题也不变。现在页头内联脚本先按 iframe 地址上的 hana-theme-appearance（宿主没给就跟系统偏好）在样式表之前定首帧，面板再订阅 hana.theme，换主题不用重开；CSS 把规则里零散的十六进制收成变量（新增 --ink-strong/--accent/--danger*/--thumb/--chip*/--scrim/--shadow-*/--refresh-line/--fav），深色只换一套变量，布局一条不动。加 tests/sticker-compose-theme.test.mjs 守这条

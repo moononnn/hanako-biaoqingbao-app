@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>表情包</title><link rel="stylesheet" href="./assets/sticker-compose.css"></head>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><script>/* 宿主的明暗写在地址的 hana-theme-appearance 上，没写就跟系统偏好。趁样式表还没上就先定下来，免得先亮一下再变暗。*/try{var a=new URLSearchParams(location.search).get('hana-theme-appearance');document.documentElement.dataset.appearance=a==='dark'?'dark':a==='light'?'light':(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch(e){}</script><title>表情包</title><link rel="stylesheet" href="./assets/sticker-compose.css"></head>
 <body><main><header><strong>表情包</strong><span id="count" class="count"></span><span class="spacer"></span><button id="refresh" title="刷新共享图库">刷新</button></header>
 <nav><button id="pinned" class="active">我的收藏</button><button id="library">从图库挑图</button><input id="search" type="search" placeholder="搜描述 / 关键词 / 情绪 / 场景" aria-label="搜索表情包"></nav>
 <div id="cats" class="cats" role="tablist" aria-label="收藏分类" hidden></div>
