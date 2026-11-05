@@ -144,7 +144,7 @@ import { analyzeConversation } from '../lib/text-analysis.js';
 import { hostModelReady, callHostModel } from '../lib/model-host.js';
 import { resolveFetcher } from '../lib/net.js';
 import { readHiddenAgents, hideAgent, unhideAgent, filterHiddenAgents } from '../lib/hidden-agents.js';
-import { listHostAgents } from '../lib/agent-name.js';
+import { listHostAgents, refreshHostAgents } from '../lib/agent-name.js';
 // v0.1.49：把当前版与历史版逐句比出来，界面上下并排显示差异
 import { compareWithVersion } from '../lib/style-diff.js';
 // v0.1.46：下列几处导出/导入映射要用伙伴名单，宿主名单优先。
@@ -3027,8 +3027,18 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
   //   （全 App 只有它俩会碰这个目录，所以别的页面全都正常，很有迷惑性）。
   //   宿主名单走 app/agents.read（清单里本来就申请了），启动时拉一次存在 lib/agent-name.js。
   //   扫目录只留作宿主没给出名单时的兜底。
-  app.get('/api/agents', (c) => {
+  //
+  // 2026-11-05 - 读之前先向宿主重拉一次名单（内部有 1.5s 节流，?refresh=1 强制重拉）。
+  //   原来这里只读启动时那份内存快照，用户在 Hana 里新建的伙伴永远刷不出来，
+  //   「刷新列表」按钮形同虚设。拉失败就沿用旧名单，不把页面弄空。
+  app.get('/api/agents', async (c) => {
     try {
+      const refreshed = await refreshHostAgents(ctx, { force: c.req.query('refresh') === '1' });
+      if (refreshed && refreshed.ok === false) {
+        ctx?.log?.warn?.('[biaoqingbao] 刷新伙伴名单失败，沿用缓存:', refreshed.error);
+      } else if (refreshed && !refreshed.skipped) {
+        ctx?.log?.info?.(`[biaoqingbao] 伙伴名单已刷新 total=${refreshed.total} received=${refreshed.received}`);
+      }
       const fromHost = listHostAgents();
       let agents;
       if (fromHost.length) {
@@ -3572,12 +3582,14 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
   // ════════════════════════════════════════════════════════════════
 
   // ── GET /api/style-template - 读取当前模板 + 历史版本 + 最近任务 + 助手列表（供设置区展示）──
-  app.get('/api/style-template', (c) => {
+  app.get('/api/style-template', async (c) => {
     const tpl = readStyleTemplate();
     const tasks = readStyleTasks().slice(-20).reverse();
     // v0.30.7：全部助手（含名字）+ 排除名单（v0.30.9：移除 activeAgent——配方言是方言页的职责）
     // v0.1.45 - 同 /api/agents：宿主名单优先。原来直接扫目录，沙箱拒读后 catch 掉、
     //   agents 默默变空数组，「从哪些助手学」的下拉框就一直是空的，看着像没有伙伴可选。
+    // 2026-11-05 - 同样先重拉一次，否则新建的伙伴在这个下拉框里也缺席（与 /api/agents 同源）。
+    await refreshHostAgents(ctx);
     let agents = listHostAgents();
     if (!agents.length) {
       try {

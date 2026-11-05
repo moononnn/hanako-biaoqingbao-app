@@ -21,7 +21,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const { listHostAgents, cacheHostAgentNames, readAgentName } = await import('../lib/agent-name.js');
+const { listHostAgents, cacheHostAgentNames, readAgentName, refreshHostAgents } = await import('../lib/agent-name.js');
 
 // ── 宿主名单 ──────────────────────────────────────────────
 
@@ -99,6 +99,85 @@ test('回归：启动数据、导出映射、学我说话采集都先走宿主�
     const src = fs.readFileSync(path.join(root, rel), 'utf8');
     assert.ok(src.includes('listHostAgents'), `${rel} 的${what}没有改用宿主名单`);
   }
+});
+
+// ── 2026-11-05：刷新按钮必须真的重拉宿主名单 ──────────────
+//    原来 /api/agents 只读启动时那份内存快照，「刷新列表」按了等于没按，
+//    用户在 Hana 里新建的伙伴永远出不来。
+
+test('刷新：拿到宿主新名单时覆盖旧缓存，新伙伴能出现', async () => {
+  cacheHostAgentNames([{ id: 'hanako', name: '小花' }]);
+  const fakeSdk = {
+    agents: {
+      list: async () => ({ agents: [{ id: 'hanako', name: '小花' }, { id: 'newbie', name: '新来的' }] }),
+    },
+  };
+  const result = await refreshHostAgents(fakeSdk, { force: true });
+  assert.equal(result.ok, true);
+  assert.equal(listHostAgents().length, 2);
+  assert.equal(readAgentName('newbie'), '新来的');
+});
+
+test('刷新：宿主通道挂了就沿用旧名单，不能把页面弄空', async () => {
+  cacheHostAgentNames([{ id: 'hanako', name: '小花' }]);
+  const broke = await refreshHostAgents({ agents: { list: async () => { throw new Error('bus down'); } } }, { force: true });
+  assert.equal(broke.ok, false);
+  assert.deepEqual(listHostAgents(), [{ id: 'hanako', name: '小花' }]);
+
+  const noChannel = await refreshHostAgents({}, { force: true });
+  assert.equal(noChannel.ok, false);
+  assert.deepEqual(listHostAgents(), [{ id: 'hanako', name: '小花' }]);
+
+  const empty = await refreshHostAgents({ agents: { list: async () => ({ agents: [] }) } }, { force: true });
+  assert.equal(empty.ok, true);
+  assert.deepEqual(listHostAgents(), [{ id: 'hanako', name: '小花' }]);
+});
+
+test('刷新：节流窗口内不重复打宿主，force 可以绕开', async () => {
+  let calls = 0;
+  const fakeSdk = { agents: { list: async () => { calls += 1; return { agents: [{ id: 'hanako', name: '小花' }] }; } } };
+  await refreshHostAgents(fakeSdk, { force: true });
+  const skipped = await refreshHostAgents(fakeSdk);
+  assert.equal(skipped.skipped, true);
+  assert.equal(calls, 1, '节流窗口内不该再打宿主');
+  await refreshHostAgents(fakeSdk, { force: true });
+  assert.equal(calls, 2, 'force 必须能绕过节流');
+});
+
+test('刷新：SDK 封装没挂上时改走 bus 通道 agent:list', async () => {
+  cacheHostAgentNames([{ id: 'hanako', name: '小花' }]);
+  const calls = [];
+  const busOnly = {
+    bus: {
+      request: async (channel, payload) => {
+        calls.push([channel, payload]);
+        return { agents: [{ id: 'hanako', name: '小花' }, { id: 'yuyun', name: '雨云' }] };
+      },
+    },
+  };
+  const result = await refreshHostAgents(busOnly, { force: true });
+  assert.equal(result.ok, true);
+  assert.equal(calls[0][0], 'agent:list');
+  assert.equal(listHostAgents().length, 2);
+  assert.equal(readAgentName('yuyun'), '雨云');
+});
+
+test('回归：/api/agents 读之前先重拉，前端刷新按钮带 refresh=1', () => {
+  const root = path.join(__dirname, '..');
+  const api = fs.readFileSync(path.join(root, 'server', 'api.js'), 'utf8');
+  const start = api.indexOf("app.get('/api/agents'");
+  const end = api.indexOf('// ═══ POST /api/agents/remove', start);
+  const handler = api.slice(start, end);
+  assert.ok(
+    handler.includes('refreshHostAgents(ctx'),
+    '/api/agents 没有向宿主重拉，新建的伙伴永远刷不出来',
+  );
+
+  const ui = fs.readFileSync(path.join(root, 'ui', 'assets', 'sticker-manager.js'), 'utf8');
+  assert.ok(
+    ui.includes("'/api/agents' + (forceRefresh ? '?refresh=1' : '')"),
+    '刷新按钮没带 refresh=1，服务端走节流/缓存，按了还是不出来',
+  );
 });
 
 test('回归：学我说话没伙伴时不能说成「可能全部被排除了」', () => {

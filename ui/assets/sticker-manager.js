@@ -4175,18 +4175,19 @@
     }
   }
 
-  function renderAgentFreq() {
+  function renderAgentFreq(forceRefresh) {
     var list = $('agent-freq-list');
     if (!list) return;
     list.innerHTML = '加载中...';
 
     // v0.25.2 - 刷新列表按钮：重新读取 Hana 当前助手（新助手会出现，已删除的不会回来）
+    // 2026-11-05 - 光重发 GET 不够：服务端读的是启动时缓存的名单，新伙伴永远不出现。
+    //   按钮改带 ?refresh=1 叫服务端先向宿主重拉一次，成功后再报条数。
     var refreshBtn = $('refresh-agents-btn');
     if (refreshBtn && refreshBtn.dataset.bound !== '1') {
       refreshBtn.dataset.bound = '1';
       refreshBtn.addEventListener('click', function () {
-        renderAgentFreq();
-        toast('已刷新助手列表');
+        renderAgentFreq(true);
       });
     }
     bindAgentHiddenModal();
@@ -4195,7 +4196,7 @@
     applyFreqViewMode();
 
     Promise.all([
-      apiFetch(withAuth(API + '/api/agents'), { signal: AbortSignal.timeout(5000) }).then(function (r) { return r.json(); }),
+      apiFetch(withAuth(API + '/api/agents' + (forceRefresh ? '?refresh=1' : '')), { cache: 'no-store', signal: AbortSignal.timeout(forceRefresh ? 12000 : 5000) }).then(function (r) { return r.json(); }),
       apiFetch(withAuth(API + '/api/agent-freq'), { signal: AbortSignal.timeout(5000) }).then(function (r) { return r.json(); }),
     ]).then(function (results) {
       var agentsResult = results[0];
@@ -4218,6 +4219,7 @@
       renderGlobalAutoImageState();
       applyAgentFreqLock();
       syncAgentHiddenEntry();
+      if (forceRefresh) toast('已刷新伙伴列表，共 ' + freqAgentsData.length + ' 位');
     }).catch(function (e) {
       list.innerHTML = agentLoadErrorHtml(e);
     });
