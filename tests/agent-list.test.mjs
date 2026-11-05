@@ -164,9 +164,11 @@ test('刷新：SDK 封装没挂上时改走 bus 通道 agent:list', async () => 
 
 test('刷新：宿主迟迟不回就按预算收手，缓存一字不动', async () => {
   cacheHostAgentNames([{ id: 'hanako', name: '小花' }]);
-  const hanging = { agents: { list: () => new Promise(() => {}) } };
+  // 宿主“慢但不中断”：300ms 后才回。不能弄一个永不 settle 的 promise，
+  // 否则测试跑完还有悬挂的异步句柄，CI 上会把文件级测试标成 cancelled。
+  const slow = { agents: { list: () => new Promise((resolve) => setTimeout(() => resolve({ agents: [] }), 300)) } };
   const started = Date.now();
-  const result = await refreshHostAgents(hanging, { force: true, budgetMs: 60 });
+  const result = await refreshHostAgents(slow, { force: true, budgetMs: 60 });
   const spent = Date.now() - started;
   assert.equal(result.ok, false);
   assert.equal(result.timedOut, true);
