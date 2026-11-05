@@ -162,6 +162,29 @@ test('刷新：SDK 封装没挂上时改走 bus 通道 agent:list', async () => 
   assert.equal(readAgentName('yuyun'), '雨云');
 });
 
+test('刷新：宿主迟迟不回就按预算收手，缓存一字不动', async () => {
+  cacheHostAgentNames([{ id: 'hanako', name: '小花' }]);
+  const hanging = { agents: { list: () => new Promise(() => {}) } };
+  const started = Date.now();
+  const result = await refreshHostAgents(hanging, { force: true, budgetMs: 60 });
+  const spent = Date.now() - started;
+  assert.equal(result.ok, false);
+  assert.equal(result.timedOut, true);
+  assert.ok(spent < 2000, `不该傻等到前端超时，实际等了 ${spent}ms`);
+  assert.deepEqual(listHostAgents(), [{ id: 'hanako', name: '小花' }]);
+});
+
+test('刷新：超时后宿主才报的错不能抛成 unhandled rejection', async () => {
+  cacheHostAgentNames([{ id: 'hanako', name: '小花' }]);
+  let rejectLater = null;
+  const late = { agents: { list: () => new Promise((_, reject) => { rejectLater = reject; }) } };
+  const result = await refreshHostAgents(late, { force: true, budgetMs: 50 });
+  assert.equal(result.timedOut, true);
+  rejectLater(new Error('后续才失败'));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(listHostAgents(), [{ id: 'hanako', name: '小花' }]);
+});
+
 test('回归：/api/agents 读之前先重拉，前端刷新按钮带 refresh=1', () => {
   const root = path.join(__dirname, '..');
   const api = fs.readFileSync(path.join(root, 'server', 'api.js'), 'utf8');

@@ -3034,9 +3034,10 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
   app.get('/api/agents', async (c) => {
     try {
       const refreshed = await refreshHostAgents(ctx, { force: c.req.query('refresh') === '1' });
-      if (refreshed && refreshed.ok === false) {
+      // 超时是设计内的兜底（宿主一时没回就用缓存），不打 warn 免得日志被正常情况刷满。
+      if (refreshed && refreshed.ok === false && !refreshed.timedOut) {
         ctx?.log?.warn?.('[biaoqingbao] 刷新伙伴名单失败，沿用缓存:', refreshed.error);
-      } else if (refreshed && !refreshed.skipped) {
+      } else if (refreshed && refreshed.ok && !refreshed.skipped) {
         ctx?.log?.info?.(`[biaoqingbao] 伙伴名单已刷新 total=${refreshed.total} received=${refreshed.received}`);
       }
       const fromHost = listHostAgents();
