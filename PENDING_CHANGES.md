@@ -37,3 +37,5 @@
 <!-- 0.7.0 发布内容已并入 CHANGELOG.md：图库一键导入闲聊表情包（导入模式 + 宿主分类、宿主转码、发送后自查、两层去重、分块上传）、输入栏面板列出宿主表情包、Code 页总闸注入与工具准入同口径、分类读不到的几种死法，这里清空重新记。 -->
 
 - 2026-11-05 | 修复 | 伙伴名单重拉加内部预算：非强制路径最多等 800ms、强制刷新最多 4s，超时就照旧返回缓存。原来页面打开时会先 await 一次宿主重拉，宿主忙时可能把「秒出缓存」拖成前端 5s 超时的「加载失败」。
+- 2026-11-06 | 修复 | 设置页保存必败（issue #3）：App 子进程跑在 Node `--permission` 沙箱里，`migrateDataDir()` 探测 `<HANA_HOME>\plugin-backups` 越界，`fs.existsSync()` 抛 `ERR_ACCESS_DENIED` 被最外层 catch 吞成「图库目录初始化或旧数据恢复失败」，所有走 `atomicWriteJson()` 的写接口全挂。新增 `visible()`：看不见就当没有；失败的真实 code/message 记进 `probe.log`。真沙箱 `node --permission` 前后对照：旧版 `ok:false` + 写配置抛错，新版 `source:fresh` + 写成功。
+- 2026-11-06 | 修复 | 打开表情包卡片空转约 10 秒（issue #4）：`ui/panel.html` 引导脚本一次都没给宿主报过 `hana.ready`，宿主只能等到超时。报到挪到引导脚本最前面（`hana.plugin.ui` 协议 + 旧 `{type:'ready'}` 兜底），取 boot 数据和 340KB 主脚本的加载顺序一点没动。

@@ -48,6 +48,16 @@ body.host-import-mode .card-actions .edit-btn,body.host-import-mode .card-action
 // App 版引导：老的页面由服务端把数据塞进全局变量再渲染；
 // 现在页面是静态的，所以这里先取数据、填好全局变量，再加载主脚本。
 (function () {
+  // 宿主打开这张卡片先转圈，等页面报 ready 才收；这个页面以前一次 ready 都没发过，
+  // 于是每次都白等到宿主超时（约 10 秒）。报到排在最前面：后面取启动数据、
+  // 动态加载 340KB 主脚本都要时间，但那和「页面已经起来了」是两回事。
+  try { if (window.hana && typeof window.hana.ready === 'function') window.hana.ready(); } catch (_) {}
+  try {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ protocol: 'hana.plugin.ui', version: 1, kind: 'event', type: 'hana.ready' }, '*');
+      window.parent.postMessage({ type: 'ready' }, '*');
+    }
+  } catch (_) {}
   var m = window.location.pathname.match(/^\/api\/apps\/([^/]+)\/ui\//);
   var BASE = m ? ('/api/apps/' + m[1] + '/routes') : '/api/apps/biaoqingbao-app/routes';
   // 关键：引导脚本自己的请求也要带凭证（宿主下发的 appSurfaceSession），否则会被 403
