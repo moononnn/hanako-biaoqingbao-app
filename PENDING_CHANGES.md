@@ -43,6 +43,6 @@
 - 2026-11-20 | 新功能 | 方言气质联动接回来：选图时向「说方言」要这位伙伴的口音气质（宿主 bus 只读服务 `app:shuo-fangyan/dialect-bias`），东北话偏搞笑、上海话偏温和；结果缓存一分钟、失败缓存十秒，读不到就当没开方言，不拦发图。新增 `lib/dialect-bridge.js` 与 7 项测试。
 - 2026-11-20 | 优化 | 应用简介去掉已经搬走的方言与学我说话，换成一句「给伙伴挑了方言的话，选图也会跟着口音走」。
 - 2026-11-20 | 优化 | manifest 加 `app/services.call`，用于问「说方言」要气质权重。
-- 验证：`node --test "tests/*.test.mjs"` 610 项通过；跨应用联动还没在真机上走通，待重载两边后复测。
+- 验证：`node --test "tests/*.test.mjs"` 610 项通过。本机真机已走通：说方言启动日志 `已开放 dialect-bias`，表情包启动日志 `dialect-bridge bus=已接入`，一次搜图后 probe.log 记下 `dialect-bias hanako=sichuan(洒脱直爽)`，证明强度权重真拿到了。绯月（上海话）那条待她自己聊天时自然验证。
 
 

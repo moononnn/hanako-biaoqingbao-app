@@ -145,7 +145,8 @@ export default defineApp(async (sdk) => {
   //   通道是宿主 bus（app:shuo-fangyan/dialect-bias），宿主会给每次调用盖章 callerAppId。
   //   没装对方、没授权、对方没启动：静默降级成「没开方言」，不拦发图。
   try {
-    const { setServiceBus } = await import("./lib/dialect-bridge.js");
+    const { setServiceBus, setDialectBridgeLogger } = await import("./lib/dialect-bridge.js");
+    setDialectBridgeLogger(record);
     const ok = setServiceBus(sdk.bus || null);
     record(`dialect-bridge bus=${ok ? "已接入" : "未接入（没有方言气质，其余照旧）"}`);
   } catch (e) {
