@@ -50,15 +50,15 @@ test('没开方言（bias 为 null）也照原样返回 null', async () => {
 test('对方没装或报错时静默降级，不把异常抛给发图链路', async () => {
   setServiceBus(fakeBus(() => { throw new Error('no handler'); }));
   clearDialectBiasCache();
-  assert.equal(await getAgentDialectBias('yunying'), null);
+  assert.equal(await getAgentDialectBias('agent-x'), null);
 });
 
 test('缓存命中时不再打扰对方', async () => {
   const bus = fakeBus(() => ({ ok: true, data: { bias: BIAS } }));
   setServiceBus(bus);
   clearDialectBiasCache();
-  await getAgentDialectBias('yumi');
-  await getAgentDialectBias('yumi');
+  await getAgentDialectBias('agent-y');
+  await getAgentDialectBias('agent-y');
   assert.equal(bus.calls.length, 1, '一分钟内同一伙伴只问一次');
 });
 
