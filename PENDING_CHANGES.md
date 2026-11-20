@@ -40,6 +40,9 @@
 - 2026-11-20 | 优化 | 拿掉 `app/resources.write`：应用不再写伙伴人格文件，权限回到只读。
 - 2026-11-20 | 优化 | 导入旧搬家包时，`styleTemplate` / `styleProfile` / `styleFeedback` / `dialectConfig` 四个字段直接忽略（不报错、不清理），其余照常导入；导出不再产出这四个键。
 - 2026-11-20 | 修复 | 本机 yumi、yunying 两人人格文件里遗留的表情包方言块已清掉（原文件在同目录留了 `.bak-before-dialect-removal-*`）；清掉后两位回到普通话，需要方言的到「说方言」里重新挑。
-- 验证：`node --test "tests/*.test.mjs"` 603 项通过；删掉的 `persona-io.test.mjs`、`style-diff.test.mjs` 随模块一起退场。界面上点口音、发图、导入导出尚未实机复测。
+- 2026-11-20 | 新功能 | 方言气质联动接回来：选图时向「说方言」要这位伙伴的口音气质（宿主 bus 只读服务 `app:shuo-fangyan/dialect-bias`），东北话偏搞笑、上海话偏温和；结果缓存一分钟、失败缓存十秒，读不到就当没开方言，不拦发图。新增 `lib/dialect-bridge.js` 与 7 项测试。
+- 2026-11-20 | 优化 | 应用简介去掉已经搬走的方言与学我说话，换成一句「给伙伴挑了方言的话，选图也会跟着口音走」。
+- 2026-11-20 | 优化 | manifest 加 `app/services.call`，用于问「说方言」要气质权重。
+- 验证：`node --test "tests/*.test.mjs"` 610 项通过；跨应用联动还没在真机上走通，待重载两边后复测。
 
 

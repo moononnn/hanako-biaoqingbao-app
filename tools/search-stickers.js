@@ -8,6 +8,7 @@ import {
   META_FILE,
 } from '../lib/shared.js';
 import { scoreStickers } from './express.js';
+import { getAgentDialectBias } from '../lib/dialect-bridge.js';
 import {
   readGroupStore,
   filterStickersForAgent,
@@ -66,12 +67,14 @@ export async function execute(input, ctx) {
 
   // v0.25.2 - 候选列表也吃偏好惩罚：vetoed/累计不喜欢的图不排前面（与 express 选图口径一致，避免「先 search 再 express」链路里不喜欢的图以最高分出现误导助手）
   let prefs = { preferred: [], vetoed: [], dislikes: {} };
+  let expressionBias = null;
   const agentId = resolveAgentId(null, ctx);
   const groupStore = readGroupStore();
   const groupConfig = getAgentGroupConfig(groupStore, agentId);
   const knownGroupIds = getKnownGroupIds(groupStore);
   stickers = filterStickersForAgent(stickers, agentId, groupStore);
   try {
+    expressionBias = await getAgentDialectBias(agentId);
     const pRaw = await readFile(PREFERENCES_FILE, 'utf-8');
     const pData = JSON.parse(pRaw);
     const users = pData.users || {};
@@ -82,7 +85,7 @@ export async function execute(input, ctx) {
   const hasQuery = emotions.length > 0 || kwList.length > 0 || scenes.length > 0;
   // 搜图与自动发送共用一套语义、偏好、分组打分；无查询时仍展示随机图库。
   const scored = hasQuery
-    ? scoreStickers(stickers, emotions, exclude_ids || [], prefs, groupConfig, knownGroupIds, kwList, { scene: scenes, tone: String(tone).slice(0, 12), intensity: ['light', 'medium', 'strong'].includes(intensity) ? intensity : '' })
+    ? scoreStickers(stickers, emotions, exclude_ids || [], prefs, expressionBias, groupConfig, knownGroupIds, kwList, { scene: scenes, tone: String(tone).slice(0, 12), intensity: ['light', 'medium', 'strong'].includes(intensity) ? intensity : '' })
     : stickers.filter(s => !(exclude_ids || []).includes(s.id) && !prefs.vetoed?.includes(s.id)).sort(() => Math.random() - 0.5);
   const filtered = scored.map(sticker => {
     const tags = sticker.tags || {};

@@ -140,6 +140,18 @@ export default defineApp(async (sdk) => {
     record(`meta-failed ${e?.code || ""} ${e?.message || e}`);
   }
 
+  // ── 跨应用：方言气质从「说方言」拿 ──
+  //   本应用不存方言配置和气质权重表，只在选图时问一句「这位伙伴现在带什么味儿」。
+  //   通道是宿主 bus（app:shuo-fangyan/dialect-bias），宿主会给每次调用盖章 callerAppId。
+  //   没装对方、没授权、对方没启动：静默降级成「没开方言」，不拦发图。
+  try {
+    const { setServiceBus } = await import("./lib/dialect-bridge.js");
+    const ok = setServiceBus(sdk.bus || null);
+    record(`dialect-bridge bus=${ok ? "已接入" : "未接入（没有方言气质，其余照旧）"}`);
+  } catch (e) {
+    record(`dialect-bridge-failed ${e?.code || ""} ${e?.message || e}`);
+  }
+
   // ── 宿主表情包：只读适配层 ──
   //   宿主闲聊自带一套表情包（sticker-pack 扩展，落在 <HANA_HOME>/stickers/），
   //   这里把它读出来拼成和图库同构的清单，给后续兼容用。
