@@ -21,7 +21,6 @@ import {
   isAutoImageEnabled, getAgentFreqSettings,
   json, atomicWriteJson,
   resolveAgentId,
-  readUserName,
 } from '../lib/shared.js';
 import { isHostStickerId, readHostStickerBytes } from '../lib/host-packs.js';
 import { upsertTeachingSample, removeTeachingSample } from '../lib/teaching.js';
@@ -65,12 +64,6 @@ import {
   revertGroupNaming,
   clearGroupNaming,
 } from '../lib/sticker-groups.js';
-import {
-  DIALECT_LIST,
-  readDialectConfig, writeDialectConfig, syncDialectToIshiki, reconcileDialectToIshiki,
-  removeDialectFromIshiki, syncUserstyleToIshiki,
-  appendDialectLog, readDialectLog,
-} from '../lib/dialect.js';
 import { extractStickerArchive, hasImageSignature, detectImageFormat } from '../lib/zip-images.js';
 import {
   exportStickerArchive,
@@ -128,25 +121,12 @@ import {
 import { readMessageCard, readMessageCardChat, saveMessageCardChat, setMessageCardFeedback, nextPositiveKind } from '../lib/ball-message-card.js';
 // v0.1.30 - 「默认跟随当前模型」：读这位伙伴当前在用的对话模型
 import { readAgentChatModel } from '../lib/agent-model.js';
-// v0.30.0 - 学我说话：风格模板 + 总结任务
-import {
-  STYLE_LEVELS, STYLE_LEVEL_IDS,
-  readStyleTemplate, writeStyleTemplate, confirmStyleDraft, revertStyleTemplate, clearStyleTemplate,
-  saveExcludedAgents,
-  readStyleTasks, getStyleTask, createStyleTask, updateStyleTask, runStyleTask,
-  getStyleTaskViewState,
-} from '../lib/style-template.js';
-// v2：数据画像 + 修正回流 + 修订 diff（分通道提炼的产物存储与沉淀）
-import { readStyleProfile, readStyleFeedback, mergeDiffIntoFeedback } from '../lib/style-profile.js';
-import { diffTemplateFeedback } from '../lib/style-distill.js';
 import { callConfiguredTextModel, extractTextResponse } from '../lib/text-model.js';
 import { analyzeConversation } from '../lib/text-analysis.js';
 import { hostModelReady, callHostModel } from '../lib/model-host.js';
 import { resolveFetcher } from '../lib/net.js';
 import { readHiddenAgents, hideAgent, unhideAgent, filterHiddenAgents } from '../lib/hidden-agents.js';
 import { listHostAgents, refreshHostAgents } from '../lib/agent-name.js';
-// v0.1.49：把当前版与历史版逐句比出来，界面上下并排显示差异
-import { compareWithVersion } from '../lib/style-diff.js';
 // v0.1.46：下列几处导出/导入映射要用伙伴名单，宿主名单优先。
 //   扫目录版（readAgentCatalog）在 App 子进程里必然读不到，静默返回 []，
 //   导出的包就少了伙伴名、导入时的伙伴映射也全靠 id 猜。
@@ -160,7 +140,6 @@ import { readJevShadowLog } from '../lib/jev-shadow.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EXPORT_CONFIG_FILE = path.join(DATA_DIR, EXPORT_CONFIG_FILE_NAME);
 
-// v0.30.1 - readUserName 已移到 lib/shared.js 共用；v0.30.10 移除 userstyleDisplayName（展示名固定「学我说话」）
 function nextStickerId(meta) {
   let max = 0;
   for (const sticker of meta) {
@@ -263,10 +242,6 @@ function mergeMigrationData(key, incoming) {
     contextFeedback: 'context-feedback.json',
     agentFitNotes: 'agent-fit-notes.json',
     exposure: 'exposure-stats.json',
-    styleTemplate: 'style-template.json',
-    styleProfile: 'style-profile.json',
-    styleFeedback: 'style-feedback.json',
-    dialectConfig: 'dialect-config.json',
     agentFreq: 'agent-freq.json',
     displayConfig: 'display-config.json',
     ballConfig: 'ball-config.json',
@@ -296,9 +271,6 @@ function mergeMigrationData(key, incoming) {
         ...(incoming?.samples && typeof incoming.samples === 'object' ? incoming.samples : {}),
       },
     };
-  }
-  if (key === 'dialectConfig') {
-    return mergeAgentScopedData(current, incoming, 'agents');
   }
   if (key === 'agentFreq') {
     const merged = mergeAgentScopedData(current, incoming, 'agents');
@@ -1196,10 +1168,6 @@ export default async function registerRoutes(app, ctx) {
                 contextFeedback: 'context-feedback.json',
                 agentFitNotes: 'agent-fit-notes.json',
                 exposure: 'exposure-stats.json',
-                styleTemplate: 'style-template.json',
-                styleProfile: 'style-profile.json',
-                styleFeedback: 'style-feedback.json',
-                dialectConfig: 'dialect-config.json',
                 agentFreq: 'agent-freq.json',
                 displayConfig: 'display-config.json',
                 ballConfig: 'ball-config.json',
@@ -1263,23 +1231,6 @@ export default async function registerRoutes(app, ctx) {
         if (migrationData?.agentFreq) {
           try { writeAgentFreqConfig(readJsonFile(path.join(DATA_DIR, 'agent-freq.json'), migrationData.agentFreq)); } catch {}
         }
-        let syncSummary = null;
-        if (migrationData?.dialectConfig) {
-          try {
-            const savedDialect = writeDialectConfig(readJsonFile(path.join(DATA_DIR, 'dialect-config.json'), migrationData.dialectConfig));
-            const synced = await syncDialectToIshiki(savedDialect);
-            const repaired = await reconcileDialectToIshiki(savedDialect);
-            syncSummary = { dialect: synced, repaired };
-          } catch (error) {
-            syncSummary = { dialectError: error.message || '方言人格同步失败' };
-          }
-        }
-        if (migrationData?.styleTemplate) {
-          try { syncSummary = { ...(syncSummary || {}), userstyle: await syncUserstyleToIshiki() }; } catch (error) {
-            syncSummary = { ...(syncSummary || {}), userstyleError: error.message || '学我说话人格同步失败' };
-          }
-        }
-        if (migrationReport && syncSummary) migrationReport.sync = syncSummary;
         const teachingVectorsQueued = migrationData?.teaching
           ? queueTeachingVectorRebuild(migrationData.teaching.samples)
           : 0;
@@ -2393,7 +2344,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
         return { ok: false, error: '请先在设置中选择内容分析模型' };
       }
       // utility:call-text 只解析全局 utility 角色，会静默忽略 providerId/modelId。
-      // 学我说话和标签聊天必须实际调用插件配置的模型，并对思考型模型关闭思考，
+      // 标签聊天必须实际调用插件配置的模型，并对思考型模型关闭思考，
       // 否则低 maxTokens 时宿主剥掉思考后会得到“无正文”。
       return callConfiguredTextModel(ctx, cfg, messages, {
         maxTokens: opts.maxTokens ?? 800,
@@ -2499,7 +2450,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
   // 优先级：
   //   ① 跟随当前伙伴（agents/<id>/config.yaml 的 models.chat）——默认就该是这个
   //   ② 用户主动填的自定义 API（他自己填的凭据，尊重）
-  //   ③ 设置里明确选过的内容分析模型（那是给学我说话/标签用的，拿不到伙伴模型时才当兜底）
+  //   ③ 设置里明确选过的内容分析模型（拿不到伙伴模型时才当兜底）
   //   ④ 模型目录里第一个可用的文本模型（再兜一层，总比聊不起来强）
   // 全拿不到才返回 null，由调用方给人话。
   function resolveChatModelConfig(agentId) {
@@ -3023,7 +2974,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
   // v0.1.45 - 改成走宿主名单。这条接口原来用 readdirSync 裸扫 <hana 主目录>/agents/，
   //   而 App 子进程开着 Node Permission Model，许可根只有「安装目录 + 自己的 app-data + locales」
   //   三条（见 hana 启动时给子进程传的 --allow-fs-read），agents 目录根本不在里面，
-  //   扫目录被运行时拒掉。这一个接口一坏，「伙伴偏好」和「方言口音」两个页面同时白屏
+  //   扫目录被运行时拒掉。这一个接口一坏，「伙伴偏好」页面就白屏
   //   （全 App 只有它俩会碰这个目录，所以别的页面全都正常，很有迷惑性）。
   //   宿主名单走 app/agents.read（清单里本来就申请了），启动时拉一次存在 lib/agent-name.js。
   //   扫目录只留作宿主没给出名单时的兜底。
@@ -3083,7 +3034,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
         hidden: agents.filter((a) => hiddenSet.has(a.id)),
       });
     } catch (e) {
-      // 这条接口被「伙伴偏好」和「方言口音」两个页面共用，挂了就是两个页面同时白屏。
+      // 这条接口被「伙伴偏好」页面用着，挂了就是那个页面白屏。
       // 以前只把 error 塞进响应体、前端又吞成一句「加载失败」，现场什么都不剩，这里必须留痕。
       ctx?.log?.error?.('[biaoqingbao] 读取伙伴列表失败:', e.code || '', e.message || e);
       return json({ ok: false, error: e.message || String(e) });
@@ -3091,7 +3042,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
   });
 
   // ═══ POST /api/agents/remove — 移除伙伴（v0.25.2；v0.34.33 起进隐藏名单）═══
-  // 清理该伙伴在插件里的数据（频率/偏好/方言/人格块），并写进隐藏名单：
+  // 清理该伙伴在插件里的数据（频率/偏好/图库分组），并写进隐藏名单：
   // 刷新列表和重启都不会再带出 ta；想找回来走 /api/agents/unhide。
   app.post('/api/agents/remove', async (c) => {
     try {
@@ -3120,15 +3071,6 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
           atomicWriteJson(PREFERENCES_FILE, prefs);
         }
       } catch {}
-
-      // 3) 方言配置 + 人格文件里的方言块（有残留就一并清掉）
-      // v0.28.0：remove 默认联动配置，这里传 syncConfig:false，因为紧接着就 writeDialectConfig 统一写
-      const dcfg = readDialectConfig();
-      if (dcfg.agents && dcfg.agents[agentId]) {
-        try { await removeDialectFromIshiki(agentId, undefined, { syncConfig: false }); } catch {}
-        delete dcfg.agents[agentId];
-        writeDialectConfig(dcfg);
-      }
 
       // 4) 图库分组配置；失败必须让接口失败，不能返回“已清理”的假成功。
       if (groupStore.agents && Object.prototype.hasOwnProperty.call(groupStore.agents, agentId)) {
@@ -3236,103 +3178,6 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
     } catch (e) {
       return json({ ok: false, error: e.message });
     }
-  });
-
-  // ════════════════════════════════════════════════════════════════
-  //  v0.20.0 方言口音（让助手说话带方言味）
-  // ════════════════════════════════════════════════════════════════
-
-  // ── GET /api/dialect - 读取方言配置 + 方言库元数据（纯读，自愈只发生在 POST 保存后）──
-  app.get('/api/dialect', (c) => {
-    // 「方言口音」页面的另一半请求。同 /api/agent-freq：不留错误就永远只能看到一句「加载失败」。
-    let config, userName;
-    try {
-      config = readDialectConfig();
-      userName = readUserName();
-    } catch (e) {
-      ctx?.log?.error?.('[biaoqingbao] 读取方言配置失败:', e.code || '', e.message || e);
-      return json({ ok: false, error: e.message || String(e) });
-    }
-    return json({
-      ok: true,
-      data: {
-        config,
-        userName,
-        dialects: DIALECT_LIST.map(d => ({
-          id: d.id,
-          name: d.name,
-          tagline: d.tagline,
-          difficulty: d.difficulty,
-          difficultyNote: d.difficultyNote,
-          hasAdvanced: Boolean(d.personaAdvanced),
-        })),
-      },
-    });
-  });
-
-  // ── POST /api/dialect - 保存方言配置（整表替换，归一化 + 同步写入/移除人格文件）──
-  app.post('/api/dialect', async (c) => {
-    try {
-      const body = await c.req.json();
-      if (!body || typeof body !== 'object' || Array.isArray(body)) {
-        return json({ ok: false, error: '配置格式不正确' }, 400);
-      }
-      if (body.agents != null && (typeof body.agents !== 'object' || Array.isArray(body.agents))) {
-        return json({ ok: false, error: '助手方言配置格式不正确' }, 400);
-      }
-      const before = readDialectConfig();
-      const saved = writeDialectConfig(body);
-      // 记录变更（时间、从啥改成啥、变更了哪些助手），供排查用
-      try {
-        const changed = [];
-        for (const [agentId, s] of Object.entries(saved.agents)) {
-          const b = before.agents[agentId];
-          if (!b || b.dialect !== s.dialect) changed.push({ agentId, from: (b && b.dialect) || '未配置', to: s.dialect });
-        }
-        for (const [agentId, b] of Object.entries(before.agents)) {
-          if (!saved.agents[agentId]) changed.push({ agentId, from: b.dialect, to: '关闭' });
-        }
-        if (changed.length > 0) appendDialectLog({ changed, config: saved });
-      } catch (e) {
-        // 日志失败不影响保存主流程
-      }
-      // 同步写入/移除各助手的 ishiki.md（用户主动开启才写，关闭即删）
-      // 传 before 作为旧配置：否则 sync 内部读到的缓存已是新配置，关闭的助手会被漏掉
-      const syncResults = await syncDialectToIshiki(saved, undefined, before);
-      const failed = Object.entries(syncResults).filter(([_, r]) => r && r.ok === false);
-      // 对配置里已开启方言的助手做二次自愈：sync 失败时再补一次，仍失败才报错
-      const repaired = await reconcileDialectToIshiki(saved);
-      const stillFailed = failed.filter(([id]) => !repaired.fixed.includes(id));
-      // v0.23.0：错误信息去本地路径（fs 原始报错可能带 ishiki.md 绝对路径，不进前端）
-      const cleanErr = (msg) => String(msg || '')
-        .replace(/[A-Za-z]:\\[^\s'";，。]*/g, '<path>')
-        .replace(/\\\\[^\\\s]+\\[^\s'";，。]*/g, '<path>');
-      // v0.1.47：人格文件走宿主通道，没在「应用能力」里批准读取/写入时会被权限层拒掉。
-      //   这时把原话甩给用户没意义，给一句能照做的：去哪儿、点什么。
-      const humanErr = (msg) => {
-        const text = cleanErr(msg);
-        if (/ACCESS_DENIED|restricted|未授权|not authorized|permission/i.test(text)) {
-          return '还没拿到读取/写入伙伴人格文件的权限。请到 Hana 的「设置 → 应用 → 表情包 → 应用能力」，允许“读取与写入用户资源”，然后回来重新保存。';
-        }
-        return text;
-      };
-      const message = stillFailed.length
-        ? `已保存，但 ${stillFailed.map(([id]) => id).join('、')} 的人格写入失败：${stillFailed.map(([_, r]) => humanErr(r.error)).join('；')}（重启后不生效）`
-        : '已保存。重启 Hana 后生效，建议开一个新对话框聊天（旧对话框里可能残留旧方言味道）';
-      return json({
-        ok: true,
-        message,
-        data: saved,
-        syncFailed: stillFailed.map(([id, r]) => ({ agentId: id, error: humanErr(r.error) })),
-      });
-    } catch (e) {
-      return json({ ok: false, error: e.message });
-    }
-  });
-
-  // ── GET /api/dialect-log - 读取方言保存日志（最近 20 条，排查用）──
-  app.get('/api/dialect-log', (c) => {
-    return json({ ok: true, data: readDialectLog(20) });
   });
 
   // ── 兼容旧版 GET /api/blocked-agents（从全局开关读取）──
@@ -3577,216 +3422,6 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
   } catch (e) {
     ctx?.log?.error?.('[biaoqingbao] 批量任务路由注册失败:', e.message);
   }
-
-  // ════════════════════════════════════════════════════════════════
-  //  v0.30.0 学我说话（userstyle）· 风格模板 + 总结任务
-  // ════════════════════════════════════════════════════════════════
-
-  // ── GET /api/style-template - 读取当前模板 + 历史版本 + 最近任务 + 助手列表（供设置区展示）──
-  app.get('/api/style-template', async (c) => {
-    const tpl = readStyleTemplate();
-    const tasks = readStyleTasks().slice(-20).reverse();
-    // v0.30.7：全部助手（含名字）+ 排除名单（v0.30.9：移除 activeAgent——配方言是方言页的职责）
-    // v0.1.45 - 同 /api/agents：宿主名单优先。原来直接扫目录，沙箱拒读后 catch 掉、
-    //   agents 默默变空数组，「从哪些助手学」的下拉框就一直是空的，看着像没有伙伴可选。
-    // 2026-11-05 - 同样先重拉一次，否则新建的伙伴在这个下拉框里也缺席（与 /api/agents 同源）。
-    await refreshHostAgents(ctx);
-    let agents = listHostAgents();
-    if (!agents.length) {
-      try {
-        const agentsDir = path.join(HANA_HOME, 'agents');
-        agents = fs.readdirSync(agentsDir, { withFileTypes: true })
-        .filter((e) => e.isDirectory() && /^[A-Za-z0-9_-]+$/.test(e.name))
-        .map((e) => {
-          let name = e.name;
-          try {
-            const cfg = fs.readFileSync(path.join(agentsDir, e.name, 'config.yaml'), 'utf-8');
-            const m = cfg.match(/^agent:\s*$/m);
-            if (m) {
-              const nm = cfg.slice(m.index).match(/^\s{2}name:\s*['"]?([^'"\n#]+)['"]?\s*$/m);
-              if (nm && nm[1].trim()) name = nm[1].trim();
-            }
-          } catch { /* 读不到名字用 id */ }
-          return { id: e.name, name };
-        });
-      } catch {
-        ctx?.log?.warn?.('[biaoqingbao] 读伙伴名单失败（学我说话页的来源列表会是空的）:', e.message || e);
-        agents = [];
-      }
-    }
-    return json({
-      ok: true,
-      data: {
-        template: tpl,
-        // v0.1.49：当前版与最近一个历史版的逐句对比。没有历史或两版一样时返回 null，
-        // 界面就不展示对比区（没必要给一个“没区别”的面板）。
-        compare: compareWithVersion(tpl, (tpl.history?.[tpl.history.length - 1] || {}).version),
-        agents,
-        userName: readUserName(),
-        levels: STYLE_LEVELS,
-        task_state: getStyleTaskViewState(tasks),
-        tasks: tasks.map(t => ({
-          id: t.id, status: t.status, level: t.level, agent_id: t.agent_id,
-          phase: t.phase, total_messages: t.total_messages, sampled_count: t.sampled_count,
-          draft: t.draft, confirmed: t.confirmed, // 草稿恢复必须区分已确认历史与待保存新稿
-          created_at: t.created_at, updated_at: t.updated_at, error: t.error,
-        })),
-      },
-    });
-  });
-
-  // ── POST /api/style-template/excluded - 保存排除名单（「从哪些助手学」里取消勾选的）──
-  app.post('/api/style-template/excluded', async (c) => {
-    try {
-      const body = await c.req.json().catch(() => ({}));
-      const ids = Array.isArray(body.agent_ids) ? body.agent_ids.map(String) : [];
-      const next = saveExcludedAgents(ids);
-      return json({ ok: true, data: { excluded_agents: next.excluded_agents } });
-    } catch (e) {
-      return json({ ok: false, error: e.message }, 500);
-    }
-  });
-
-  // ── POST /api/style-task - 创建总结任务（后台执行，前端轮询进度）──
-  // v0.30.7：不再需要选助手——语料 = 全部助手（排除名单外），agent_id 仅作展示保留
-  app.post('/api/style-task', async (c) => {
-    try {
-      const body = await c.req.json().catch(() => ({}));
-      const agentId = String(body.agent_id || '').trim() || 'all'; // 兼容旧前端
-      const level = String(body.level || 'balanced');
-      if (!STYLE_LEVEL_IDS.includes(level)) return json({ ok: false, error: '无效的档位' }, 400);
-
-      // 未配置内容分析模型时提前拦截（跟表情包识图一致的口径）
-      const cfg = readTextConfig();
-      if (!cfg.enabled) {
-        return json({ ok: false, error: '内容分析模型未启用，请先到设置里启用' }, 400);
-      }
-      if (cfg.source === 'hana' && (!cfg.providerId || !cfg.modelId)) {
-        return json({ ok: false, error: '请先在设置中选择内容分析模型' }, 400);
-      }
-      if (cfg.source === 'custom' && (!cfg.customBaseUrl || !cfg.customApiKey || !cfg.customModel)) {
-        return json({ ok: false, error: '请先在设置中配置自定义模型' }, 400);
-      }
-
-      const created = createStyleTask(agentId, level);
-      if (!created.ok) return json({ ok: false, error: created.error }, 400);
-
-      const task = created.task;
-      const userName = readUserName();
-      // fire-and-forget：后台执行，不阻塞响应（参考坑 49：不在请求里等重活）
-      setImmediate(async () => {
-        try {
-          await runStyleTask(task, async (messages, opts) => {
-            // 复用内容分析模型的统一调用链路（选定 Hana 模型直连 / 自定义 API）。
-            return callTextModel(messages, {
-              maxTokens: opts.maxTokens ?? 1200,
-              temperature: opts.temperature ?? 0.5,
-              timeoutMs: opts.timeoutMs ?? 120000,
-            });
-          }, userName, HANA_HOME);
-        } catch (e) {
-          ctx?.log?.error?.('[biaoqingbao] 风格总结任务异常:', e.message || e);
-          updateStyleTask(task.id, { status: 'failed', phase: 'distilling', error: '任务异常: ' + (e.message || e) });
-        }
-      });
-
-      return json({ ok: true, data: { taskId: task.id } });
-    } catch (e) {
-      return json({ ok: false, error: e.message }, 500);
-    }
-  });
-
-  // ── GET /api/style-profile - v2 数据画像 + 修正回流（展柜版前端拉取）──
-  app.get('/api/style-profile', (c) => {
-    // v2：profile 快照（统计基线 + 通道结果）与 feedback（反例库 + 锁定特征）
-    return json({ ok: true, data: { profile: readStyleProfile(), feedback: readStyleFeedback() } });
-  });
-
-  //  ── GET /api/style-task/:id - 查任务详情（轮询进度用）──
-  app.get('/api/style-task/:id', (c) => {
-    const t = getStyleTask(c.req.param('id'));
-    if (!t) return json({ ok: false, error: '任务不存在' }, 404);
-    return json({ ok: true, data: t });
-  });
-
-  // ── POST /api/style-template/confirm - 保存草稿为当前模板（保存前自动备份旧版，可回退）──
-  // v0.30.9：纯编辑器职责——只保存模板，配方言是方言页的事（移除一键套用逻辑）
-  // v2：保存时 diff 新旧模板 → 删掉的句子进反例库、新增的进锁定特征（修正回流）
-  app.post('/api/style-template/confirm', async (c) => {
-    try {
-      const body = await c.req.json().catch(() => ({}));
-      const draft = String(body.draft || '').trim();
-      const taskId = String(body.task_id || '');
-      const sourceAgent = String(body.agent_id || '');
-      const level = String(body.level || '');
-      const before = readStyleTemplate().current;
-      const res = confirmStyleDraft(draft, { sourceAgent, level });
-      if (!res.ok) return json({ ok: false, error: res.error }, 400);
-      // v2 修正回流：只在「旧模板非空且真的有改动」时沉淀，避免首版确认整篇被当锁定
-      let feedback = null;
-      if (before && before !== draft) {
-        const d = diffTemplateFeedback(before, draft);
-        if (d.removed.length || d.added.length) feedback = mergeDiffIntoFeedback(d, 'user-edit');
-      }
-      // v0.31.0：模板更新后自动同步到已开启「学我说话」的助手 ishiki.md，
-      // 否则重启后 Hana 组装系统提示词读到的还是旧模板（回归：保存不生效）
-      const sync = await syncUserstyleToIshiki();
-      // 关联任务标记已确认（历史记录用）
-      if (taskId) {
-        const t = getStyleTask(taskId);
-        if (t) updateStyleTask(taskId, { confirmed: true });
-      }
-      return json({ ok: true, data: res.data, sync, feedback });
-    } catch (e) {
-      return json({ ok: false, error: e.message }, 500);
-    }
-  });
-
-  // ── POST /api/style-template/shorten - 自动精简草稿（超 600 字时一键压缩，分享版用户不用手动删）──
-  app.post('/api/style-template/shorten', async (c) => {
-    try {
-      const body = await c.req.json().catch(() => ({}));
-      const draft = String(body.draft || '').trim();
-      if (!draft) return json({ ok: false, error: '没有草稿内容' }, 400);
-      const SHORTEN_PROMPT = `你是一名文字编辑。下面是一段「用户说话风格模板」，它超过了保存上限（600 字）。
-请把它精简到 550 字以内：保留最核心的风格特征（高频词、语气词、句式、标点习惯、情绪表达），删掉重复描述和次要细节，保持原有的身份化口吻（「你是一个……打字也带着……的习惯」），不要用 markdown 标题/列表/加粗，不要新增内容，直接输出精简后的模板全文。
-
-<模板>
-${draft}
-</模板>`;
-      const result = await callTextModel([{ role: 'user', content: SHORTEN_PROMPT }], { maxTokens: 1200, temperature: 0.3, timeoutMs: 60000 });
-      if (!result.ok) return json({ ok: false, error: result.error || '精简失败' }, 500);
-      const shortened = String(result.data || '').trim();
-      if (!shortened) return json({ ok: false, error: '精简结果为空' }, 500);
-      return json({ ok: true, data: shortened });
-    } catch (e) {
-      return json({ ok: false, error: e.message }, 500);
-    }
-  });
-
-  // ── POST /api/style-template/revert - 回退到历史版本 ──
-  app.post('/api/style-template/revert', async (c) => {
-    try {
-      const body = await c.req.json().catch(() => ({}));
-      const version = Number(body.version);
-      if (!Number.isInteger(version) || version <= 0) return json({ ok: false, error: '无效的版本号' }, 400);
-      const res = revertStyleTemplate(version);
-      if (!res.ok) return json({ ok: false, error: res.error }, 400);
-      // v0.31.0：回退后同样重新同步 userstyle 助手的 ishiki.md
-      const sync = await syncUserstyleToIshiki();
-      return json({ ok: true, data: res.data, sync });
-    } catch (e) {
-      return json({ ok: false, error: e.message }, 500);
-    }
-  });
-
-  // ── POST /api/style-template/clear - 清空模板 + 历史（用户主动要求）──
-  app.post('/api/style-template/clear', async (c) => {
-    const res = clearStyleTemplate();
-    // v0.31.0：清空后把 userstyle 人格块从各助手 ishiki.md 移除，避免旧模板残留
-    const sync = await syncUserstyleToIshiki();
-    return json({ ok: true, data: res.data, sync });
-  });
 
   // ═══ GET /api/check-update — 检查 GitHub 更新（v0.19.5 分享版）═══
   app.get('/api/check-update', async (c) => {

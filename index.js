@@ -140,19 +140,6 @@ export default defineApp(async (sdk) => {
     record(`meta-failed ${e?.code || ""} ${e?.message || e}`);
   }
 
-  // ── v0.1.47：把宿主 resources 通道注入人格文件读写层 ──
-  //   方言的「人格文件部分」（写/删 agents/<id>/AGENTS.md 里的方言块）靠这条通道落地。
-  //   宿主给 App 子进程的 --allow-fs-read 只有三条，agents 目录不在其中，裸 fs 必被拒；
-  //   ctx.resources 是唯一正门，盘外读需要 app/resources.read、盘外写需要 app/resources.write。
-  //   拿不到就留 null（读写层会退回 fs），此时方言的人格部分会报出「读不到/写入失败」而不是假成功。
-  try {
-    const { setPersonaResources } = await import("./lib/persona-io.js");
-    setPersonaResources(sdk.resources || null);
-    record(`persona-io resources=${sdk.resources ? "已注入" : "未注入"}`);
-  } catch (e) {
-    record(`persona-io-failed ${e?.code || ""} ${e?.message || e}`);
-  }
-
   // ── 宿主表情包：只读适配层 ──
   //   宿主闲聊自带一套表情包（sticker-pack 扩展，落在 <HANA_HOME>/stickers/），
   //   这里把它读出来拼成和图库同构的清单，给后续兼容用。
@@ -197,7 +184,7 @@ export default defineApp(async (sdk) => {
   // ── v0.1.46 沙箱可达性探针 ──
   //   App 的代码跑在开了 Node 权限沙箱的子进程里，能碰的目录只有三块（安装目录、自己的
   //   app-data、宿主语言包）。<hana 主目录>/agents 不在里面，读它必然 ERR_ACCESS_DENIED。
-  //   这个坑踩过两次：10-07 漏了名字以外的路，10-10 「伙伴偏好/方言口音」两页直接白屏。
+  //   这个坑踩过两次：10-07 漏了名字以外的路，10-10 「伙伴偏好」页直接白屏。
   //   所以每次启动都实测一遍并记进 probe.log：通就照旧走文件，不通就必须走宿主名单/接口，
   //   不用再靠猜。宿主名单条数一并记下来，对不上就能立刻看出名单没拉到。
   //   （必须在名单缓存之后跑，否则读到的永远是 0。）

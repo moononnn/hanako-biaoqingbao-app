@@ -3,7 +3,7 @@
 // 锁住 v0.1.45 的根因：v2 App 的代码跑在开了 Node Permission Model 的子进程里，
 // 许可根只有「安装目录 + 自己的 app-data + locales」三条，<hana 主目录>/agents 不在里面，
 // 裸 readdirSync 扫 agents 目录会被运行时直接拒掉。
-// 症状是「伙伴偏好」和「方言口音」两个页面同时白屏（只有它俩会碰这个目录），
+// 症状是「伙伴偏好」页面白屏（只有它会碰这个目录），
 // 而且前端把真实原因吃掉，只剩一句「加载失败，请稍后重试」，极难定位。
 //
 // 覆盖：
@@ -85,15 +85,14 @@ test('回归：扫目录那步外面包着 try，失败也不该掀掉整个接�
   );
 });
 
-// 这三个文件都在启动或请求时拿「伙伴名单」，沙箱里全都读不到 agents 目录。
-// 漏一处就是一处静默降级（显示成英文 id / 报「没有可用的助手」/ 导出包少字段），
+// 这两处都在启动或请求时拿「伙伴名单」，沙箱里全都读不到 agents 目录。
+// 漏一处就是一处静默降级（显示成英文 id / 导出包少字段），
 // 比白屏更难被发现，所以逐个钉住。
-test('回归：启动数据、导出映射、学我说话采集都先走宿主名单', () => {
+test('回归：启动数据、导出映射都先走宿主名单', () => {
   const root = path.join(__dirname, '..');
   const cases = [
     ['server/boot.js', 'agentNames 那段'],
     ['server/api.js', 'transferAgentCatalog'],
-    ['lib/style-template.js', 'listAgents'],
   ];
   for (const [rel, what] of cases) {
     const src = fs.readFileSync(path.join(root, rel), 'utf8');
@@ -202,18 +201,5 @@ test('回归：/api/agents 读之前先重拉，前端刷新按钮带 refresh=1'
   assert.ok(
     ui.includes("'/api/agents' + (forceRefresh ? '?refresh=1' : '')"),
     '刷新按钮没带 refresh=1，服务端走节流/缓存，按了还是不出来',
-  );
-});
-
-test('回归：学我说话没伙伴时不能说成「可能全部被排除了」', () => {
-  // 读不到目录和被用户排除是两回事，混为一谈会把人引到完全错误的方向。
-  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'style-template.js'), 'utf8');
-  const start = src.indexOf('function listAgents');
-  assert.ok(start > 0, '找不到 listAgents');
-  const body = src.slice(start, start + 400);
-  assert.ok(body.indexOf('listHostAgents') > 0, 'listAgents 必须先问宿主名单');
-  assert.ok(
-    body.indexOf('listHostAgents') < body.indexOf('readdirSync'),
-    '顺序反了等于没修',
   );
 });

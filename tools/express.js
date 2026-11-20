@@ -18,8 +18,7 @@ import {
   markAgentStickerCooldown, resolveAgentId, collectPrefsForEmotion, atomicWriteJson, prefsScoreBonus,
   sanitizeTag,
 } from '../lib/shared.js';
-import { TAG_TO_GROUP, resolveEmotionFactor } from '../lib/emotion-groups.js';
-import { getAgentExpressionBias } from '../lib/dialect.js';
+import { TAG_TO_GROUP } from '../lib/emotion-groups.js';
 import { fitDecision } from '../lib/smart-fit.js';
 import { imageSizeFromBuffer } from '../lib/image-size.js';
 import { safeStickerPath } from '../lib/ball-core.js';
@@ -504,8 +503,6 @@ async function logDecision(emotion, stickerId, ctx, metadata = {}) {
 }
 
 // 纯标签匹配打分（不调模型）
-// v0.27.0：新增 bias 参数（方言表情气质权重），情绪贡献分乘方言系数 + 加强度偏移；
-// 只影响情绪匹配分，prefs 偏好惩罚在系数之外照常生效。bias=null 时与原逻辑完全一致。
 // v0.34.51 - 关键词通道权重与封顶（值来自实测扫描，脚本见工作台 biaoqingbao-context-experiment）
 // 为什么需要这一组数：库里 keywords 是最富的字段（337 张图 / 334 张有 / 平均 9 个），
 // 但自动路径过去完全不查它。对照实测：emotion 标签精确 +8，向量通道 cosine×10（典型 3~9 分），
@@ -518,7 +515,7 @@ async function logDecision(emotion, stickerId, ctx, metadata = {}) {
 // 权重低于短描述（长文本里出现一个词比短标签里出现更容易，误命中概率高）。
 const KEYWORD_WEIGHT = { exact: 20, partial: 6, description: 5, semantic: 4, cap: 40 };
 
-export function scoreStickers(stickers, emotion, excludeIds, prefs, bias = null, groupConfig = null, knownGroupIds = null, keywords = [], query = {}) {
+export function scoreStickers(stickers, emotion, excludeIds, prefs, groupConfig = null, knownGroupIds = null, keywords = [], query = {}) {
   const emotions = (Array.isArray(emotion) ? emotion : [emotion]).filter(Boolean);
   const kwList = Array.isArray(keywords) ? keywords.filter(Boolean) : [];
   const scenes = Array.isArray(query.scene) ? query.scene : (query.scene ? [query.scene] : []);
@@ -567,15 +564,6 @@ export function scoreStickers(stickers, emotion, excludeIds, prefs, bias = null,
           }
         }
         keywordScore = Math.min(KEYWORD_WEIGHT.cap, keywordScore);
-      }
-
-      // v0.27.0 方言×表情包联动：有情绪命中才参与（关键词/场景独立查询不受干扰）
-      if (emotionScore > 0 && bias) {
-        emotionScore *= resolveEmotionFactor(emotionHitTags, bias);
-        const intensity = sticker._source?.intensity;
-        if (intensity && bias.intensity && bias.intensity[intensity] !== undefined) {
-          emotionScore += bias.intensity[intensity];
-        }
       }
 
       // v0.25.0 - 偏好加权统一走 prefsScoreBonus（preferred +10 / vetoed -20 / 不喜欢次数 -10×count）
@@ -704,8 +692,6 @@ export async function execute(input, ctx) {
     ctx?.log?.info?.('[biaoqingbao] 自动配图总闸已关闭，拒绝 express 发图');
     return reply({ ok: false, error: '自动配图已关闭，暂不发送表情包' });
   }
-  // v0.27.0 方言×表情包联动：按当前助手方言设置取气质权重（没开方言返回 null，不干预）
-  const expressionBias = getAgentExpressionBias(agentId);
   try {
     const freqSettings = getAgentFreqSettings(agentId);
     if (!freqSettings.enabled) {
@@ -757,15 +743,15 @@ export async function execute(input, ctx) {
   } else {
     const allExclude = [...new Set([...(exclude_ids || []), ...getRecent(agentId)])];
 
-    // 打分匹配（v0.27.0：传入方言气质权重；v0.34.51：传入情境关键词）
+    // 打分匹配（v0.34.51：传入情境关键词）
     const scenes = (Array.isArray(scene) ? scene : String(scene || '').split(/[,，、]/))
       .map(s => sanitizeTag(s, 12)).filter(Boolean).slice(0, 6);
     const query = { scene: scenes, tone: sanitizeTag(tone || '', 12), intensity: ['light', 'medium', 'strong'].includes(intensity) ? intensity : '' };
-    let scored = scoreStickers(stickers, emotion, allExclude, effectivePrefs, expressionBias, groupConfig, knownGroupIds, kwList, query);
+    let scored = scoreStickers(stickers, emotion, allExclude, effectivePrefs, groupConfig, knownGroupIds, kwList, query);
 
     if (scored.length === 0) {
       // 放宽限制：不排除最近用过的，再试一次
-      const relaxed = scoreStickers(stickers, emotion, [], effectivePrefs, expressionBias, groupConfig, knownGroupIds, kwList, query);
+      const relaxed = scoreStickers(stickers, emotion, [], effectivePrefs, groupConfig, knownGroupIds, kwList, query);
       scored.push(...relaxed);
     }
 
