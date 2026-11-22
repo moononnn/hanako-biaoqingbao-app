@@ -1,5 +1,24 @@
 # 自动测试
 
+## 2026-11-22 跨应用收图服务（0.7.5）
+
+### 改动
+- 新增 `lib/sticker-inbound.js`：注册只读服务 `app:biaoqingbao-app/sticker/add-from-chat`，`allowCrossApp` + `callerAppId` 白名单（只认茶话会）。绝对路径校验、单张 10MB 上限；读图走 `sdk.resources.read`，宿主没给资源通道时才退 `fs` 直读；入库走 `enqueueToolWrite` 同一条写队列与 SHA-256 指纹查重，先回包再后台认图。
+- `index.js` 末尾同一套 try/catch 注册，失败只记一笔，不影响其它功能。
+- 新增 `tests/sticker-inbound.test.mjs`（6 项：白名单、非法路径与超大、正常入库、后台认图回写、重复图去重、认图失败保底）。
+
+### 验证
+- `node --test tests/sticker-inbound.test.mjs`：6 项通过 / 0 失败。
+- 全量 `node --test tests/*.test.mjs`：**616 项通过 / 0 失败**（v0.7.4 为 610 项，新增 6 项）。
+- `py -B` 纸飞机三组用例通过。
+- 最终官方包解包副本上再跑同一套：**616 项通过 / 0 失败**。
+- 语法检查：160 个文件通过。
+
+### 未覆盖
+- 测试的 `sdk` 桩没有 `resources`，实际走的是 `fs` 直读兜底；“宿主返回 Buffer”这条主路径靠读宿主实物代码判定（`local-file` 的 `read` 回 `content: Buffer`，App 侧 `reviveResourceResult` 复原 `{type:"Buffer",data}` 与 `{$bytes}`），未在实机跑过。
+- 茶话会侧端到端递图未验：需要两边都装上对应版本，在聊天里对一张图触发收图，看图库是否出现并完成认图。
+- 大图（8-10MB）是否先撞宿主 RPC 帧上限未实测。
+
 ## 2026-11-04 输入面板跟宿主的深色主题（0.7.1-dev.3）
 
 ### 问题

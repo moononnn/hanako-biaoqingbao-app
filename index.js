@@ -672,5 +672,16 @@ export default defineApp(async (sdk) => {
     record(`fusion-service 失败 ${e?.code || ""} ${e?.message || e}`);
   }
 
+  // ── 跨应用收图（茶话会 → 图库）──
+  //   茶话会在聊天里收到一张图，可以右键交给图库：入库走同一条写队列，认图放后台跑。
+  //   只认白名单调用方，别的应用叫不动；注册失败只记一笔，不影响其它功能。
+  try {
+    const { registerStickerInboundService } = await import("./lib/sticker-inbound.js");
+    await registerStickerInboundService({ sdk, allowedCallers: ["chahuahui"] });
+    record("sticker-inbound 注册完成");
+  } catch (e) {
+    record(`sticker-inbound 失败 ${e?.code || ""} ${e?.message || e}`);
+  }
+
   await sdk.logger.info("biaoqingbao-app ready");
 });
