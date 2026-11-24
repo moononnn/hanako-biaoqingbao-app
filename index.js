@@ -676,8 +676,9 @@ export default defineApp(async (sdk) => {
   //   茶话会在聊天里收到一张图，可以右键交给图库：入库走同一条写队列，认图放后台跑。
   //   只认白名单调用方，别的应用叫不动；注册失败只记一笔，不影响其它功能。
   try {
-    const { registerStickerInboundService } = await import("./lib/sticker-inbound.js");
+    const { registerStickerInboundService, registerStickerUsageAdoptService } = await import("./lib/sticker-inbound.js");
     await registerStickerInboundService({ sdk, allowedCallers: ["chahuahui"] });
+    await registerStickerUsageAdoptService({ sdk, allowedCallers: ["chahuahui"] });
     record("sticker-inbound 注册完成");
   } catch (e) {
     record(`sticker-inbound 失败 ${e?.code || ""} ${e?.message || e}`);

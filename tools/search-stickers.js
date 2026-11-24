@@ -8,6 +8,7 @@ import {
   META_FILE,
 } from '../lib/shared.js';
 import { scoreStickers } from './express.js';
+import { usageMeaningOf } from '../lib/sticker-usage.js';
 import { getAgentDialectBias } from '../lib/dialect-bridge.js';
 import {
   readGroupStore,
@@ -103,6 +104,8 @@ export async function execute(input, ctx) {
     id: s.sticker.id,
     file: s.sticker.file,
     description: s.sticker.description,
+    // 采用过的用法：有就是这张图在聊天里真正的用法，空串表示没用过。
+    usage: usageMeaningOf(s.sticker),
     tags: s.sticker.tags,
     group_ids: getStickerGroupIds(s.sticker, knownGroupIds),
     intensity: s.sticker._source?.intensity || 'medium',

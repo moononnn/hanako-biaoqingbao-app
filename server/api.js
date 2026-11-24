@@ -24,6 +24,7 @@ import {
 } from '../lib/shared.js';
 import { isHostStickerId, readHostStickerBytes } from '../lib/host-packs.js';
 import { upsertTeachingSample, removeTeachingSample } from '../lib/teaching.js';
+import { hasAdoptedUsage, scoreUsageMeaning } from '../lib/sticker-usage.js';
 import {
   GROUPS_FILE_NAME,
   MAX_GROUPS,
@@ -1451,6 +1452,10 @@ export default async function registerRoutes(app, ctx) {
     const kwList = analysis.keywords || [];
 
     const scored = stickers.map(s => {
+      if (hasAdoptedUsage(s)) {
+        const score = scoreUsageMeaning(s, { emotions: emotion, keywords: kwList });
+        return { ...s, _score: score > 0 ? score + getGroupPreferenceBonus(s, groupConfig, knownGroupIds) : 0 };
+      }
       let score = 0; const tags = s.tags || {};
       for (const kw of kwList) {
         for (const tag of (tags.keywords || [])) {

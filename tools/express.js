@@ -27,6 +27,7 @@ import { isWithinSameTurn, markStickerSent, toTurnKey } from '../lib/same-turn.j
 import { recordRecentMatch } from '../lib/recent-match.js';
 import { readContextFits } from '../lib/context-feedback.js';
 import { readAgentFits } from '../lib/agent-fit-notes.js';
+import { hasAdoptedUsage, scoreUsageMeaning } from '../lib/sticker-usage.js';
 import { readExposureStats, recordSuccessfulExposure, rerankWithExploration } from '../lib/exposure.js';
 import {
   readGroupStore,
@@ -120,6 +121,8 @@ export function applyVectorBonus(scored, allStickers, emotionVec, vectorMap, exc
 
   // 给已有打分的表情包加向量 bonus
   for (const sticker of scored) {
+    // 已经采用过用法的图不碰旧向量：它的向量是按旧标签算的，可能是错的。
+    if (hasAdoptedUsage(sticker)) continue;
     const vec = vectorMap[sticker.id];
     if (vec) {
       sticker._score += cosineSimilarity(emotionVec, vec) * 10;
@@ -130,6 +133,8 @@ export function applyVectorBonus(scored, allStickers, emotionVec, vectorMap, exc
   const scoredIds = new Set(scored.map(s => s.id));
   for (const sticker of allStickers) {
     if (scoredIds.has(sticker.id) || excludeIds.includes(sticker.id) || prefs?.vetoed?.includes(sticker.id)) continue;
+    // 同上：采用过用法的图不靠旧向量回来。
+    if (hasAdoptedUsage(sticker)) continue;
     const vec = vectorMap[sticker.id];
     if (vec) {
       const sim = cosineSimilarity(emotionVec, vec);
@@ -522,9 +527,16 @@ export function scoreStickers(stickers, emotion, excludeIds, prefs, bias = null,
   const emotions = (Array.isArray(emotion) ? emotion : [emotion]).filter(Boolean);
   const kwList = Array.isArray(keywords) ? keywords.filter(Boolean) : [];
   const scenes = Array.isArray(query.scene) ? query.scene : (query.scene ? [query.scene] : []);
+  const tone = String(query.tone || '').trim();
   return stickers
     .filter(s => !excludeIds.includes(s.id) && !prefs?.vetoed?.includes(s.id))
     .map(sticker => {
+      // 已经采用过用法的图（usage）：旧标签/旧向量说的可能就是错的，
+      // 不再拿它们说事；只有新用法本身命中当下的情绪/关键词，这张图才参选。
+      if (hasAdoptedUsage(sticker)) {
+        const usageScore = scoreUsageMeaning(sticker, { emotions, keywords: kwList, scenes, tone });
+        return { ...sticker, _score: usageScore, _usageAdopted: true };
+      }
       let emotionScore = 0;
       const emotionHitTags = [];
       const tags = sticker.tags || {};
@@ -589,7 +601,6 @@ export function scoreStickers(stickers, emotion, excludeIds, prefs, bias = null,
       }
       // 图库的强度和语气不完整：只有明确标注/文本命中才加权，缺失不猜测。
       let toneScore = 0;
-      const tone = String(query.tone || '').trim();
       if (tone && ((tags.atmosphere || []).includes(tone) || (sticker.semantic_description || '').includes(tone))) toneScore = 6;
       let intensityScore = 0;
       const strength = sticker._source?.intensity;
