@@ -2508,6 +2508,9 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
   // v0.7.7 - 把这张图的账摆给模型看：除了标签字面，它还得知道这张图被怎么用过、被夸过还是被嫌过。
   // 只读本地账本，不发请求；任何一项读不到就少说一项，不编。
   function buildStickerLedgerText({ dataDir, agentId, stickerId }) {
+    // 图库页那个「和小花聊聊」入口没有卡片记录，agentId 会是空串；
+    // 拿空 id 去查账只会得到“什么都没有”，写成“没有任何偏好记录”就是说了假话。宁可不说。
+    if (!agentId) return '';
     const parts = [];
     try {
       const prefs = JSON.parse(fs.readFileSync(path.join(dataDir, 'preferences.json'), 'utf8'));
@@ -3844,7 +3847,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
 // 卡片反馈的失败原因翻成人话；不认识的错误原样带出，方便报障。
 function friendlyCardFeedbackError(raw) {
   const text = String(raw || '');
-  if (text.includes('缺少场景情绪')) return '这张图没记下当时配它的场景情绪，应景先记不了，喜欢和不喜欢可以用';
+  if (text.includes('缺少场景情绪')) return '这张图没记下当时配它的场景情绪，「应景」和「不应景」都记不了，喜欢和不喜欢可以用';
   if (text.includes('无法安全撤销')) return '这张图的反馈状态已经变了，再点一次就好';
   return text || '反馈没记上';
 }
