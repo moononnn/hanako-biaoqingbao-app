@@ -847,6 +847,13 @@ export async function execute(input, ctx) {
       ctx?.log?.info?.(`[biaoqingbao] stickerId 指定路径拒绝: ${found.id} 已被 vetoed`);
       return reply({ ok: false, error: `表情包 "${found.id}" 已被标记为不喜欢（vetoed），拒绝发送` });
     }
+    // v0.7.8 - 手动指定也看场景账：同一张图在这个场景下被说过两次不应景，就别再硬用了。
+    // 只拦封顶那两次；被说过一次仍然放行，手动指定不是绕过用户意愿的后门，也不该一刀切。
+    const sceneMisfits = Number(effectivePrefs?.contextMisfits?.[found.id] || 0);
+    if (sceneMisfits >= 2) {
+      ctx?.log?.info?.(`[biaoqingbao] stickerId 指定路径拒绝: ${found.id} 在「${emotion}」下被说过两次不应景`);
+      return reply({ ok: false, error: `这张图在「${emotion}」这个场景下被说过两次不该用，换个场合或换张图吧` });
+    }
     best = { ...found, _score: 'manual' };
   } else {
     const allExclude = [...new Set([...(exclude_ids || []), ...getRecent(agentId)])];

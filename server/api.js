@@ -3700,6 +3700,29 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
     return json(result, result.ok ? 200 : (result.status || 400));
   });
 
+  // v0.7.8 - 卡片没存下情绪时（用户自己发的图常见），从决策日志里找这张图当时的情绪。
+  // 找不到就空着，此时「不应景」会落到「未分场景」桶，不再直接拒绝。
+  function guessStickerEmotionFromLog(stickerId, record) {
+    try {
+      const logData = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'decision-log.json'), 'utf-8'));
+      const entries = (logData.entries || [])
+        .filter((e) => e?.sticker_id === stickerId && e?.emotion && typeof e.emotion === 'string');
+      if (!entries.length) return '';
+      const cardTs = Date.parse(String(record?.createdAt || '')) || 0;
+      if (cardTs > 0) {
+        const near = entries
+          .map((e) => ({ e, diff: Math.abs(Number(e.context_ts || 0) - cardTs) }))
+          .filter((x) => x.diff < 30 * 60 * 1000)
+          .sort((a, b) => a.diff - b.diff)[0];
+        if (near) return String(near.e.emotion);
+      }
+      entries.sort((a, b) => (Number(b.context_ts) || 0) - (Number(a.context_ts) || 0));
+      return String(entries[0].emotion);
+    } catch {
+      return '';
+    }
+  }
+
   // ═══ POST /api/message-card/feedback — 聊天流图片卡上的三键反馈 ═══
   // v0.1.17 / v0.1.18 - 卡片自成一个账本：按卡片记录里的 stickerId / agentId / emotion 直接落偏好，
   // 不依赖「最近配图」记录，所以伙伴配的图和用户自己发的图都能反馈。
@@ -3726,7 +3749,8 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
     if (!stickerExists) return json({ ok: false, error: '表情包不存在: ' + stickerId }, 404);
 
     const agentId = record.agentId || 'default';
-    const emotion = record.emotion || '';
+    let emotion = record.emotion || '';
+    if (!emotion) emotion = guessStickerEmotionFromLog(stickerId, record);
     const prevFeedback = record.feedback || null;
     const prevKind = record.feedbackKind || 'image';
     // v0.7.7 - 四态：positive / negative（整图降权）/ misfit（只压这个场景）/ clear。

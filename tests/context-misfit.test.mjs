@@ -83,13 +83,40 @@ test('场景负向不写偏好文件：图库权重不该被这一笔改动', as
   assert.equal(fs.existsSync(path.join(dataDir, 'preferences.json')), false);
 });
 
-test('缺情绪或图片 id 时如实拒绝，不写坏账', async (t) => {
+test('缺情绪时落到「未分场景」桶，不再拒绝（v0.7.8）', async (t) => {
   const dataDir = fixture(t);
   const noEmotion = await applyContextMisfit({ dataDir, agentId: 'a1', contextEmotion: '', stickerId: 'stk_1' });
-  assert.equal(noEmotion.ok, false);
+  assert.equal(noEmotion.ok, true, '没记情绪也要能记上这一笔');
+  assert.equal(noEmotion.count, 1);
+
+  // 任何情绪下查账都能看到这一笔（通用桶），两次封顶后对所有情绪都生效
+  await applyContextMisfit({ dataDir, agentId: 'a1', contextEmotion: '', stickerId: 'stk_1' });
+  assert.deepEqual(readContextMisfits({ dataDir, agentId: 'a1', contextEmotion: '释然' }), { stk_1: 2 });
+  assert.deepEqual(readContextMisfits({ dataDir, agentId: 'a1', contextEmotion: '得意' }), { stk_1: 2 });
+
   const noSticker = await applyContextMisfit({ dataDir, agentId: 'a1', contextEmotion: '释然', stickerId: '' });
-  assert.equal(noSticker.ok, false);
-  assert.equal(fs.existsSync(path.join(dataDir, 'context-feedback.json')), false);
+  assert.equal(noSticker.ok, false, '没给图片还是得拒绝');
+});
+
+test('当前情绪与通用桶的笔数会合并，仍然封顶两次', async (t) => {
+  const dataDir = fixture(t);
+  await applyContextMisfit({ dataDir, agentId: 'a1', contextEmotion: '释然', stickerId: 'stk_1' });
+  await applyContextMisfit({ dataDir, agentId: 'a1', contextEmotion: '', stickerId: 'stk_1' });
+  assert.deepEqual(readContextMisfits({ dataDir, agentId: 'a1', contextEmotion: '释然' }), { stk_1: 2 });
+  assert.deepEqual(readContextMisfits({ dataDir, agentId: 'a1', contextEmotion: '得意' }), { stk_1: 1 });
+});
+
+test('手动删单条与删图都会回收空桶，账本里不留空目录', async (t) => {
+  const dataDir = fixture(t);
+  await applyContextMisfit({ dataDir, agentId: 'a1', contextEmotion: '释然', stickerId: 'stk_1' });
+  await removeContextMisfitEntry({ dataDir, agentId: 'a1', contextEmotion: '释然', stickerId: 'stk_1' });
+  let raw = JSON.parse(fs.readFileSync(path.join(dataDir, 'context-feedback.json'), 'utf8'));
+  assert.deepEqual(raw.misfits, {}, '手动删完不留空桶');
+
+  await applyContextMisfit({ dataDir, agentId: 'a1', contextEmotion: '释然', stickerId: 'stk_2' });
+  await removeStickerContextFeedback({ dataDir, stickerId: 'stk_2' });
+  raw = JSON.parse(fs.readFileSync(path.join(dataDir, 'context-feedback.json'), 'utf8'));
+  assert.deepEqual(raw.misfits, {}, '删图后也不留空桶');
 });
 
 test('快照能读出已有笔数，供卡片记录回填', async (t) => {

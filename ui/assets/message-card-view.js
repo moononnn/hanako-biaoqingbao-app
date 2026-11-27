@@ -183,6 +183,8 @@ export function mountMessageCard({ showCaption = false } = {}) {
   // 三键行真正需要的宽度：按钮 CSS 是 flex-shrink:0，加起来就是它占的地方。
   // v0.5.4 - 不用容器 offsetWidth：iframe 被宿主开窄时它已经被压扁，拿它当基准会越量越小（插件版 v0.33.73 踩过同一个坑）。
   // 首帧还没布局时（按钮 offsetWidth 全是 0）退到保守估算，宁可多留一点也不让「不喜欢」被裁。
+  // v0.7.8 - 三键的宽度就是卡片的最小宽度，不再为了消白边去缩按钮。
+  // 170 宽的图配 196 的三键行，左右各 13px；宿主给的窗宽只增不减，旧卡缩不回去，只有新卡才按新值挂载。
   const FB_ROW_FALLBACK_WIDTH = 196;
   function feedbackRowWidth() {
     if (!fbCard || fbCard.hidden || config.showFeedbackButtons === false) return 0;
@@ -470,7 +472,8 @@ export function mountMessageCard({ showCaption = false } = {}) {
     const misfit = feedback === 'misfit';
     if (misfitBtn) {
       misfitBtn.classList.toggle('on-misfit', misfit);
-      misfitBtn.textContent = misfit ? '已记：不应景' : '不应景';
+      // 选中态文案要短：窄图卡上两个胶囊并排，多两个字就会顶到边界。
+      misfitBtn.textContent = misfit ? '已记不应景' : '不应景';
     }
     syncChatEntry();
   }
