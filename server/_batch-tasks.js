@@ -14,6 +14,8 @@ import {
 } from '../lib/batch-apply.js';
 import { safeStickerPath } from '../lib/ball-core.js';
 import { withTransientRetry } from '../lib/rpc-retry.js';
+// 应用完识别结果顺手补向量：与跨应用收图、纸飞机共用同一套开关和写入规则。
+import { writeStickerVector, shouldAutoVectorOnSave } from '../lib/sticker-vectors.js';
 import { collectBatchFailures } from '../lib/batch-failures.js';
 import { avgMsPerImage } from '../lib/batch-timing.js';
 import {
@@ -233,7 +235,29 @@ async function autoApplyTaskResults(taskId) {
   markTaskApplied(taskId, items.map((item) => item.id));
   moduleCtx?.log?.info?.(`[batch] 任务 ${taskId} 已自动应用 ${items.length} 张`);
   emitBus('biaoqingbao:batch-task-auto-applied', { taskId, count: items.length });
+  // 标签已经落盘，接着把语义向量补上（后台跑，不让任务完成事件等向量）。
+  // 关掉「入库自动建向量」开关就整段跳过，不隐性花 embedding 额度。
+  void buildVectorsAfterApply(items.map((item) => item.id));
   return items.length;
+}
+
+/** 批量应用完之后补向量：逐张串行，单张失败只记日志。 */
+async function buildVectorsAfterApply(ids) {
+  let enabled = false;
+  try { enabled = shouldAutoVectorOnSave(); } catch { enabled = false; }
+  if (!enabled) return;
+  const list = Array.isArray(ids) ? ids : [];
+  if (list.length === 0) return;
+  const meta = readMeta();
+  let built = 0;
+  for (const id of list) {
+    const row = meta.find((item) => item?.id === id);
+    if (!row) continue;
+    const result = await writeStickerVector(row, { ctx: moduleCtx });
+    if (result.ok && !result.skipped) built += 1;
+    else if (!result.ok) moduleCtx?.log?.warn?.(`[batch] ${id} 向量失败: ${result.error || result.skipped}`);
+  }
+  moduleCtx?.log?.info?.(`[batch] 向量补建完成 ${built}/${list.length}`);
 }
 
 async function runWorkerPool(taskId) {

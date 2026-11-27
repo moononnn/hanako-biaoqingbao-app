@@ -2773,12 +2773,16 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
           if (sticker.semantic_description && sticker.semantic_description.trim()) {
             const embResult = await generateEmbeddings(sticker.semantic_description, ctx);
             if (embResult.ok && embResult.data[0]) {
-              const vectorsData = readVectors();
               const { model: currentModel, dimensions: currentDims } = resolveEmbeddingApi();
-              if (vectorsData.model && currentModel && vectorsData.model !== currentModel) {
-                vectorError = `向量模型已更换（${vectorsData.model} → ${currentModel}），请到图库页「图库语义索引」里整体重算`;
-                ctx?.log?.warn?.('[biaoqingbao] 单条重算被跳过:', vectorError);
-              } else {
+              // 读改写进图库写队列：网络那一步在队列外，落盘那一步在队列内重读最新。
+              // 否则重算期间别处（跨应用收图、批量识图）刚写进去的向量，会被这份旧快照整份盖掉。
+              await enqueueStickerDataWrite(() => {
+                const vectorsData = readVectors();
+                if (vectorsData.model && currentModel && vectorsData.model !== currentModel) {
+                  vectorError = `向量模型已更换（${vectorsData.model} → ${currentModel}），请到图库页「图库语义索引」里整体重算`;
+                  ctx?.log?.warn?.('[biaoqingbao] 单条重算被跳过:', vectorError);
+                  return;
+                }
                 if (!vectorsData.vectors) vectorsData.vectors = {};
                 vectorsData.vectors[sticker_id] = embResult.data[0];
                 vectorsData.generated_at = new Date().toISOString();
@@ -2786,19 +2790,21 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
                 if (!vectorsData.dimensions) vectorsData.dimensions = currentDims || 0;
                 writeVectors(vectorsData);
                 vectorOk = true;
-              }
+              });
             } else {
               vectorError = embResult.error;
               ctx?.log?.warn?.('[biaoqingbao] 重算向量失败:', embResult.error);
             }
           } else {
-            const vectorsData = readVectors();
-            if (vectorsData.vectors && vectorsData.vectors[sticker_id]) {
-              delete vectorsData.vectors[sticker_id];
-              vectorsData.generated_at = new Date().toISOString();
-              writeVectors(vectorsData);
-              vectorOk = true;
-            }
+            await enqueueStickerDataWrite(() => {
+              const vectorsData = readVectors();
+              if (vectorsData.vectors && vectorsData.vectors[sticker_id]) {
+                delete vectorsData.vectors[sticker_id];
+                vectorsData.generated_at = new Date().toISOString();
+                writeVectors(vectorsData);
+                vectorOk = true;
+              }
+            });
           }
           ctx?.log?.info?.(`[biaoqingbao] sticker ${sticker_id} 标签已修改（vector: ${vectorOk ? 'ok' : 'fail'}）`);
         } catch (e) {
@@ -3333,8 +3339,9 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
 
       // 分批调用（每批 20 条，避免单次请求太大）
       const BATCH_SIZE = 20;
-      // v0.19.5 - 模型已更换时从空集合开始，旧模型向量不再残留，避免不同维度向量混库
-      const vectors = modelChanged ? {} : { ...existingVectors };
+      // 只收「本次实际算出来」的那些：合并时不能用开跑前的旧快照，
+      // 否则重算期间被改标签重算过的新向量会被旧值盖回去，被删掉的图也会复活。
+      const computed = {};
       let processed = 0;
       let failed = 0;
       const errors = [];
@@ -3350,7 +3357,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
         }
         for (let j = 0; j < batch.length; j++) {
           if (result.data[j]) {
-            vectors[batch[j].id] = result.data[j];
+            computed[batch[j].id] = result.data[j];
             processed++;
           } else {
             failed++;
@@ -3371,14 +3378,22 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
         });
       }
 
-      const vectorsData = {
-        version: 1,
-        model,
-        dimensions,
-        generated_at: new Date().toISOString(),
-        vectors,
-      };
-      writeVectors(vectorsData);
+      // 落盘进写队列，并在队列里重读最新：整体重算要跑几十秒，
+      // 期间跨应用收图会自动写入单张向量，拿开跑前的旧快照整份写回会把它们吞掉。
+      await enqueueStickerDataWrite(() => {
+        const latest = readVectors();
+        // 模型换了且库还停在旧模型：旧向量全部作废，从空集合重建；
+        // 否则以最新快照为底，只叠本次真算出来的那些 id：
+        //   期间新入库的（本次没算）保留；期间被删的不会复活；期间改标签重算的新值不会被旧值盖回。
+        const base = (modelChanged && latest.model !== model) ? {} : (latest.vectors || {});
+        writeVectors({
+          version: 1,
+          model,
+          dimensions,
+          generated_at: new Date().toISOString(),
+          vectors: { ...base, ...computed },
+        });
+      });
 
       return json({
         ok: true,

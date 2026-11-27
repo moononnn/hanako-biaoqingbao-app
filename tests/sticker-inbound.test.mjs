@@ -133,3 +133,37 @@ test('后台认图失败：图留着，只缺标签，不影响收图结果', as
   assert.equal(row.tagged_at, undefined);
   assert.deepEqual(row.tags.emotion, []);
 });
+
+test('认图撞上瞬时错误：退避重试一次就救回来，不再扔进未识图', async () => {
+  let calls = 0;
+  const tagger = async () => {
+    calls += 1;
+    // 第一次模拟模型超时（rpc-retry 认这类可重试），第二次正常返回
+    if (calls === 1) return { ok: false, error: 'MODEL_TIMEOUT 模型调用超时' };
+    return {
+      ok: true,
+      data: { description: '重试后成功', semantic_description: '适合安慰人', emotion: ['心疼'], scene: [], keywords: ['抱抱'] },
+    };
+  };
+  const { entry } = await setup(tagger);
+  const result = await entry.handler({ sourcePath: tempImage() }, { callerAppId: 'chahuahui' });
+  assert.equal(result.ok, true);
+  await wait(2400);
+
+  const row = shared.readMeta().find((item) => item.id === result.id);
+  assert.equal(calls, 2, '超时这类错误要重试一次');
+  assert.equal(row.description, '重试后成功');
+  assert.ok(row.tagged_at, '重试成功后要盖识图时间');
+});
+
+test('认图撞上确定性错误：不白花钱重试', async () => {
+  let calls = 0;
+  const tagger = async () => {
+    calls += 1;
+    return { ok: false, error: '未配置视觉模型，请先在设置里选择或填写模型' };
+  };
+  const { entry } = await setup(tagger);
+  await entry.handler({ sourcePath: tempImage() }, { callerAppId: 'chahuahui' });
+  await wait(200);
+  assert.equal(calls, 1, '配置类错误重试也只会得到同一个结果');
+});
