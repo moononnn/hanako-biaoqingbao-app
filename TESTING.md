@@ -1,5 +1,30 @@
 # 自动测试
 
+## 2026-11-27 跨应用收图一次收到底：重试 + 补向量 + 错误透出（0.7.6-dev.3）
+
+### 问题
+- 茶话会右键「收进表情包」后，图在表情包应用里停在「未识图」，得人工再点一次识图。日志证据：2026-11-26 10:46 连收两张（stk_637 / stk_638），入库后 **0.77 秒**就报「thinking 模型未输出 JSON（finish_reason=）」，而正常识图要 10 秒以上。同一时段宿主日志成片出现 `App RPC concurrency limit reached`（hooks 全在撞）。
+- 两个真问题：① 宿主模型通道把上游错误包成一条 `{type:"error"}` 事件，`callHostModel` 却按 `ok:true` 返回空正文，真实原因（并发槽满、额度、限流）全被吞成「未输出 JSON」；② 单张收图这条路没接 `withTransientRetry`，一次失败就判死，图挂在未识图里等人来补。
+- 顺带：识图成功后只写标签，不建向量，语义检索搜不到这张（库里 338 张图只有 336 条向量，缺的正好是那两张）。
+
+### 改动
+- `lib/model-host.js`：`callHostModel` 在「有 error 事件且没有正文」时返回 `ok:false`，把上游原话带出来；有正文时仍按成功返回，不让尾部噪声抢走结果。
+- `lib/sticker-inbound.js`：`applyVisionTags` 改用 `withTransientRetry`（retries 2、退避 1.5s），并发槽满与模型超时退避重试，配置类确定性错误不重试；认图成功后接着 `buildStickerVector` 补向量，失败只记日志，不影响入库与标签。
+- 新增 `lib/sticker-vectors.js`：向量写入规则收成一份（`writeStickerVector` / `writeStickerVectors` / `shouldAutoVectorOnSave`），带模型变更保护与串行写入；联网生成那一步不进写队列。
+- `lib/ball.js`：`writeBallStickerVector` 改成调新模块的薄壳，并**把宿主 ctx 传进 embedding**（原来没传，App 里全局 fetch 出不去）；`shouldAutoVectorOnSave` 移到新模块后原样 re-export。
+- `server/_batch-tasks.js`：`autoApplyTaskResults` 应用完识别结果后，后台补建这批图的向量（受同一个开关控制）。
+
+### 验证
+- `node --test tests/sticker-vectors.test.mjs` **7 项通过 / 0 失败**（新增：正常写入、无语义跳过、缺编号不花额度、接口失败不写坏库、模型变更不混写、批量版、开关口径）。
+- `node --test tests/sticker-inbound.test.mjs` **8 项通过 / 0 失败**（新增两条：瞬时错误重试后救回、确定性错误不重试）。
+- 全量 `node --test tests/*.test.mjs`：**663 项通过 / 0 失败**（原 656 项 + 新增 7 项）。
+- 实机：宿主 reload 后 `plugin-loader-v2` 记为 `v0.7.6-dev.3 loaded`，`sticker/add-from-chat` 与 `sticker/adopt-usage` 两个服务都注册成功；`POST /api/vision-test` 走 magpie/workbuddy/deepseek-v4.1-flash 返回 `{"ok":true,"data":{"reply":"黄色"}}`（1x1 纯色图答错颜色属模型精度问题，通道本身通）。
+- 数据修复：用 embedding 配置（BAAI/bge-m3，1024 维）给 stk_637 / stk_638 补了向量，vectors.json 从 336 条变 338 条，备份在同目录 `vectors.json.bak-before-637-638`。
+
+### 未覆盖
+- 端到端未实机重跑：需要茶话会里再右键收一张新图，看日志是否出现「认图完成 → 向量已建」。
+- 「并发槽满」是从日志时序 + 同段宿主日志推断的高置信原因，没有当场抓到那条 error 事件的原文（改动后下次失败会直接把原文记进日志）。
+
 ## 2026-11-22 跨应用收图服务（0.7.5）
 
 ### 改动
