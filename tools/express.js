@@ -28,7 +28,7 @@ import { imageSizeFromBuffer } from '../lib/image-size.js';
 import { safeStickerPath } from '../lib/ball-core.js';
 import { isWithinSameTurn, markStickerSent, toTurnKey } from '../lib/same-turn.js';
 import { recordRecentMatch } from '../lib/recent-match.js';
-import { readContextFits } from '../lib/context-feedback.js';
+import { readContextFits, readContextMisfits } from '../lib/context-feedback.js';
 import { readAgentFits } from '../lib/agent-fit-notes.js';
 import { hasAdoptedUsage, scoreUsageMeaning } from '../lib/sticker-usage.js';
 import { verifyPick, buildCandidateList } from '../lib/pick-verify.js';
@@ -829,6 +829,8 @@ export async function execute(input, ctx) {
   const effectivePrefs = {
     ...prefs,
     contextFits: readContextFits({ dataDir, agentId, contextEmotion: emotion }),
+    // v0.7.7 - 「这次不应景」的场景负向账：只在这种情绪下把这张图往后放，与整图 dislikes 分开。
+    contextMisfits: readContextMisfits({ dataDir, agentId, contextEmotion: emotion }),
     // v0.34.57 - 伙伴自评「跑偏」的降权（用户关掉自评时 readAgentFits 返回空对象，自然失效）
     agentFits: readAgentFits({ dataDir, agentId, contextEmotion: emotion }),
   };

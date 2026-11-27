@@ -111,7 +111,7 @@ let latestInputButtonSync = { ok: false, synced: 0, failed: 0, total: 0, reason:
 // 请求序号：两个保存请求交叠时，只有最后一次的结果算数。
 // 没有它的话，旧的后台任务会在晚一步时把新结果盖掉，界面就会显示上一次的旧状态。
 let inputButtonSyncSeq = 0;
-import { removeStickerContextFeedback, readContextFeedback, removeContextFitEntry, applyContextFit } from '../lib/context-feedback.js';
+import { removeStickerContextFeedback, readContextFeedback, removeContextFitEntry, applyContextFit, applyContextMisfit, readContextMisfits, removeContextMisfitEntry } from '../lib/context-feedback.js';
 import { readAgentFitNotes, listAgentFitNotes, removeAgentFitEntry, removeStickerAgentFitNotes } from '../lib/agent-fit-notes.js';
 import { removeStickerRecentMatches } from '../lib/recent-match.js';
 import {
@@ -119,7 +119,7 @@ import {
   getRecentBallMatch, submitBallFeedback, consumeBallDismissed,
   applyBallFeedbackEffects, feedbackMessage,
 } from '../lib/ball.js';
-import { readMessageCard, readMessageCardChat, saveMessageCardChat, setMessageCardFeedback, nextPositiveKind } from '../lib/ball-message-card.js';
+import { readMessageCard, readMessageCardChat, saveMessageCardChat, setMessageCardFeedback, nextCardFeedbackState } from '../lib/ball-message-card.js';
 // v0.1.30 - 「默认跟随当前模型」：读这位伙伴当前在用的对话模型
 import { readAgentChatModel } from '../lib/agent-model.js';
 import { callConfiguredTextModel, extractTextResponse } from '../lib/text-model.js';
@@ -2230,6 +2230,23 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
     }
   });
 
+  // ═══ POST /api/context-feedback/misfit-remove — 删除单条「这次不应景」记录（管理页手动移除） ═══
+  // v0.7.7 - 结构：misfits[agentId][contextEmotion][stickerId] = { count, lastAt }
+  app.post('/api/context-feedback/misfit-remove', async (c) => {
+    try {
+      const body = await c.req.json();
+      const result = await removeContextMisfitEntry({
+        dataDir: DATA_DIR,
+        agentId: body?.agentId || 'default',
+        contextEmotion: body?.contextEmotion ?? body?.context ?? '',
+        stickerId: body?.stickerId,
+      });
+      return json(result, result.ok ? 200 : (result.status || 400));
+    } catch (e) {
+      return json({ ok: false, error: e.message }, 500);
+    }
+  });
+
   // ═══ GET /api/agent-fit-notes — 读取伙伴配图自评记录（管理页只读展示） ═══
   // v0.34.57 - 结构：byAgent[agentId][contextEmotion][stickerId] = { off, on, lastAt, note }
   app.get('/api/agent-fit-notes', (c) => {
@@ -2417,12 +2434,20 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
   // 系统 prompt：指导 AI 怎么跟用户聊标签调整
   // v0.1.29 - 入口从「图库列表里的按钮」换到了聊天流卡片上（用户点完「不喜欢」后点「和小花聊聊」）：
   // 把场景说清楚，并明确「不喜欢」可能指两件事（标签认错了 / 这张图跟当时聊的话题不搭），先分清再动手。
-  const STICKER_CHAT_PROMPT = `你是表情包标签调整的伙伴。用户在聊天里对一张表情包点了「不喜欢」，现在想跟你聊聊这张图哪里不合适。
+  const STICKER_CHAT_PROMPT = `你是表情包使用反馈的伙伴。用户在聊天里对一张表情包点了「不喜欢」，现在想聊聊这张图哪里不合适。
+
+你手上已经有三份材料，不用再问用户重讲：
+- 【当前标签】：这张图现在被标成什么
+- 【这次配图的现场】：谁配的这张图、配图时判断的情绪、落在哪一轮对话。情绪是配图那一方（也就是你）判断出来的，用户从没说过；所以说话时要写「我配这张图时判断的是……」，不能写成「你想表达的是……」。写着「就是这一次」的话，那就是用户刚看到的那一手
+- 【这张图的账】：被喜欢过几次、被点过几次不喜欢、在哪些场景被夸过应景或被说过不应景
 
 你的能力边界：
-- 你看不到图片，只能看到当前的标签字面 + 用户说的话；不要凭空想象画面里有什么
-- 用户说的「不合适」可能是标签认错了，也可能是这张图的调性跟当时聊的话题不搭——先分清是哪种，再谈怎么改
-- 如果用户其实只是不想再看到这张图，而不是标签错了，就直说这一点，告诉他不用改标签也能生效，不要硬改
+- 你看不到图片，不要凭空想象画面里有什么；但当时是什么情绪、用在哪句话后面，你是知道的
+- 用户说的「不合适」有三种可能：标签认错了、这张图本身不行、只是这一手场合不对。先从现场和账判断是哪一种，实在判不出来再问一句
+- 如果现场的情绪和标签里的场景对不上（比如这次是释然，标签里只有晚安），先把这个矛盾指出来，它通常就是问题本身
+- 用户抱怨「不搭」时，先认清这是你自己那一次配得不对，不是用户发错了图，也不要把情绪归到用户头上
+- 如果用户只是这一手场合不对，别建议改图，也别劝他拉黑；说清「这次不该用它」，要改就往场景上改，不动其他场合
+- 如果用户其实是不想再看到这张图，就直说这一点，告诉他不用改标签也能生效，不要硬改
 - 用户说的不够清楚就直接问，别猜
 
 对话节奏：
@@ -2480,6 +2505,52 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
   }
 
   // ── POST /api/sticker/chat ──
+  // v0.7.7 - 把这张图的账摆给模型看：除了标签字面，它还得知道这张图被怎么用过、被夸过还是被嫌过。
+  // 只读本地账本，不发请求；任何一项读不到就少说一项，不编。
+  function buildStickerLedgerText({ dataDir, agentId, stickerId }) {
+    const parts = [];
+    try {
+      const prefs = JSON.parse(fs.readFileSync(path.join(dataDir, 'preferences.json'), 'utf8'));
+      const mappings = Array.isArray(prefs?.users?.[agentId]?.mappings) ? prefs.users[agentId].mappings : [];
+      let liked = 0;
+      let vetoed = 0;
+      let disliked = 0;
+      const dislikeCtx = [];
+      for (const m of mappings) {
+        const ctx = String(m?.context?.emotion || '') || '（未分场景）';
+        if ((m.preferred_ids || []).includes(stickerId)) liked += 1;
+        if ((m.vetoed_ids || []).includes(stickerId)) vetoed += 1;
+        const dc = Number(m?.dislike_counts?.[stickerId] || 0);
+        if (dc > 0) {
+          disliked += dc;
+          dislikeCtx.push(ctx + '×' + dc);
+        }
+      }
+      const bits = [
+        liked ? '被喜欢过 ' + liked + ' 次' : '',
+        disliked ? '被点过不喜欢 ' + disliked + ' 次' + (dislikeCtx.length ? '（' + dislikeCtx.join('、') + '）' : '') : '',
+        vetoed ? '已被拉黑' : '',
+      ].filter(Boolean);
+      parts.push('整体：' + (bits.length ? bits.join('，') : '没有任何整体偏好记录'));
+    } catch {}
+    try {
+      const cf = JSON.parse(fs.readFileSync(path.join(dataDir, 'context-feedback.json'), 'utf8'));
+      const fit = [];
+      const misfit = [];
+      for (const [ctx, bucket] of Object.entries(cf?.byAgent?.[agentId] || {})) {
+        const count = Number(bucket?.[stickerId]?.count || 0);
+        if (count > 0) fit.push(ctx + '×' + count);
+      }
+      for (const [ctx, bucket] of Object.entries(cf?.misfits?.[agentId] || {})) {
+        const count = Number(bucket?.[stickerId]?.count || 0);
+        if (count > 0) misfit.push(ctx + '×' + count);
+      }
+      if (fit.length) parts.push('场景里被夸过应景：' + fit.join('、'));
+      if (misfit.length) parts.push('场景里被说过不应景：' + misfit.join('、'));
+    } catch {}
+    return parts.length ? '\n\n【这张图的账】\n' + parts.join('\n') : '';
+  }
+
   app.post('/api/sticker/chat', async (c) => {
     try {
       cleanupChatSessions();
@@ -2538,38 +2609,95 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
         '关键词：' + ((tags.keywords || []).join('、') || '（无）'),
       ].join('\n');
 
-      // v0.18.0 - 历史定位：找这张图上次是何时何地发的，拿当时那段对话作为参考
+      // v0.18.0 - 历史定位：找这张图最近一次何时何地发的，拿当时那段对话作为参考
+      // v0.7.7 - 补上「本次现场」与这张图的账。三段各自 try：任何一段读不到，
+      // 只少说那一句，不能把已经拿到的现场一起打包丢掉。
       let usageContextText = '';
-      try {
-        const logRaw = fs.readFileSync(path.join(DATA_DIR, 'decision-log.json'), 'utf-8');
-        const logData = JSON.parse(logRaw);
-        const entries = (logData.entries || [])
-          .filter(e => e.sticker_id === sticker_id && e.session_path && e.context_ts)
-          .sort((a, b) => (b.context_ts || 0) - (a.context_ts || 0));
+      const contextErrors = [];
+      {
+        const parts = [];
 
-        for (const entry of entries) {
-          const sessionFile = resolveLoggedSessionPath(entry.session_path);
-          if (!sessionFile || !fs.existsSync(sessionFile)) continue;
-          const found = findMessageNearTs(sessionFile, entry.context_ts, 'assistant');
-          if (!found) continue;
-
-          const beforeText = found.before ? extractMessageText(found.before.content) : '';
-          const targetText = extractMessageText(found.target.content);
-          const afterText = found.after ? extractMessageText(found.after.content) : '';
-          const trim = (s) => s.length > 200 ? s.slice(0, 200) + '…' : s;
-
-          usageContextText = [
-            '',
-            '【这张图上次被使用的语境】',
-            '时间：' + entry.ts,
-            beforeText ? '上一轮用户说：' + trim(beforeText) : '',
-            '这张图出现在助手回复里：' + trim(targetText),
-            afterText ? '下一轮对话：' + trim(afterText) : '',
-          ].filter(Boolean).join('\n');
-          break; // 只用最近的次
+        try {
+          const sceneLines = [];
+          // v0.7.7 - 用第一人称写：这段是给「正在聊天的那个伙伴」看的，写「伙伴」容易被理解成对面的人。
+          // 配图的情绪也是伙伴自己判的，不是用户说的，否则模型会把「恍然」按到用户头上。
+          if (cardRecord?.sender === 'partner') {
+            sceneLines.push('这张图是我在回复里自己配的，不是用户发来的；用户没提过要配图，也没说过下面这个情绪');
+            if (cardRecord?.emotion) sceneLines.push('我配这张图时判断的情绪：' + String(cardRecord.emotion));
+          } else if (cardRecord?.sender) {
+            sceneLines.push('这张图是用户发来的，不是我自己挑的');
+            if (cardRecord?.emotion) sceneLines.push('当时的情绪语境：' + String(cardRecord.emotion));
+          } else if (cardRecord?.emotion) {
+            sceneLines.push('当时的情绪语境：' + String(cardRecord.emotion));
+          }
+          if (cardRecord?.createdAt) sceneLines.push('发出时间：' + String(cardRecord.createdAt));
+          if (sceneLines.length) parts.push('\n\n【这次配图的现场】\n' + sceneLines.join('\n'));
+        } catch (error) {
+          contextErrors.push('scene: ' + (error?.message || error));
         }
-      } catch (e) {
-        // 查不到 context 就静默跳过，不报错
+
+        try {
+          const cardTs = Date.parse(String(cardRecord?.createdAt || '')) || 0;
+          const logRaw = fs.readFileSync(path.join(DATA_DIR, 'decision-log.json'), 'utf-8');
+          const logData = JSON.parse(logRaw);
+          const entries = (logData.entries || [])
+            .filter(e => e.sticker_id === sticker_id && e.session_path && e.context_ts)
+            .sort((a, b) => (b.context_ts || 0) - (a.context_ts || 0));
+
+          for (const entry of entries) {
+            const sessionFile = resolveLoggedSessionPath(entry.session_path);
+            // 宿主的 Node 权限模型下，读未授权的会话目录会抛 ERR_ACCESS_DENIED，
+            // 而 fs.existsSync 也会跟着抛。包起来：读不了就跳过这一条，不能连累现场和账。
+            let sessionReadable = false;
+            try { sessionReadable = !!sessionFile && fs.existsSync(sessionFile); } catch { sessionReadable = false; }
+            if (!sessionReadable) continue;
+            const found = findMessageNearTs(sessionFile, entry.context_ts, 'assistant');
+            if (!found) continue;
+
+            const beforeText = found.before ? extractMessageText(found.before.content) : '';
+            const targetText = extractMessageText(found.target.content);
+            const afterText = found.after ? extractMessageText(found.after.content) : '';
+            const trim = (s) => s.length > 200 ? s.slice(0, 200) + '…' : s;
+            // 卡片发出前后 15 分钟内的记录，就是用户现在拿来说的这一张；更早的才算「上次」。
+            const nearThisCard = cardTs > 0 && Math.abs(Number(entry.context_ts) - cardTs) < 15 * 60 * 1000;
+
+            parts.push([
+              nearThisCard ? '\n【就是这一次：用户刚看到的这一手】' : '\n【这张图上一次被使用的语境】',
+              '时间：' + entry.ts,
+              entry.emotion ? '当时选它的情绪：' + String(entry.emotion) : '',
+              beforeText ? '上一轮用户说：' + trim(beforeText) : '',
+              '这张图出现在助手回复里：' + trim(targetText),
+              afterText ? '下一轮对话：' + trim(afterText) : '',
+            ].filter(Boolean).join('\n'));
+            break; // 只用最近的这一条
+          }
+        } catch (error) {
+          contextErrors.push('log: ' + [error?.code, error?.path, error?.message || String(error)].filter(Boolean).join(' | '));
+        }
+
+        try {
+          const ledgerText = buildStickerLedgerText({ dataDir: DATA_DIR, agentId, stickerId: sticker_id });
+          if (ledgerText) parts.push(ledgerText);
+        } catch (error) {
+          contextErrors.push('ledger: ' + (error?.message || error));
+        }
+
+        usageContextText = parts.join('');
+
+        // v0.7.7 - 排障用：只记段落名、长度和失败原因，不记聊天正文。
+        try {
+          appendBoundedLog(path.join(DATA_DIR, 'chat-context-debug.log'), JSON.stringify({
+            at: new Date().toISOString(),
+            sticker_id,
+            agent: agentId,
+            hasCard: !!cardRecord,
+            emotion: String(cardRecord?.emotion || ''),
+            segments: ['这次配图的现场', '就是这一次', '上一次', '这张图的账'].filter((name) => usageContextText.includes(name)),
+            contextChars: usageContextText.length,
+            errors: contextErrors,
+            systemChars: (STICKER_CHAT_PROMPT + '\n\n' + currentTagsText + usageContextText).length,
+          }) + '\n');
+        } catch { /* 记不上不影响聊天 */ }
       }
 
       const messages = [
@@ -3579,8 +3707,9 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
     const body = await c.req.json().catch(() => ({}));
     const id = String(body?.id || '').trim();
     const tapped = String(body?.feedbackKind || '').trim();
-    if (!['image', 'context', 'negative'].includes(tapped)) {
-      return json({ ok: false, error: 'feedbackKind 必须是 image、context 或 negative' }, 400);
+    // v0.7.7 - misfit：点「这次不应景」，把这一笔从整图不喜欢改成场景账。
+    if (!['image', 'context', 'negative', 'misfit'].includes(tapped)) {
+      return json({ ok: false, error: 'feedbackKind 必须是 image、context、negative 或 misfit' }, 400);
     }
     const record = readMessageCard(DATA_DIR, id);
     if (!record) return json({ ok: false, error: '这条图片记录已不可用' }, 404);
@@ -3597,10 +3726,11 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
     const emotion = record.emotion || '';
     const prevFeedback = record.feedback || null;
     const prevKind = record.feedbackKind || 'image';
-    const kind = tapped === 'negative' ? null : nextPositiveKind(prevFeedback, prevKind, tapped);
-    const nextFeedback = tapped === 'negative'
-      ? (prevFeedback === 'negative' ? 'clear' : 'negative')
-      : (kind === null ? 'clear' : 'positive');
+    // v0.7.7 - 四态：positive / negative（整图降权）/ misfit（只压这个场景）/ clear。
+    // 规则收在 nextCardFeedbackState 里，和 UI 三键同一份；这里只负责按前后差异买卖账。
+    const nextState = nextCardFeedbackState(prevFeedback, prevKind, tapped);
+    const nextFeedback = nextState.feedback;
+    const kind = nextState.kind;
 
     const hasPref = (feedback, k) => feedback === 'negative' || (feedback === 'positive' && (k === 'image' || k === 'both'));
     const hasCtx = (feedback, k) => feedback === 'positive' && (k === 'context' || k === 'both');
@@ -3608,6 +3738,8 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
     const prevCtx = hasCtx(prevFeedback, prevKind);
     const nextPref = hasPref(nextFeedback, kind || 'image');
     const nextCtx = hasCtx(nextFeedback, kind || 'image');
+    const prevMisfit = prevFeedback === 'misfit';
+    const nextMisfit = nextFeedback === 'misfit';
     const fbBase = record.feedbackBase && typeof record.feedbackBase === 'object' ? record.feedbackBase : {};
 
     // 记录里的快照可能因上一次失败重写而失效；失效就按当前偏好文件现场重造一份，撤销永远有据可依。
@@ -3638,9 +3770,35 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
       }).catch((error) => ({ ok: false, error: error?.message || String(error) }));
       if (!cleared.ok) ctx?.log?.warn?.('[biaoqingbao] 卡片反馈撤销应景未成功：' + (cleared.error || ''));
     }
+    // v0.7.7 - 从「这次不应景」撤回来（再点一次，或改点别的）
+    if (prevMisfit && !nextMisfit) {
+      const cleared = await applyContextMisfit({
+        dataDir: DATA_DIR, stickerId, agentId, contextEmotion: emotion,
+        action: 'restore', restoreSnapshot: fbBase.misfit,
+      }).catch((error) => ({ ok: false, error: error?.message || String(error) }));
+      if (!cleared.ok) ctx?.log?.warn?.('[biaoqingbao] 卡片反馈撤销场景负向未成功：' + (cleared.error || ''));
+    }
 
     let applied = { ok: true, feedback: null, feedbackKind: null, dislike_count: 0, feedbackBase: null };
-    if (nextFeedback !== 'clear') {
+    if (nextMisfit) {
+      applied = await applyContextMisfit({
+        dataDir: DATA_DIR, stickerId, agentId, contextEmotion: emotion, action: 'add',
+      });
+      if (!applied.ok) {
+        // 目标没写上：把刚撤掉的整图偏好尽力加回来，不让账本停在中间。
+        if (prevPref && !nextPref) {
+          await applyPreferenceFeedback({
+            dataDir: DATA_DIR, stickerId, agentId, contextEmotion: emotion, contextKeywords: '',
+            feedbackType: prevFeedback === 'negative' ? 'negative' : 'positive',
+          }).catch(() => {});
+        }
+        return json({ ok: false, error: friendlyCardFeedbackError(applied.error) }, applied.status || 400);
+      }
+      applied = {
+        ok: true, feedback: 'misfit', feedbackKind: null, dislike_count: 0,
+        feedbackBase: { preference: null, context: null, misfit: applied.snapshot || null },
+      };
+    } else if (nextFeedback) {
       applied = await applyBallFeedbackEffects({ dataDir: DATA_DIR, stickerId, agentId, emotion, feedback: nextFeedback, feedbackKind: kind });
       if (!applied.ok) {
         // 目标没写上：把刚撤掉的旧偏好尽力加回来，不让账本停在中间。
@@ -3654,16 +3812,21 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
       }
     }
     const updated = setMessageCardFeedback(DATA_DIR, record, {
-      feedback: nextFeedback === 'clear' ? null : nextFeedback,
+      feedback: nextFeedback || null,
       feedbackKind: nextFeedback === 'positive' ? (applied.feedbackKind || kind) : null,
-      feedbackBase: nextFeedback === 'clear' ? null : (applied.feedbackBase || null),
+      // 三个维度的快照各留一个键，未涉及的就是 null，不会拿着已失效的旧快照去撤回。
+      feedbackBase: nextFeedback ? {
+        preference: applied.feedbackBase?.preference ?? null,
+        context: applied.feedbackBase?.context ?? null,
+        misfit: nextMisfit ? (applied.feedbackBase?.misfit ?? null) : null,
+      } : null,
     });
     return json({
       ok: true,
       feedback: updated.feedback,
       feedbackKind: updated.feedbackKind,
       dislike_count: Number(applied.dislike_count || 0),
-      message: feedbackMessage(nextFeedback, updated.feedbackKind),
+      message: feedbackMessage(nextFeedback || 'clear', updated.feedbackKind),
     });
   });
   // ═══ GET /api/message-card-context — 流内卡认不出自己记录时的现场记录（排障用） ═══

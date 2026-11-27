@@ -34,9 +34,13 @@ img{max-height:min(320px, calc(100vh - 12px))}
 .status:empty{display:none}
 /* v0.1.29 - 点「不喜欢」后的「和小花聊聊」：聊天面板就长在这张卡片里，不另开一屏；
    建议卡跟着消息流一起滚，改完当场给回执。面板高度写死像素、不用 vh（vh 会被上报高度反向驱动）。 */
-.fb-chat-row{display:flex;justify-content:center;width:max-content;max-width:100%}
+.fb-chat-row{display:flex;justify-content:center;align-items:center;gap:10px;width:max-content;max-width:100%}
 .fb-chat-btn{border:1px solid #e6b3c4;border-radius:999px;background:#fff7fa;color:#b0546e;font-size:12px;padding:4px 14px;cursor:pointer;transition:background .15s;flex-shrink:0;white-space:nowrap}
 .fb-chat-btn:hover{background:#fde9f0}
+/* v0.7.7 - 点过「不喜欢」之后的进阶一档：只记这个场景，不动图库权重 */
+.fb-misfit-btn{border:1px solid #c9d6dd;border-radius:999px;background:#f6f9fa;color:#4d6a76;font-size:12px;padding:4px 12px;cursor:pointer;transition:background .15s;flex-shrink:0;white-space:nowrap}
+.fb-misfit-btn:hover{background:#ecf3f5}
+.fb-misfit-btn.on-misfit{background:#e3eef2;border-color:#a9c3cd;color:#2f4f5b}
 .chat-panel{display:flex;flex-direction:column;gap:6px;width:100%;height:340px;padding:8px;border:1px solid var(--line);border-radius:12px;background:#fbfdfc}
 .chat-head{display:flex;align-items:center;gap:6px;padding-bottom:6px;border-bottom:1px solid var(--line)}
 .chat-thumb{width:28px;height:28px;max-height:28px;border-radius:6px;object-fit:cover;margin:0}
@@ -81,6 +85,7 @@ img{max-height:min(320px, calc(100vh - 12px))}
     <span class="fb-toast" id="fb-toast" role="status"></span>
   </div>
   <div class="fb-chat-row" id="fb-chat-row" hidden>
+    <button class="fb-misfit-btn" id="fb-misfit" type="button">不应景</button>
     <button class="fb-chat-btn" id="fb-chat-btn" type="button">和小花聊聊</button>
   </div>
   <section class="chat-panel" id="chat-panel" hidden aria-label="和小花聊聊这张图">

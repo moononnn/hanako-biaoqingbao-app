@@ -3463,6 +3463,37 @@
           }
           html += '</div>';
         }
+        // v0.7.7 - 「这次不应景」账：点过不喜欢的降级档，只压这个场景，图库权重没动
+        var misfitEntries = [];
+        if (em) {
+          var mfByAgent = (window.__CONTEXT_FEEDBACK__ || {}).misfits || {};
+          var mfBuckets = mfByAgent[meta.agent] || mfByAgent.default;
+          if (mfBuckets && typeof mfBuckets === 'object') {
+            for (var mfCtx in mfBuckets) {
+              if (!(mfCtx && (em.includes(mfCtx) || mfCtx.includes(em)))) continue;
+              var mfBucket = mfBuckets[mfCtx] || {};
+              for (var mfId in mfBucket) {
+                var mfEntry = mfBucket[mfId];
+                if (mfEntry && Number(mfEntry.count) > 0) {
+                  misfitEntries.push({ id: mfId, count: Number(mfEntry.count) || 0, context: mfCtx });
+                }
+              }
+            }
+          }
+        }
+        if (misfitEntries.length > 0) {
+          html += '<div style="display:flex;align-items:center;gap:4px;margin-top:3px;flex-wrap:wrap">';
+          html += '<span style="color:#b0546e;font-size:11px;font-weight:600;flex-shrink:0">不应景 ' + misfitEntries.length + ' 张</span>';
+          for (var mi = 0; mi < misfitEntries.length; mi++) {
+            var mfe = misfitEntries[mi];
+            html += '<span class="pref-chip">'
+              + '<img class="pref-thumb" src="' + withAuth(API + '/api/image?id=' + encodeURIComponent(mfe.id)) + '" onerror="this.style.display=\'none\'" alt="">'
+              + '<span style="font-size:10px;color:#b0546e;font-weight:600" title="在「' + escHtml(mfe.context) + '」场景被说过 ' + mfe.count + ' 次不应景，只影响这个场景">×' + mfe.count + '</span>'
+              + '<button class="pref-x" data-act="remove-context-misfit" data-sticker="' + escHtml(mfe.id) + '" data-emotion="' + escHtml(mfe.context) + '" title="移除这条不应景记录">×</button>'
+              + '</span>';
+          }
+          html += '</div>';
+        }
         html += '</div>';
       }
       html += '</div>';
@@ -3618,6 +3649,15 @@
         var fitEmotion = btn.getAttribute('data-emotion') || '';
         callRemoveContextFit({ agentId: agent, contextEmotion: fitEmotion, stickerId: fitStickerId });
       }
+
+      // v0.7.7 - 「这次不应景」的移除入口：账要看得见也删得动
+      if (act === 'remove-context-misfit') {
+        callRemoveContextMisfit({
+          agentId: agent,
+          contextEmotion: btn.getAttribute('data-emotion') || '',
+          stickerId: btn.getAttribute('data-sticker'),
+        });
+      }
     });
   }
 
@@ -3665,6 +3705,27 @@
         await refreshContextFeedback();
         await refreshPreferences();
         toast('已移除这次应景');
+      } else {
+        toast('移除失败: ' + (data.error || ''), true);
+      }
+    } catch (err) {
+      toast('移除出错: ' + err.message, true);
+    }
+  }
+
+  // v0.7.7 - 场景负向账的移除：跟应景同一套交互，账看得见也删得动
+  async function callRemoveContextMisfit(body) {
+    try {
+      var resp = await apiFetch(withAuth(API + '/api/context-feedback/misfit-remove'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        await refreshContextFeedback();
+        await refreshPreferences();
+        toast('已移除这条不应景');
       } else {
         toast('移除失败: ' + (data.error || ''), true);
       }

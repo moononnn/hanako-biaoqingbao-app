@@ -105,6 +105,8 @@ export function mountMessageCard({ showCaption = false } = {}) {
   const posBtn = document.getElementById('fb-pos');
   const fitBtn = document.getElementById('fb-fit');
   const negBtn = document.getElementById('fb-neg');
+  // v0.7.7 - 点过「不喜欢」之后多出来的一档：把这一笔降成场景账，不动图库权重
+  const misfitBtn = document.getElementById('fb-misfit');
   const toast = document.getElementById('fb-toast');
   const chatRow = document.getElementById('fb-chat-row');
   const chatBtn = document.getElementById('fb-chat-btn');
@@ -464,6 +466,12 @@ export function mountMessageCard({ showCaption = false } = {}) {
     if (posBtn) { posBtn.classList.toggle('on-love', like); posBtn.textContent = like ? '已喜欢' : '喜欢'; }
     if (fitBtn) { fitBtn.classList.toggle('on-fit', fit); fitBtn.textContent = fit ? '已应景' : '应景'; }
     if (negBtn) { negBtn.classList.toggle('on-hate', negative); negBtn.textContent = negative ? '已反馈' : '不喜欢'; }
+    // 「这次不应景」是 negative 的降级档：同一根轴上的另一格，不是第四个按钮
+    const misfit = feedback === 'misfit';
+    if (misfitBtn) {
+      misfitBtn.classList.toggle('on-misfit', misfit);
+      misfitBtn.textContent = misfit ? '已记：不应景' : '不应景';
+    }
     syncChatEntry();
   }
 
@@ -472,7 +480,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
   function syncChatEntry() {
     if (!chatRow) return;
     if (chatBtn) chatBtn.textContent = chatHasLog ? '接着聊' : '和小花聊聊';
-    const shouldShow = Boolean(feedback === 'negative' && chatStickerId && !chatOpen);
+    const shouldShow = Boolean((feedback === 'negative' || feedback === 'misfit') && chatStickerId && !chatOpen);
     // 没变就不折腾：尺寸上报是个来回，多余的上报会把宿主也拖进重排
     if (chatRow.hidden === !shouldShow) return;
     chatRow.hidden = !shouldShow;
@@ -1145,6 +1153,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
   posBtn?.addEventListener('click', () => sendFeedback('image'));
   fitBtn?.addEventListener('click', () => sendFeedback('context'));
   negBtn?.addEventListener('click', () => sendFeedback('negative'));
+  misfitBtn?.addEventListener('click', () => sendFeedback('misfit'));
   // v0.1.29 - 内联聊天的四个入口：开、收、发、回车发。
   chatBtn?.addEventListener('click', () => openChat());
   chatCollapse?.addEventListener('click', () => closeChat());
