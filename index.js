@@ -403,6 +403,11 @@ export default defineApp(async (sdk) => {
       callToken: c.callToken ?? null,
       agentId: agentIdFromSessionPath(c.sessionPath),
       dataDir: sdk.dataDir,
+      // v0.7.7 - 工具也要能调宿主的模型通道：配图复核要用一次小模型。
+      // 只挂 models，不把总线、文件、设置这些能力随手漏给工具。
+      // 实测教训：不给这一条，复核在 3ms 内就静默放弃了，日志里只有一行 skip，
+      // 看上去像跑过了，其实一次都没调出去。
+      models: sdk.models ?? null,
     };
   };
 

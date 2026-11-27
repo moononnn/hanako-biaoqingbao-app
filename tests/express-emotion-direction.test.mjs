@@ -52,7 +52,8 @@ test('回归：精确场景匹配仍走原来的 +5 通道', () => {
   const list = [mk('s1', { emotion: [], scene: ['撒娇'], keywords: [] })];
   const scored = scoreStickers(list, '撒娇', [], noPrefs);
   assert.equal(scored.length, 1);
-  assert.equal(scored[0]._score, 5);
+  // 5（scene 精确命中）+ 3（v0.7.7 家族通道，场景位置的同族标签）
+  assert.equal(scored[0]._score, 8);
 });
 
 test('严格兜底：只收与情绪同类的向量候选（方向反的图被挡）', () => {

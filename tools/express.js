@@ -18,7 +18,10 @@ import {
   markAgentStickerCooldown, resolveAgentId, collectPrefsForEmotion, atomicWriteJson, prefsScoreBonus,
   sanitizeTag,
 } from '../lib/shared.js';
-import { TAG_TO_GROUP, resolveEmotionFactor } from '../lib/emotion-groups.js';
+import { TAG_TO_GROUP, EMOTION_SYNONYMS, resolveEmotionFactor } from '../lib/emotion-groups.js';
+import {
+  familiesOfEmotion, termsOfFamilies, familyOf, isMockSticker, SINCERE_FAMILIES, MOCK_PENALTY,
+} from '../lib/emotion-families.js';
 import { getAgentDialectBias } from '../lib/dialect-bridge.js';
 import { fitDecision } from '../lib/smart-fit.js';
 import { imageSizeFromBuffer } from '../lib/image-size.js';
@@ -28,6 +31,7 @@ import { recordRecentMatch } from '../lib/recent-match.js';
 import { readContextFits } from '../lib/context-feedback.js';
 import { readAgentFits } from '../lib/agent-fit-notes.js';
 import { hasAdoptedUsage, scoreUsageMeaning } from '../lib/sticker-usage.js';
+import { verifyPick, buildCandidateList } from '../lib/pick-verify.js';
 import { readExposureStats, recordSuccessfulExposure, rerankWithExploration } from '../lib/exposure.js';
 import {
   readGroupStore,
@@ -112,12 +116,31 @@ export function stickerTouchesGroups(sticker, groups) {
   return false;
 }
 
+// v0.7.7 - 纯向量兜底的准入判据：图的标签要落在「同类词集」里。
+// 词集由查询词的家族 + 大类共同展开，比只看 6 大类细一档。
+// 为什么要这层：向量只算语义距离，分不出方向（「不好意思」和「不是哥们」在向量空间里挨着）。
+// 要求图的标签跟查询词同族，才允许它靠向量被捞出来。
+export function stickerTouchesTerms(sticker, terms) {
+  if (!terms || terms.size === 0) return false;
+  const tags = sticker?.tags || {};
+  for (const key of ['emotion', 'scene', 'keywords']) {
+    for (const tag of (tags[key] || [])) {
+      if (terms.has(tag)) return true;
+    }
+  }
+  return false;
+}
+
 export function applyVectorBonus(scored, allStickers, emotionVec, vectorMap, excludeIds, prefs, groupConfig = null, knownGroupIds = null, opts = {}) {
   if (!emotionVec || !vectorMap || Object.keys(vectorMap).length === 0) return scored;
 
   // v0.2.13 - 兜底门槛与限组：只在 tags 通道 0 命中时由调用方传入 opts
   const minSim = Number.isFinite(opts.minSim) ? opts.minSim : VECTOR_MIN_SIM;
   const allowedGroups = Array.isArray(opts.allowedGroups) && opts.allowedGroups.length ? new Set(opts.allowedGroups) : null;
+  // v0.7.7 - 新增同类词集准入：家族 + 大类展开后的词集，比只有 6 大类细一档
+  const allowedTerms = opts.allowedTerms instanceof Set && opts.allowedTerms.size ? opts.allowedTerms : null;
+  // v0.7.7 - 诚恳语境下，向量通道也不许把嘲讽怼人图补进来（标签通道已经扣过一回）
+  const sincere = opts.sincere === true;
 
   // 给已有打分的表情包加向量 bonus
   for (const sticker of scored) {
@@ -141,6 +164,10 @@ export function applyVectorBonus(scored, allStickers, emotionVec, vectorMap, exc
       if (sim > minSim) {
         // v0.2.13 - 收紧档：要求图的标签落在情绪同类里（无分类信息的词不受此限）
         if (allowedGroups && !stickerTouchesGroups(sticker, allowedGroups)) continue;
+        // v0.7.7 - 同类词集准入：家族命中才算同类，方向不对的图不靠相似度借道回来
+        if (allowedTerms && !stickerTouchesTerms(sticker, allowedTerms)) continue;
+        // v0.7.7 - 诚恳语境：怼人图连向量补充都不进
+        if (sincere && isMockSticker(sticker)) continue;
         // v0.25.0 - 补充命中也要吃偏好惩罚：vetoed/不喜欢次数照常降权，避免绕道向量通道复出
         const baseScore = sim * 10 + prefsScoreBonus(sticker.id, prefs);
         const groupBonus = baseScore > 0 ? getGroupPreferenceBonus(sticker, groupConfig, knownGroupIds) : 0;
@@ -174,21 +201,32 @@ async function applyVectorScoring(scored, allStickers, emotion, excludeIds, pref
   }
   if (!emotionVec) return scored;
 
+  // v0.7.7 - 两条通道共用一套同类准入：家族 + 大类展开后的词集。
+  // 为什么连有候选时也要限：旧代码只在 0 命中时收紧，有候选时补充通道完全不限，
+  // 「不好意思」明明已经有道歉图入选，向量又把「不是哥们」按相似度补回来。
+  const families = familiesOfEmotion(emotion);
+  const groups = groupsOfEmotion(emotion);
+  const allowedTerms = termsOfFamilies(families);
+  for (const g of groups) {
+    for (const w of (EMOTION_SYNONYMS[g] || [])) allowedTerms.add(w);
+  }
+  const sincere = families.some((f) => SINCERE_FAMILIES.has(f));
+
   // v0.2.13 - 标签通道 0 命中 → 纯向量兜底，收紧门槛：
-  //   1) 情绪词有归类时，只收落在同类情绪组里的图（「关切」不再把「求安慰」的图捞出来）
-  //   2) 同类图也没有时，退回高阈值且不限组的纯向量，宁缺毋滥
+  //   1) 情绪词有归类时，只收落在同类里的图（「关切」不再把「求安慰」的图捞出来）
+  //   2) 同类图也没有时，不再退回不限组的纯向量——那一步会把方向相反的图硬捞回来
+  // v0.7.7 - 实测起因：「不好意思」不在同义词表、图库也没有同名标签，0 命中后
+  //   靠不限组向量兜底选走了「不是哥们」（嘲讽）。现在没有归类就干脆不配。
   if (scored.length === 0) {
-    const groups = groupsOfEmotion(emotion);
+    if (allowedTerms.size === 0) return scored;
     applyVectorBonus(scored, allStickers, emotionVec, vectorsData.vectors, excludeIds, prefs, groupConfig, knownGroupIds,
-      { minSim: VECTOR_STRICT_MIN_SIM, allowedGroups: groups });
-    if (scored.length === 0 && groups.length > 0) {
-      applyVectorBonus(scored, allStickers, emotionVec, vectorsData.vectors, excludeIds, prefs, groupConfig, knownGroupIds,
-        { minSim: VECTOR_STRICT_MIN_SIM });
-    }
+      { minSim: VECTOR_STRICT_MIN_SIM, allowedTerms, sincere });
     return scored;
   }
 
-  return applyVectorBonus(scored, allStickers, emotionVec, vectorsData.vectors, excludeIds, prefs, groupConfig, knownGroupIds, {});
+  // 有标签候选时：补充通道同样只收同类的图（门槛仍是宽松档）
+  return applyVectorBonus(scored, allStickers, emotionVec, vectorsData.vectors, excludeIds, prefs, groupConfig, knownGroupIds,
+    { allowedTerms: allowedTerms.size ? allowedTerms : null, sincere });
 }
 
 function reply(obj) {
@@ -528,6 +566,10 @@ export function scoreStickers(stickers, emotion, excludeIds, prefs, bias = null,
   const kwList = Array.isArray(keywords) ? keywords.filter(Boolean) : [];
   const scenes = Array.isArray(query.scene) ? query.scene : (query.scene ? [query.scene] : []);
   const tone = String(query.tone || '').trim();
+  // v0.7.7 - 查询词覆盖到的情绪家族。家族比 6 大类细，覆盖了图库真实标签和模型的自由词。
+  const queryFamilies = new Set(familiesOfEmotion(emotions));
+  // 诚恳语境（抱歉/感谢/安慰/鼓励/夸奖/认真/关心）里，嘲讽怼人图不该出现
+  const sincereQuery = [...queryFamilies].some((f) => SINCERE_FAMILIES.has(f));
   return stickers
     .filter(s => !excludeIds.includes(s.id) && !prefs?.vetoed?.includes(s.id))
     .map(sticker => {
@@ -564,6 +606,31 @@ export function scoreStickers(stickers, emotion, excludeIds, prefs, bias = null,
         if (sticker.description && sticker.description.includes(em)) emotionScore += 3;
       }
 
+      // v0.7.7 - 家族通道：查询词与图的标签落在同一家族就加分。
+      // 情绪标签是作者对这张图气质的直接判断，给 6；场景/关键词是画面或场合的附带描述，给 3。
+      // 每个家族每张图只计一次，避免一张图带四五个同族标签就把分数堆上天。
+      if (queryFamilies.size > 0) {
+        const hitFamilies = new Set();
+        for (const tag of (tags.emotion || [])) {
+          const f = familyOf(String(tag));
+          if (f && queryFamilies.has(f) && !hitFamilies.has(f)) {
+            hitFamilies.add(f);
+            emotionScore += 6;
+            emotionHitTags.push(tag);
+          }
+        }
+        for (const key of ['scene', 'keywords']) {
+          for (const tag of (tags[key] || [])) {
+            const f = familyOf(String(tag));
+            if (f && queryFamilies.has(f) && !hitFamilies.has(f)) {
+              hitFamilies.add(f);
+              emotionScore += 3;
+              emotionHitTags.push(tag);
+            }
+          }
+        }
+      }
+
       // v0.34.51 - 关键词（情境）通道：只在调用方显式传 keywords 时参与，不传则与旧行为完全一致
       let keywordScore = 0;
       if (kwList.length > 0) {
@@ -579,6 +646,13 @@ export function scoreStickers(stickers, emotion, excludeIds, prefs, bias = null,
           }
         }
         keywordScore = Math.min(KEYWORD_WEIGHT.cap, keywordScore);
+      }
+
+      // v0.7.7 - 诚恳语境下，嘲讽/怼人图扣分。
+      // 起因：「不好意思」被配到「不是哥们」，而这图本身就是怼人的梗。
+      // 扣 12 分足够把家族命中（+4）打成负分，直接出局；带 preferred 偏好还能救回来。
+      if (sincereQuery && isMockSticker(sticker)) {
+        emotionScore -= MOCK_PENALTY;
       }
 
       // 方言气质联动：有情绪命中才参与（关键词/场景独立查询不受干扰）
@@ -626,6 +700,12 @@ export function scoreStickers(stickers, emotion, excludeIds, prefs, bias = null,
 export function pickTopCandidate(scored, random = Math.random) {
   const top = scored.slice(0, 3);
   if (!top.length) return null;
+  // v0.7.7 - 分差明显时直接取第一，不再抽。
+  //   实测：向量兜底留下的候选分数挤得很近，抽样等于随便挑一张，
+  //   而「随便挑」正是跑偏的放大器。分差 ≥ 4（一档家族命中）或领先 50% 就定死第一。
+  if (top.length === 1) return top[0];
+  const gap = top[0]._score - top[1]._score;
+  if (gap >= 4 || top[0]._score >= top[1]._score * 1.5) return top[0];
   const floor = Math.min(...top.map(s => s._score));
   const weights = top.map(s => Math.max(1, s._score - floor + 5));
   let ticket = random() * weights.reduce((sum, n) => sum + n, 0);
@@ -808,6 +888,40 @@ export async function execute(input, ctx) {
 
     // 前三名按匹配分加权抽样：保留变化，但不抹平排序判断。
     best = pickTopCandidate(scored);
+
+    // v0.7.7 - 第三档：小模型复核。候选摆给它看，换人或直接否决。
+    // 失败/超时一律放行原选择（fail-open），不阻塞发图。
+    const review = await verifyPick(ctx, {
+      emotion,
+      keywords: kwList,
+      scenes,
+      tone: query.tone,
+      candidates: buildCandidateList(scored),
+    });
+    // v0.7.7 - 诊断口径：skip 要把原因写进 probe.log。
+    //   只写 skip 会让「没调通」和「候选不足」长得一模一样，前者要修，后者是正常短路。
+    const reviewNote = review.verified
+      ? `verify ${review.pick || 'none'}`
+      : `verify skip(${String(review.reason || '').replace(/[\r\n]+/g, ' ').slice(0, 80)})`;
+    lap(reviewNote);
+    if (review.verified) {
+      if (!review.pick) {
+        ctx?.log?.info?.(`[biaoqingbao] 复核判定候选都不贴「${emotion}」，这轮不配`);
+        return reply({
+          ok: true,
+          data: {
+            action: 'no_match',
+            message: `图库里没有贴切「${emotion}」的图，这轮就不配了。别把这张当成自己的表情再提。`,
+          },
+        });
+      }
+      const picked = scored.find(s => s.id === review.pick);
+      if (picked && picked.id !== best.id) {
+        ctx?.log?.info?.(`[biaoqingbao] 复核换人: ${best.id} → ${picked.id}`);
+        best = picked;
+      }
+    }
+
     if (!reranked.explored || !['fresh', 'unseen', 'underexposed'].includes(best._explorationKind)) {
       best._explorationKind = null;
     }

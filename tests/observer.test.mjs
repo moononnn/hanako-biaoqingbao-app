@@ -81,11 +81,14 @@ test('关键词：非数组非字符串一律给空数组', () => {
 
 // ── 注入文案 ──────────────────────────────────────────────
 
-test('注入文案：点名 express，并写死「这一轮最多发一张」', () => {
+test('注入文案：点名 express，写死「最多一张」，并允许不配', () => {
   const text = observer.buildHintText('委屈');
   assert.match(text, /委屈/);
   assert.match(text, /express/);
-  assert.match(text, /这一轮最多发一张/);
+  assert.match(text, /最多一张/);
+  // v0.7.7 - 旧文案要求「这一轮就配一张」，把「不配」这条路堵死了，模型只能硬凑
+  assert.match(text, /宁可不配/);
+  assert.doesNotMatch(text, /这一轮就配一张/);
 });
 
 test('注入文案：不再出现插件版的旧宿主拐杖（tool_search / biaoqingbao_express）', () => {

@@ -144,7 +144,8 @@ test('自动选图：采用过的图不再靠旧标签被选中，只有新用�
   // 没被采用的图不受影响：旧标签照旧能选出来。
   const plain = scoreStickers([{ ...sticker, usage: undefined }], '得意', [], noPrefs);
   assert.equal(plain.length, 1);
-  assert.equal(plain[0]._score, 8);
+  // 8（情绪标签精确命中）+ 6（v0.7.7 家族通道，情绪位置的同族标签）
+  assert.equal(plain[0]._score, 14);
 });
 
 test('向量通道不会把采用过的图捞回来', () => {
