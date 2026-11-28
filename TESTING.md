@@ -1,5 +1,144 @@
 # 自动测试
 
+## 2026-11-28 发布前独立审包发现的回归：重识会摘掉已有场合锁（0.8.0）
+
+### 问题
+- 单张识图应用（`server/api.js`）与批量自动应用（`lib/batch-apply.js`）都把「空数组」当成「这次重新判过、没有场合」，执行 `delete occasion`。
+- 触发条件固定成立：识图 JSON 模板里 `occasion` 字段恒存在，归一化后永远是数组，模型拿不准时给的就是空数组——等于「模型不确定」被当成「这张图不属于任何场合」。
+- 后果：用户手动设的「限 早安」被一次重识静默删掉，图重新在任意场合出场；界面上标记还在（本地状态没刷新），库里已经没了。这正是这版要修的回归。
+
+### 改动
+- 两条链路统一口径：空数组 = 这轮没判出来，保留旧锁；非空值照常覆写；取消限制只走用户显式操作（编辑弹窗、聊天确认、改标签工具）。
+- 单张识图应用后补跑一次 `fillInferredOccasion`，与批量路径口径对齐。
+- 新增 `tests/occasion-preserve.test.mjs`：5 项，钉住保留/覆写/无锁不凭空生成/其它字段空值不覆盖/单张识图段不再出现删锁写法。
+
+### 验证
+- `node --test tests/*.test.mjs`：**735 项通过 / 0 失败**（原 730 + 新增 5）。
+
+### 未覆盖
+- 没有在真机上用一张已锁的图重新识图一次再回看数据；只做了纯函数与源码结构断言。
+
+## 2026-11-28 批量识图 toast 不再重播历史失败（0.8.0）
+
+### 问题
+- 图库页每次加载都会弹一次「批量识图完成：0 张成功，2 张失败」。查台账：16 条任务里最新是 11-26，今天没有任务；唯一一条 0 成功/2 失败的是 **10-04 10:25** 那条。
+- 原因：`checkBatchTasks` 遍历所有已完成且 `failed > 0` 的任务，去重表 `batchTaskNotified` 只在内存，页面一刷就清空，于是旧账每次开页重播一遍。
+- 今天新增的两张图（stk_641 08:11、stk_642 11:47）识图其实都成功，`tagged_at` 与 `added_at` 只差 11-13 秒；单张识图接口实测也正常返回（带 `occasion: []`）。
+
+### 改动
+- `ui/assets/sticker-manager.js`：`checkBatchTasks` 加 `BATCH_NOTIFY_WINDOW_MS`（24 小时），超窗口的任务直接标已通知、不弹 toast；角标与详情仍然保留。
+- `tests/ui-occasion-field.test.mjs`：新增一条断言钉住时间窗。
+
+### 验证
+- `node --test tests/*.test.mjs`：**730 项通过 / 0 失败**。
+
+### 未覆盖
+- 没有在界面里实际等到 24 小时内新任务跑完再验一次 toast；只做了结构断言与台账核对。
+
+## 2026-11-28 「跟小花聊聊」支持场合锁（0.8.0）
+
+### 问题
+- 0.8.3 的编辑弹窗能改场合锁，但聊天这条路只认 description / semantic_description / emotion / scene / keywords 五个字段。用户说「这张别在中午拿出来」，模型只能往场景上改，改不到点上。
+- 两个静默坑：一是前端回查落盘（`stickerFieldValue` / `stickerMatchesSuggestion`）从 `tags` 里取字段，而 occasion 在顶层，会永远拿到空，于是「其实改成功了」被报成失败；二是确认接口的幂等比对只看五个字段，带锁的建议重试永远对不上。
+
+### 改动
+- `server/api.js`：`STICKER_CHAT_PROMPT` 加 `occasion` 字段说明与 suggestion 模板项，并把「这张以后只在早上用」这类话导到 occasion；`currentTagsText` 带「限用场合」行；suggestion 解析用 `hasOwnProperty` 区分「没给」与「给空」；确认接口白名单加 occasion（只收词表内组名）；写库时空数组 `delete`；`CHAT_PATCH_FIELDS` 与 `chatTagPatchMatchesSticker` 认 occasion。
+- `ui/assets/message-card-view.js`：`CHAT_FIELDS` 加 occasion，`stickerFieldValue` 从顶层读。
+- `ui/assets/sticker-manager.js`：聊天窗左侧标签块、修改前后对照都加场合；`stickerMatchesSuggestion` 比对 occasion。
+- `ui/panel.html`：chat-modal 加「限用场合」标签块。
+- `tests/chat-occasion.test.mjs`：7 项结构断言。
+
+### 验证
+- `node --test tests/*.test.mjs`：**719 项通过 / 0 失败**（新增 7 项）。
+- `node --check` 过 `server/api.js`、`ui/assets/sticker-manager.js`、`ui/assets/message-card-view.js`。
+
+### 未覆盖
+- 聊天链路没实机跑：没真开一次会话让它产出带 occasion 的建议。
+
+## 2026-11-28 图库编辑弹窗的场合锁字段（0.8.0）
+
+### 问题
+- 0.8.0–0.8.2 把 `occasion` 写进了数据与写入链路，但图库界面既看不到也改不了，只能走工具或脚本。
+- 更阴的一条：编辑弹窗保存时只发改过的五个字段。如果不把 `occasion` 带上，用户改一次标签就会把已有的锁冲成空，而界面上看不出任何异常。
+
+### 改动
+- `ui/panel.html`：编辑弹窗在关键词后加「限用场合」输入框（占位文案写清「留空=不限制」与可选值）与「按标签重判」按钮；卡片标签区加 `.tag.occasion` 样式。
+- `ui/assets/sticker-manager.js`：`openEditor` 回填 `sticker.occasion`；`saveEdit` 带 `occasion` 字段并在返回为空时提醒（手填的词可能不在词表里）；`handleAutoTagEditor` 把识图结果里的场合填回表单；新增 `inferOccasionFromTags`；卡片渲染加「限 xx」标记。
+- `server/api.js`：新增 `action: 'infer_occasion'`（纯读，不写库）；`update` 返回体带实际存下的 `occasion`。
+- `tests/ui-occasion-field.test.mjs`：5 项结构断言，其中一条钉住「重判接口不写库」。
+
+### 验证
+- `node --test tests/*.test.mjs`：**712 项通过 / 0 失败**（新增 5 项）。
+- `node --check` 过 `ui/assets/sticker-manager.js`（拷成 .mjs 强制 ESM 解析）。
+
+### 未覆盖
+- 界面没有实机点过，只有 DOM/脚本层断言。「跟小花聊聊」建议卡也还不能改场合锁。
+
+## 2026-11-28 入库前的场合推断兜底（0.8.0）
+
+### 问题
+- 0.8.1 的场合锁依赖识图结果里的 `occasion`，但三条入库路径拿不到这个值：纸飞机（Python 端 `fill_tags`/`collect_tags` 只透传 description / semantic_description / emotion / scene / keywords）、直接上传（没跑识图时根本没标签）、手动 `add_sticker`（我不填就是空）。
+- 结果是：新上传的早安图默默变成「任何场合都能用」，和 0.8.0 之前一样。
+
+### 改动
+- `lib/occasion-gate.js`：新增 `inferOccasions()` 与 `fillInferredOccasion()`。判定双条件：图的标签（scene / keywords）与「画面里写的字」（同一句内同时出现场合词和 字样/配文/配字/写着/文字/大字/气泡 这类信号）必须指向同一个场合。
+- 接入四条写入链路：`lib/ball.js` 的 `buildBallStickerEntry`、`server/api.js` 的 `buildStickerEntry`（上传/导入）、`tools/add-sticker.js`、`lib/batch-apply.js` 的 `applyItemsToMeta`。显式值优先，`fillInferredOccasion` 不覆盖已有的锁。
+
+### 验证
+- `node --test tests/*.test.mjs`：**707 项通过 / 0 失败**（新增 5 项推断用例）。
+- 真实 340 张回归：推断命中 12 张（331/492/493/494/495/504/563/586/587/594/632/639），与人工确认那批一致；人工排除过的 414（周五狂欢）、475（裹被子犯困）均未命中；608（gif，首帧无字、第三帧才出现「早安~」）未命中，但它已人工标过。
+
+### 未覆盖
+- 推断靠 description / semantic_description 的文字转述，模型把画面文字漏在两处时仍会漏（586 就是只有 semantic 里那半句「配有醒目的早安字样」）。
+- 图库编辑表单仍无输入框；导出/迁移仍不带锁。
+
+## 2026-11-28 音译场合补漏 + 问候短路收紧（0.8.0）
+
+### 问题
+- 0.8.0 的场合词表只认中文。图库里的 `stk_586` 画面上写的是「空吧哇」（こんばんは），没有中文场合词，扫不到，于是没标锁；同类的「欧嗨呦」（おはよう）也一样。
+- `stk_586` 的 semantic_description 明确写着「配有醒目的早安字样」，0.8.0 补标时只看了 description（说「月亮星星爱心」），把这条证据漏了。
+- 问候短路 `detectRitual` 对整条用户消息做子串匹配，一段讨论「早安这个词怎么配图」的长消息也会命中，于是往正在聊技术的对话里注入「配一张」。
+
+### 改动
+- `lib/occasion-gate.js`：早安组加欧嗨呦/欧哈哟/おはよう/ohayo，晚安组加空吧哇/こんばんは/おやすみ；`こんにちは` 刻意不归任何组（通用打招呼，任何时间都能用）。
+- `lib/shared.js`：识图提示词加一句，画面写日语或音译时按意思转成中文组名，看不懂就不填。
+- `lib/observer.js`：`RITUAL_MAX_CHARS = 20`，超长消息直接不当问候；问候词表补「晚上好」；`detectRitual` 改为导出以便测试。
+- 数据：`stk_586` 标上 `occasion: ['早安','晚安']`（画面是こんばんは，实际是晚上问候；按「问候图」双标，早上晚上都能用、中间不用）。
+
+### 验证
+- `node --test tests/*.test.mjs`：**702 项通过 / 0 失败**（新增 6 项：音译归一 1、`tests/observer-ritual.test.mjs` 5 项）。
+
+### 未覆盖
+- 「欧嗨呦」那张在 340 张里按文本找不到：画面文字没被识图转录，description / semantic / keywords 全无相关字。需重新识图或人工指认。
+- 识别与标签不一致未改：`stk_586` 的 tags 仍写着「早安」，而画面实际是「空吧哇」。只加了锁，没动标签。
+
+## 2026-11-28 场合门禁 + 向量重建（0.8.0）
+
+### 问题
+- 被画面钉死在某个场合的图（早安/晚安/生日快乐）在别的场合被选中。实测两次：`stk_494`（scene 只有「早安」，emo 为元气/治愈）先在「如释重负」那轮发了出去（11-27 14:31），又在「干劲十足」那轮发了出去（11-28 09:11）。
+- 根因三处：一、scene 标签只当加分项，查询里没这个场合时一分不扣；二、向量补充通道从全量图库按余弦捞，没有任何场合约束；三、自动配图的问候短路只往 express 递一个「开心」，命中的问候词没传下去。
+- 另一个独立缺口：改语义描述不重建向量。`/api/stickers` 的 update 动作、单张识图应用、`update_sticker_tags` 三条路径都只写字段。用户把「早安」从描述里删了，旧向量第二天照旧把它捞出来。
+
+### 改动
+- 新增 `lib/occasion-gate.js`：场合词表（早安/晚安/生日/节日/恭喜）、归一化、`isOccasionLocked()` 门禁。标错的代价是这张图再也出不来，所以判定只认画面钉死的场合。
+- `tools/express.js`：`scoreStickers` 最前面加门禁（`_score: 0` 交给既有 `filter(_score > 0)`）；`applyVectorBonus` 两个循环都拦（已有项与补充项）；`applyVectorScoring` 透传 occasions；`execute` 用情绪词/关键词/场景/语气拼查询场合集。
+- `lib/observer.js`：问候短路把 `ritualHit.word` 当 keywords 传下去。
+- `lib/pick-verify.js`：候选带 `occasion`，提示词加一条「限用场合」规则。
+- `lib/shared.js`：`AUTOTAG_PROMPT` 加 `occasion` 字段与判断规则，只收词表内组名；`tagImage` 返回带归一后的 occasion。
+- 写入链路：`lib/batch-apply.js`（批量应用）、`server/api.js`（update/单张识图）、`lib/ball.js`（纸飞机入库）、`lib/sticker-inbound.js`（跨应用收图）四处落盘。
+- `lib/sticker-vectors.js`：新增 `rebuildStickerVector()`，描述清空时删旧向量。`server/api.js` 两处写路径改描述后异步重建。
+- 工具：`add_sticker`/`update_sticker_tags` 加 `occasion`，后者加 `semantic_description` 与同步重建；`list_stickers` 带出场合锁；`express` 的 keywords 描述提醒填场合词。
+- 新增 `scripts/backfill-occasions.mjs`（干跑/`--apply`/`--only`，写前备份），已给 12 张老图补标：stk_331/492/493/494/495/504/563/587/594/608/632/639。
+
+### 验证
+- `node --test tests/*.test.mjs`：**696 项通过 / 0 失败**（新增 15 项：`tests/occasion-gate.test.mjs` 12 项、`tests/sticker-vectors.test.mjs` 3 项；`tests/pick-verify.test.mjs` 一条字段断言随候选更新）。
+- 真实图库回归（340 张，含已补标的 12 张）：`干劲十足` 候选 52 张、`如释重负` 候选 24 张，两者都不含 `stk_494`；`干劲十足 + 早安关键词` 候选 56 张，`stk_494` 回到候选。
+
+### 未覆盖
+- 图库编辑表单还没场合锁输入框，只能经 `update_sticker_tags` 改；UI 保存不会冲掉已有锁（`occasion === undefined` 时不写）。
+- 导出/迁移不带场合锁，迁移后图回到不受限状态。
+- 真实识图任务（批量/跨应用收图）没有实机跑一遍确认 `occasion` 落盘，只走了单测与代码路径核对。
+
 ## 2026-11-28 图片卡尺寸上报与「未分场景」清单（0.7.9）
 
 ### 问题
