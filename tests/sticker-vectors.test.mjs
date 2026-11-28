@@ -11,7 +11,7 @@ process.env.BQB_DATA_DIR = path.join(root, 'app-data', 'biaoqingbao-app');
 process.env.HANA_HOME = root;
 fs.mkdirSync(process.env.BQB_DATA_DIR, { recursive: true });
 
-const { writeStickerVector, writeStickerVectors, shouldAutoVectorOnSave } = await import('../lib/sticker-vectors.js');
+const { writeStickerVector, writeStickerVectors, rebuildStickerVector, shouldAutoVectorOnSave } = await import('../lib/sticker-vectors.js');
 const shared = await import('../lib/shared.js');
 
 function writeEmbeddingCfg(patch) {
@@ -104,6 +104,36 @@ test('批量版：一张失败不影响其余，失败项带原因返回', async
   assert.equal(result.ok, true);
   assert.equal(result.built, 2);
   assert.deepEqual(result.failed, []);
+});
+
+test('重建：描述清空就把旧向量删掉，不留旧描述继续参与检索', async () => {
+  resetVectors();
+  writeEmbeddingCfg({ customModel: 'test-embed' });
+  await writeStickerVector({ id: 'stk_vec_rm', semantic_description: '旧的描述' }, { embed: okEmbed([1, 1, 1, 1]) });
+  assert.ok(shared.readVectors().vectors.stk_vec_rm);
+
+  const result = await rebuildStickerVector({ id: 'stk_vec_rm', semantic_description: '   ' }, { embed: okEmbed() });
+  assert.equal(result.ok, true);
+  assert.equal(result.removed, true);
+  assert.equal(shared.readVectors().vectors.stk_vec_rm, undefined, '描述没了，向量也不该还在');
+});
+
+test('重建：描述改了就用新描述覆盖同一条向量', async () => {
+  resetVectors();
+  writeEmbeddingCfg({ customModel: 'test-embed' });
+  await writeStickerVector({ id: 'stk_vec_up', semantic_description: '旧的描述' }, { embed: okEmbed([1, 1, 1, 1]) });
+
+  const result = await rebuildStickerVector({ id: 'stk_vec_up', semantic_description: '新的描述' }, { embed: okEmbed([2, 2, 2, 2]) });
+  assert.equal(result.ok, true);
+  assert.deepEqual(shared.readVectors().vectors.stk_vec_up, [2, 2, 2, 2]);
+});
+
+test('重建：没有旧向量时清空描述也不算错', async () => {
+  resetVectors();
+  writeEmbeddingCfg({ customModel: 'test-embed' });
+  const result = await rebuildStickerVector({ id: 'stk_vec_none', semantic_description: '' }, { embed: okEmbed() });
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, 'no-vector');
 });
 
 test('自动建向量开关：默认关，配置 true 才算开', async () => {

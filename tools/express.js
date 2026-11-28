@@ -32,6 +32,7 @@ import { readContextFits, readContextMisfits } from '../lib/context-feedback.js'
 import { readAgentFits } from '../lib/agent-fit-notes.js';
 import { hasAdoptedUsage, scoreUsageMeaning } from '../lib/sticker-usage.js';
 import { verifyPick, buildCandidateList } from '../lib/pick-verify.js';
+import { isOccasionLocked, queryOccasionSet } from '../lib/occasion-gate.js';
 import { readExposureStats, recordSuccessfulExposure, rerankWithExploration } from '../lib/exposure.js';
 import {
   readGroupStore,
@@ -141,9 +142,13 @@ export function applyVectorBonus(scored, allStickers, emotionVec, vectorMap, exc
   const allowedTerms = opts.allowedTerms instanceof Set && opts.allowedTerms.size ? opts.allowedTerms : null;
   // v0.7.7 - 诚恳语境下，向量通道也不许把嘲讽怼人图补进来（标签通道已经扣过一回）
   const sincere = opts.sincere === true;
+  // v0.8.0 - 场合门禁：向量通道比标签通道更容易绕过场合限制（它按余弦从全量图库里捞），
+  // 所以已有项和补充项两处都得拦。opts 没带 occasions 时按空集处理，场合图一律不出。
+  const queryOccasions = opts.queryOccasions instanceof Set ? opts.queryOccasions : null;
 
   // 给已有打分的表情包加向量 bonus
   for (const sticker of scored) {
+    if (isOccasionLocked(sticker, queryOccasions)) continue;
     // 已经采用过用法的图不碰旧向量：它的向量是按旧标签算的，可能是错的。
     if (hasAdoptedUsage(sticker)) continue;
     const vec = vectorMap[sticker.id];
@@ -156,6 +161,8 @@ export function applyVectorBonus(scored, allStickers, emotionVec, vectorMap, exc
   const scoredIds = new Set(scored.map(s => s.id));
   for (const sticker of allStickers) {
     if (scoredIds.has(sticker.id) || excludeIds.includes(sticker.id) || prefs?.vetoed?.includes(sticker.id)) continue;
+    // 场合不对的图连向量通道都不进：早安图不该靠「语义很近」借道回到「干劲十足」这种查询里。
+    if (isOccasionLocked(sticker, queryOccasions)) continue;
     // 同上：采用过用法的图不靠旧向量回来。
     if (hasAdoptedUsage(sticker)) continue;
     const vec = vectorMap[sticker.id];
@@ -181,7 +188,7 @@ export function applyVectorBonus(scored, allStickers, emotionVec, vectorMap, exc
 }
 
 // 向量检索：给已有打分加向量 bonus，并补充纯向量命中
-async function applyVectorScoring(scored, allStickers, emotion, excludeIds, prefs, groupConfig = null, knownGroupIds = null) {
+async function applyVectorScoring(scored, allStickers, emotion, excludeIds, prefs, groupConfig = null, knownGroupIds = null, occasions = null) {
   // v0.19.5 - 修复：readVectorsCached 是 async，少了 await 会导致向量通道整体静默失效
   const vectorsData = await readVectorsCached();
   if (!vectorsData?.vectors || Object.keys(vectorsData.vectors).length === 0) return scored;
@@ -220,13 +227,13 @@ async function applyVectorScoring(scored, allStickers, emotion, excludeIds, pref
   if (scored.length === 0) {
     if (allowedTerms.size === 0) return scored;
     applyVectorBonus(scored, allStickers, emotionVec, vectorsData.vectors, excludeIds, prefs, groupConfig, knownGroupIds,
-      { minSim: VECTOR_STRICT_MIN_SIM, allowedTerms, sincere });
+      { minSim: VECTOR_STRICT_MIN_SIM, allowedTerms, sincere, queryOccasions: occasions });
     return scored;
   }
 
   // 有标签候选时：补充通道同样只收同类的图（门槛仍是宽松档）
   return applyVectorBonus(scored, allStickers, emotionVec, vectorsData.vectors, excludeIds, prefs, groupConfig, knownGroupIds,
-    { allowedTerms: allowedTerms.size ? allowedTerms : null, sincere });
+    { allowedTerms: allowedTerms.size ? allowedTerms : null, sincere, queryOccasions: occasions });
 }
 
 function reply(obj) {
@@ -566,6 +573,8 @@ export function scoreStickers(stickers, emotion, excludeIds, prefs, bias = null,
   const kwList = Array.isArray(keywords) ? keywords.filter(Boolean) : [];
   const scenes = Array.isArray(query.scene) ? query.scene : (query.scene ? [query.scene] : []);
   const tone = String(query.tone || '').trim();
+  // v0.8.0 - 场合门禁的查询侧：查询自己没带场合信号时是空集，场合图一律锁死。
+  const queryOccasions = query.occasions instanceof Set ? query.occasions : null;
   // v0.7.7 - 查询词覆盖到的情绪家族。家族比 6 大类细，覆盖了图库真实标签和模型的自由词。
   const queryFamilies = new Set(familiesOfEmotion(emotions));
   // 诚恳语境（抱歉/感谢/安慰/鼓励/夸奖/认真/关心）里，嘲讽怼人图不该出现
@@ -573,6 +582,11 @@ export function scoreStickers(stickers, emotion, excludeIds, prefs, bias = null,
   return stickers
     .filter(s => !excludeIds.includes(s.id) && !prefs?.vetoed?.includes(s.id))
     .map(sticker => {
+      // v0.8.0 - 场合门禁放在最前面：连采用过用法的图也得过这道闸，场合不对就是不对。
+      // 锁住的直接给 0 分，交给下面 filter(_score > 0) 剔掉，不进候选池也不扰复核。
+      if (isOccasionLocked(sticker, queryOccasions)) {
+        return { ...sticker, _score: 0, _occasionLocked: true };
+      }
       // 已经采用过用法的图（usage）：旧标签/旧向量说的可能就是错的，
       // 不再拿它们说事；只有新用法本身命中当下的情绪/关键词，这张图才参选。
       if (hasAdoptedUsage(sticker)) {
@@ -729,7 +743,7 @@ export const parameters = {
     },
     keywords: {
       type: "string",
-      description: "可选：跟当前对话直接相关的具体词，逗号分隔，如 '加班,老板,下班' 或 '放鸽子,约饭'。从对话里正在说的人、事、物取，越具体越能选中贴题的图；不要填情绪词（情绪交给 emotion）。"
+      description: "可选：跟当前对话直接相关的具体词，逗号分隔，如 '加班,老板,下班' 或 '放鸽子,约饭'。从对话里正在说的人、事、物取，越具体越能选中贴题的图；不要填情绪词（情绪交给 emotion）。早安、晚安、生日快乐这类场合词尤其要填：图库里有只在那个场合用的图，不填它们不会出现。"
     },
     scene: { type: "string", description: "可选：具体使用情境，如等回复、催回复、加班（图库有对应场景标签时加分）" },
     tone: { type: "string", description: "可选：表达姿态，如自嘲、调侃、撒娇；仅在图的标签或语义描述明确匹配时加分" },
@@ -862,6 +876,14 @@ export async function execute(input, ctx) {
     const scenes = (Array.isArray(scene) ? scene : String(scene || '').split(/[,，、]/))
       .map(s => sanitizeTag(s, 12)).filter(Boolean).slice(0, 6);
     const query = { scene: scenes, tone: sanitizeTag(tone || '', 12), intensity: ['light', 'medium', 'strong'].includes(intensity) ? intensity : '' };
+    // v0.8.0 - 场合信号：情绪词、关键词、场景、语气里出现早安/晚安这类硬场合词，才算这一场有场合。
+    // 刻意不把对话原文丢进来：正文里一句「昨晚没睡好」就解锁晚安图，那是另一种跑偏。
+    query.occasions = queryOccasionSet([
+      ...(Array.isArray(emotion) ? emotion : [emotion]),
+      ...kwList,
+      ...scenes,
+      query.tone,
+    ]);
     let scored = scoreStickers(stickers, emotion, allExclude, effectivePrefs, expressionBias, groupConfig, knownGroupIds, kwList, query);
 
     if (scored.length === 0) {
@@ -874,7 +896,7 @@ export async function execute(input, ctx) {
     // 若先 length=0 再 push(...vectorScored) 会把结果一起清空（vectorScored === scored），
     // 导致永远走到 no_match。恢复原地修改语义，不回填。
     // v0.25.0 - applyVectorScoring 传入 prefs：向量补充通道同样应用偏好惩罚
-    await applyVectorScoring(scored, stickers, emotion, allExclude, effectivePrefs, groupConfig, knownGroupIds);
+    await applyVectorScoring(scored, stickers, emotion, allExclude, effectivePrefs, groupConfig, knownGroupIds, query.occasions);
     lap(`vector ${scored.length}`);
 
     if (scored.length === 0) {

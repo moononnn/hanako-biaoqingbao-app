@@ -42,8 +42,9 @@ const BODY_PADDING = 12;
 // 不用 vh，理由跟图片高度上限那条一样：vh 就是宿主给的框，与上报高度互相驱动成循环。
 const CHAT_PANEL_HEIGHT = 340;
 // 建议卡里认得的字段和它们的中文名。不认识的一律不提交，宁可少改也不乱写。
-const CHAT_FIELDS = ['description', 'semantic_description', 'emotion', 'scene', 'keywords'];
-const CHAT_FIELD_LABELS = { description: '描述', semantic_description: '语义描述', emotion: '情绪', scene: '场景', keywords: '关键词' };
+// v0.8.4 - 加 occasion：聊天里说「这张以后只在早上用」时，建议卡能带上限用场合
+const CHAT_FIELDS = ['description', 'semantic_description', 'emotion', 'scene', 'keywords', 'occasion'];
+const CHAT_FIELD_LABELS = { description: '描述', semantic_description: '语义描述', emotion: '情绪', scene: '场景', keywords: '关键词', occasion: '限用场合' };
 const CHAT_EMPTY_HINT = '这张图不太合适？说说哪里不对，我陪你调。\n比如：它表达的是撒娇，不是开心。';
 
 // 建议里每个字段的「能看懂的样子」：数组用顿号连起来，空值当没有。
@@ -88,6 +89,8 @@ function stickerFieldValue(sticker, field) {
   if (!sticker) return '';
   if (field === 'description') return String(sticker.description || '').trim();
   if (field === 'semantic_description') return String(sticker.semantic_description || '').trim();
+  // v0.8.4 - 场合锁在顶层，不在 tags 里；从 tags 取会永远拿到空，回查时就误判成「没落盘」
+  if (field === 'occasion') return Array.isArray(sticker.occasion) ? sticker.occasion : [];
   return Array.isArray(sticker.tags?.[field]) ? sticker.tags[field] : [];
 }
 

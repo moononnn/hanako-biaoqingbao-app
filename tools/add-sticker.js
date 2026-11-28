@@ -1,6 +1,7 @@
 import { mkdir, readFile, unlink } from 'node:fs/promises';
 import { genId, readMeta, writeMeta, writeNewStickerFile, enqueueToolWrite, STICKERS_DIR } from '../lib/shared.js';
 import { safeStickerPath } from '../lib/ball-core.js';
+import { occasionSet, fillInferredOccasion } from '../lib/occasion-gate.js';
 
 const stickersDir = STICKERS_DIR;
 
@@ -19,13 +20,14 @@ export const parameters = {
     emotion: { type: "string", description: "情绪标签，多个用逗号分隔，如 '开心,感动,可爱'" },
     scene: { type: "string", description: "场景标签，多个用逗号分隔，如 '早安,恭喜,打气'" },
     keywords: { type: "string", description: "关键词，多个用逗号分隔" },
+    occasion: { type: "string", description: "限用场合，多个用逗号分隔，可选值只有早安、晚安、生日、节日、恭喜。只在画面文字把这张图钉死在某个场合时才填；填了它就只会在那个场合出现，别的场合一律不选。拿不准就不填。" },
     description: { type: "string", description: "一句话描述这张表情包的感觉" }
   },
   required: ["sourcePath"]
 };
 
 export async function execute(input, ctx) {
-  const { sourcePath, emotion = '', scene = '', keywords = '', description = '' } = input || {};
+  const { sourcePath, emotion = '', scene = '', keywords = '', description = '', occasion = '' } = input || {};
 
   if (!sourcePath) return reply({ ok: false, error: '请提供图片路径' });
 
@@ -74,6 +76,11 @@ export async function execute(input, ctx) {
         },
         added_at: new Date().toISOString()
       };
+      // v0.8.0 - 场合锁：只存词表内的组名，乱写的词丢弃（标错的后果是这张图再也出不来）
+      const locked = [...occasionSet(occasion ? occasion.split(',') : [])];
+      if (locked.length) entry.occasion = locked;
+      // v0.8.1 - 手动入库容易漏填 occasion，用标签 + 画面文字徽底推一次
+      fillInferredOccasion(entry);
 
       stickers.push(entry);
       // v0.19.5 - 原子写，避免崩溃留下半截图库文件

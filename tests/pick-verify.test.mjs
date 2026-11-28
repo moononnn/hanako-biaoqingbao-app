@@ -25,7 +25,8 @@ test('buildCandidateList 截断到上限，只带判断要用的字段', () => {
   const many = Array.from({ length: 9 }, (_, i) => sticker(`stk_${i}`, ['无奈'], `画面${i}`, `适合${i}`));
   const list = buildCandidateList(many);
   assert.equal(list.length, VERIFY_MAX_CANDIDATES);
-  assert.deepEqual(Object.keys(list[0]).sort(), ['description', 'emotion', 'id', 'semantic']);
+  // v0.8.0 - 多了 occasion：复核员要知道这张图是不是被钉死在某个场合
+  assert.deepEqual(Object.keys(list[0]).sort(), ['description', 'emotion', 'id', 'occasion', 'semantic']);
   assert.equal(buildCandidateList(null).length, 0);
 });
 

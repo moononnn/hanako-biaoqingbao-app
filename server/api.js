@@ -97,6 +97,9 @@ import {
 } from '../lib/batch-apply.js';
 import { registerBatchTasksRoutes } from './_batch-tasks.js';
 import { safeStickerPath } from '../lib/ball-core.js';
+// v0.8.0 - 改完语义描述就重建这张图的向量；场合锁的归一化与写入同源
+import { rebuildStickerVector } from '../lib/sticker-vectors.js';
+import { occasionSet, fillInferredOccasion, inferOccasions } from '../lib/occasion-gate.js';
 import { appendBoundedLog } from '../lib/log-trim.js';
 import { isCodexVisionProvider } from '../lib/vision-codex.js';
 import { applyPreferenceFeedback, mutatePreferences, snapshotMapping, ensureUser } from '../lib/feedback.js';
@@ -187,6 +190,8 @@ function buildStickerEntry(id, destFile, sourceName, fields = {}) {
   if (fields.tagged_at && Number.isFinite(Date.parse(String(fields.tagged_at)))) entry.tagged_at = String(fields.tagged_at);
   const groupIds = normalizeGroupIds(fields.groupIds);
   if (groupIds.length) entry.groupIds = groupIds;
+  // v0.8.1 - 上传/导入没有识图 occasion，用标签 + 画面文字徽底推一次
+  fillInferredOccasion(entry);
   return entry;
 }
 
@@ -1268,7 +1273,7 @@ export default async function registerRoutes(app, ctx) {
 
     // ── 修改 ──
     if (action === 'update') {
-      const { id, emotion, scene, keywords, description, semantic_description, atmosphere } = body;
+      const { id, emotion, scene, keywords, description, semantic_description, atmosphere, occasion } = body;
       if (!id) return json({ ok: false, error: '缺少ID' });
       return await enqueueUploadWrite(async () => {
         const meta = readMeta();
@@ -1279,6 +1284,8 @@ export default async function registerRoutes(app, ctx) {
           keywords: (meta[idx].tags?.keywords || []).slice(),
           description: meta[idx].description || '',
         };
+        // v0.8.0 - 语义描述改之前的快照，用来判断要不要重建向量
+        const semanticBefore = meta[idx].semantic_description || '';
         if (emotion !== undefined) meta[idx].tags.emotion = emotion.split(',').map(s => s.trim()).filter(Boolean);
         if (scene !== undefined) meta[idx].tags.scene = scene.split(',').map(s => s.trim()).filter(Boolean);
         if (keywords !== undefined) meta[idx].tags.keywords = keywords.split(',').map(s => s.trim()).filter(Boolean);
@@ -1287,9 +1294,25 @@ export default async function registerRoutes(app, ctx) {
         if (semantic_description !== undefined) meta[idx].semantic_description = semantic_description;
         // v0.11.0：氛围标签
         if (atmosphere !== undefined) meta[idx].tags.atmosphere = atmosphere.split(',').map(s => s.trim()).filter(Boolean);
+        // v0.8.0 - 场合锁：只存词表内的组名，空值就摘掉锁；老图不带这个字段，行为不变。
+        if (occasion !== undefined) {
+          const list = Array.isArray(occasion) ? occasion : String(occasion || '').split(',');
+          const locked = [...occasionSet(list.map(v => String(v || '').trim()).filter(Boolean))];
+          if (locked.length) meta[idx].occasion = locked;
+          else delete meta[idx].occasion;
+        }
         // v0.10.0：记录「最后一次识图应用」的时间，方便用户记住什么时候识过
         meta[idx].tagged_at = new Date().toISOString();
         writeMeta(meta);
+        // v0.8.0 - 语义描述变了，旧向量就过期了：它在替旧描述说话。
+        // 实测过的坑：用户把「早安」从描述里删了，第二天照样被向量捞出来，因为向量没重算。
+        // 异步重建，不阻塞保存响应（embedding 接口慢时会把保存拖成三十秒超时）。
+        if ((meta[idx].semantic_description || '') !== semanticBefore) {
+          const snapshot = { ...meta[idx], tags: { ...(meta[idx].tags || {}) } };
+          void rebuildStickerVector(snapshot, { ctx }).then((r) => {
+            if (!r?.ok) ctx?.log?.warn?.('[biaoqingbao] 改描述后重建向量失败:', r?.error || r?.skipped || '');
+          }).catch(() => {});
+        }
         // v0.26.0：用户改了名字/描述 → 记教学样本（异步，不影响保存响应）
         const afterKw = meta[idx].tags?.keywords || [];
         const afterDesc = meta[idx].description || '';
@@ -1297,7 +1320,24 @@ export default async function registerRoutes(app, ctx) {
           upsertTeachingSample(id, { description: afterDesc, keywords: afterKw, semanticDescription: meta[idx].semantic_description || '' })
             .catch(() => {});
         }
-        return json({ ok: true, message: '已更新', tagged_at: meta[idx].tagged_at });
+        return json({ ok: true, message: '已更新', tagged_at: meta[idx].tagged_at, data: { occasion: meta[idx].occasion || [] } });
+      });
+    }
+
+    // ── 按标签重判场合锁（v0.8.3）──
+    // 只算不写：把结果交给前端填回表单，用户在同一个弹窗里点保存才落库。
+    // 不调模型、不花额度，纯本地判定。
+    if (action === 'infer_occasion') {
+      const { id } = body;
+      if (!id) return json({ ok: false, error: '缺少ID' });
+      const meta = readMeta();
+      const idx = meta.findIndex(s => s.id === id);
+      if (idx === -1) return json({ ok: false, error: '未找到' });
+      const inferred = inferOccasions(meta[idx]);
+      return json({
+        ok: true,
+        data: { occasion: inferred },
+        message: inferred.length ? `判到场合：${inferred.join('、')}` : '按标签没判到场合',
       });
     }
 
@@ -1661,13 +1701,27 @@ export default async function registerRoutes(app, ctx) {
         const idx = latest.findIndex(s => s.id === id);
         if (idx === -1) return json({ ok: false, error: '表情包不存在' }, 404);
         if (sug.description) latest[idx].description = sug.description;
+        // v0.8.0 - 识图改了语义描述就重建向量，否则旧向量还按旧描述说话
+        const semanticBefore = latest[idx].semantic_description || '';
         if (sug.semantic_description) latest[idx].semantic_description = sug.semantic_description;
         if (Array.isArray(sug.emotion)) latest[idx].tags.emotion = sug.emotion.filter(Boolean);
         if (Array.isArray(sug.scene)) latest[idx].tags.scene = sug.scene.filter(Boolean);
         if (Array.isArray(sug.keywords)) latest[idx].tags.keywords = sug.keywords.filter(Boolean);
+        // v0.8.0 - 识图给的场合锁：只有真给了非空值才覆写。
+        // 空数组表示「这轮没判出来」，不是「取消限制」。当成取消会把用户手动设的锁无声摘掉，
+        // 这张图重新在任意场合出场，正好是这版要修的回归。取消只走用户的显式操作。
+        if (Array.isArray(sug.occasion)) {
+          const nextOccasions = sug.occasion.map(s => String(s).trim()).filter(Boolean);
+          if (nextOccasions.length) latest[idx].occasion = nextOccasions;
+        }
+        fillInferredOccasion(latest[idx]);
         latest[idx].tagged_at = new Date().toISOString();
         latest[idx].vision_succeeded_at = visionSucceededAt;
         writeMeta(latest);
+        if ((latest[idx].semantic_description || '') !== semanticBefore) {
+          const snapshot = { ...latest[idx], tags: { ...(latest[idx].tags || {}) } };
+          void rebuildStickerVector(snapshot, { ctx }).catch(() => {});
+        }
         ctx?.log?.info?.('[biaoqingbao] 单张识图并应用:', id);
         return json({ ok: true, data: sug, message: '识图完成，标签已应用' });
       });
@@ -2315,8 +2369,9 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
   }
 
   // 确认接口的重复请求需要按字段比较，不能依赖对象键顺序。
+  const CHAT_PATCH_FIELDS = ['description', 'semantic_description', 'emotion', 'scene', 'keywords', 'occasion'];
   function sameChatTagPatch(a, b) {
-    const fields = ['description', 'semantic_description', 'emotion', 'scene', 'keywords'];
+    const fields = CHAT_PATCH_FIELDS;
     return fields.every((field) => {
       const aHas = Object.prototype.hasOwnProperty.call(a || {}, field);
       const bHas = Object.prototype.hasOwnProperty.call(b || {}, field);
@@ -2333,8 +2388,10 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
       emotion: tags.emotion || [],
       scene: tags.scene || [],
       keywords: tags.keywords || [],
+      // v0.8.4 - 场合锁也参与幂等比对，否则带 occasion 的建议重试会永远对上
+      occasion: sticker?.occasion || [],
     };
-    const fields = ['description', 'semantic_description', 'emotion', 'scene', 'keywords'];
+    const fields = CHAT_PATCH_FIELDS;
     const present = fields.filter((field) => Object.prototype.hasOwnProperty.call(patch || {}, field));
     return present.length > 0 && present.every((field) => JSON.stringify(current[field]) === JSON.stringify(patch[field]));
   }
@@ -2446,7 +2503,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
 - 用户说的「不合适」有三种可能：标签认错了、这张图本身不行、只是这一手场合不对。先从现场和账判断是哪一种，实在判不出来再问一句
 - 如果现场的情绪和标签里的场景对不上（比如这次是释然，标签里只有晚安），先把这个矛盾指出来，它通常就是问题本身
 - 用户抱怨「不搭」时，先认清这是你自己那一次配得不对，不是用户发错了图，也不要把情绪归到用户头上
-- 如果用户只是这一手场合不对，别建议改图，也别劝他拉黑；说清「这次不该用它」，要改就往场景上改，不动其他场合
+- 如果用户只是这一手场合不对，别建议改图，也别劝他拉黑；说清「这次不该用它」。但用户明确说「这张以后只在早上用」「别在中午拿这张出来」这类，那是要加限用场合（occasion），照做，别去改情绪/场景。
 - 如果用户其实是不想再看到这张图，就直说这一点，告诉他不用改标签也能生效，不要硬改
 - 用户说的不够清楚就直接问，别猜
 
@@ -2461,7 +2518,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
 2. 如果达成共识（用户认可你的调整方向），在回复末尾追加修改建议块：
 
 <suggestion>
-{"description":"新描述","semantic_description":"新语义描述","emotion":["新情绪"],"scene":["新场景"],"keywords":["新关键词"]}
+{"description":"新描述","semantic_description":"新语义描述","emotion":["新情绪"],"scene":["新场景"],"keywords":["新关键词"],"occasion":["新场合"]}
 </suggestion>
 
 字段要求：
@@ -2470,7 +2527,7 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
 - emotion: 1-3 个具体情绪词（委屈、撒娇、得意、社死），不要行为描述
 - scene: 每个不超过 4 个字（催回复、吐槽、早安、安慰）
 - keywords: 6-10 个词，画面元素词 + 使用情境词（这张图适合在聊什么话题/情境时发，如 加班、早起、催回复）
-
+- occasion: 限用场合，可选值只有 早安、晚安、生日、节日、恭喜。只有画面里写的字把这张图钉死在某个场合时才填（如画面写着「早安」「晚安」「生日快乐」）；填了它，这张图就只会在那个场合出现，别处一律不出。用户说「这张以后只在早上用」属于这一类。用户说「这张别的场合也能用」就给空数组。没聊到这件事时保持原样，不要自己加。
 注意：
 - 没变化的字段也要写，保持 JSON 完整
 - 输出 <suggestion> 后用户点了确认就会写入，所以要谨慎，只在用户明确同意时输出
@@ -2610,6 +2667,8 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
         '情绪：' + ((tags.emotion || []).join('、') || '（无）'),
         '场景：' + ((tags.scene || []).join('、') || '（无）'),
         '关键词：' + ((tags.keywords || []).join('、') || '（无）'),
+        // v0.8.4 - 场合锁：模型得知道自己现在锁了什么，否则聊到「这张怎么别处也发」会摸不着
+        '限用场合：' + ((sticker.occasion || []).join('、') || '（无，任何场合都能用）'),
       ].join('\n');
 
       // v0.18.0 - 历史定位：找这张图最近一次何时何地发的，拿当时那段对话作为参考
@@ -2736,6 +2795,11 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
               emotion: Array.isArray(parsed.emotion) ? parsed.emotion.filter(Boolean).map(String) : (tags.emotion || []),
               scene: Array.isArray(parsed.scene) ? parsed.scene.filter(Boolean).map(String).map(s => s.slice(0, 4)) : (tags.scene || []),
               keywords: Array.isArray(parsed.keywords) ? parsed.keywords.filter(Boolean).map(String) : (tags.keywords || []),
+              // v0.8.4 - 场合锁：模型给了就按词表归一，没给就沿用当前值。
+              // 给了空数组是「取消限制」，不能当成「没说话」。
+              occasion: Object.prototype.hasOwnProperty.call(parsed, 'occasion')
+                ? [...occasionSet(Array.isArray(parsed.occasion) ? parsed.occasion.map(String) : [])]
+                : [...occasionSet(sticker.occasion || [])],
             };
           }
         } catch (e) {
@@ -2752,6 +2816,8 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
         emotion: tags.emotion || [],
         scene: tags.scene || [],
         keywords: tags.keywords || [],
+        // v0.8.4 - 前端拿它渲染「改前/改后」对照
+        occasion: sticker.occasion || [],
       };
 
       // v0.1.30 - 聊天记录落进卡片记录：卡片被宿主重放（切窗口回来、App 重装）后还能接着看、接着聊。
@@ -2840,6 +2906,12 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
         if (list === null) return json({ ok: false, error: 'keywords 必须是数组' }, 400);
         cleanTags.keywords = list;
       }
+      if (new_tags.occasion !== undefined) {
+        if (!Array.isArray(new_tags.occasion)) return json({ ok: false, error: 'occasion 必须是数组' }, 400);
+        // v0.8.4 - 只收词表内的场合组名：模型编个「工作日」也进不了库，
+        // 否则一个词表外的值等于把这张图锁死在不存在的场合里。
+        cleanTags.occasion = [...occasionSet(new_tags.occasion.map(s => String(s).trim()).filter(Boolean))];
+      }
 
       // 回包可能在写入后丢失，保留短期确认状态让同一建议安全重试。
       if (session.confirmed_tags) {
@@ -2864,6 +2936,11 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
       if (cleanTags.emotion !== undefined) sticker.tags.emotion = cleanTags.emotion;
       if (cleanTags.scene !== undefined) sticker.tags.scene = cleanTags.scene;
       if (cleanTags.keywords !== undefined) sticker.tags.keywords = cleanTags.keywords;
+      // v0.8.4 - 场合锁：空数组就是取消限制，把字段摘掉而不是留一个空数组
+      if (cleanTags.occasion !== undefined) {
+        if (cleanTags.occasion.length) sticker.occasion = cleanTags.occasion;
+        else delete sticker.occasion;
+      }
       sticker.tagged_at = new Date().toISOString();
 
       writeMeta(meta);

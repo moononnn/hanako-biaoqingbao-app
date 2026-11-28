@@ -11,7 +11,7 @@ function reply(obj) {
 }
 
 export const name = "list_stickers";
-export const description = "浏览当前伙伴可用的表情包，可按情绪、场景筛选，返回 id、描述、标签和所属分组；伙伴分组白名单会自动生效。什么时候用：用户问图库里有什么、某类图有多少张；或者你要改某张图之前先把它找出来。按当前话题精准找图用 search_stickers，日常配图交给 express。";
+export const description = "浏览当前伙伴可用的表情包，可按情绪、场景筛选，返回 id、描述、标签、场合锁和所属分组；伙伴分组白名单会自动生效。带 occasion 的图只在那个场合被选中。什么时候用：用户问图库里有什么、某类图有多少张；或者你要改某张图之前先把它找出来。按当前话题精准找图用 search_stickers，日常配图交给 express。";
 export const parameters = {
   type: "object",
   properties: {
@@ -55,6 +55,8 @@ export async function execute(input, ctx) {
     file: s.file,
     description: s.description,
     tags: s.tags,
+    // v0.8.0 - 场合锁：非空表示这张图只在那个场合被选中，别的场合不会出现
+    ...(Array.isArray(s.occasion) && s.occasion.length ? { occasion: s.occasion } : {}),
     group_ids: getStickerGroupIds(s, knownGroupIds),
     added_at: s.added_at
   }));

@@ -152,6 +152,11 @@
         if (!sameStringList(tags[field] || [], suggestion[field])) return false;
       }
     }
+    // v0.8.4 - 场合锁在顶层，不在 tags 里
+    if (suggestion.occasion !== undefined) {
+      checked = true;
+      if (!sameStringList(sticker.occasion || [], suggestion.occasion)) return false;
+    }
     return checked;
   }
   // 确认请求可能已经写入成功，只是页面没有收到响应；回查落盘结果再决定是否报错。
@@ -1211,12 +1216,17 @@
         for (var g = 0; g < stickerGroupIds.length; g++) {
           groupTags += '<span class="tag group">' + escHtml(groupNameById(stickerGroupIds[g])) + '</span>';
         }
+        var occTags = '';
+        // v0.8.3 - 限用场合在卡片上就能看见，不用点进编辑才知道这张被锁了
+        if (Array.isArray(s.occasion) && s.occasion.length) {
+          occTags = '<span class="tag occasion" title="只在' + escHtml(s.occasion.join('、')) + '这类场合出现">限 ' + escHtml(s.occasion.join('/')) + '</span>';
+        }
         card.innerHTML =
           '<div class="sticker-check" data-act="toggle-select">✓</div>'
           + '<img src="' + imgUrl + '" alt="' + escHtml(s.description) + '" loading="lazy">'
           + '<div class="card-info">'
           + '<div class="card-desc" title="' + escHtml(s.description) + '">' + escHtml(s.description) + '</div>'
-          + '<div class="card-tags">' + emTags + scTags + groupTags + '</div>'
+          + '<div class="card-tags">' + emTags + scTags + groupTags + occTags + '</div>'
           + '<div class="card-tagged-at">' + formatTaggedAt(s.tagged_at) + '</div>'
           + '<div class="card-actions">'
           + '<button class="edit-btn" data-id="' + escHtml(s.id) + '">编辑</button>'
@@ -1302,6 +1312,8 @@
         $('edit-emotion').value = (sug.emotion || []).join(', ');
         $('edit-scene').value = (sug.scene || []).join(', ');
         $('edit-keywords').value = (sug.keywords || []).join(', ');
+        // v0.8.3 - 识图结果里带了场合锁就一并填进表单，用户确认后保存
+        if (Array.isArray(sug.occasion)) $('edit-occasion').value = sug.occasion.join(', ');
         toast('识别完成，标签已填进表单（点保存生效）');
       } else {
         toast('识图失败: ' + (data.error || ''), true);
@@ -1311,6 +1323,33 @@
     } finally {
       btn.disabled = false;
       btn.textContent = 'AI 重新识图';
+    }
+  }
+
+  // v0.8.3 - 按当前标签和描述重判场合锁：只读本地数据，不调模型、不花额度。
+  async function inferOccasionFromTags() {
+    var id = $('edit-id').value;
+    if (!id) return;
+    var btn = $('editor-occasion-infer-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '重判中...'; }
+    try {
+      var resp = await apiFetch(withAuth(API + '/api'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'infer_occasion', id: id }),
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        var list = (data.data && data.data.occasion) || [];
+        $('edit-occasion').value = list.join(', ');
+        toast((data.message || '已重判') + '（点保存生效）');
+      } else {
+        toast('重判失败: ' + (data.error || ''), true);
+      }
+    } catch (e) {
+      toast('重判出错: ' + e.message, true);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '按标签重判'; }
     }
   }
 
@@ -1965,6 +2004,8 @@
     $('edit-emotion').value = (sticker.tags.emotion || []).join(', ');
     $('edit-scene').value = (sticker.tags.scene || []).join(', ');
     $('edit-keywords').value = (sticker.tags.keywords || []).join(', ');
+    // v0.8.3 - 限用场合：空表示不限制，只在特定场合用的图靠这个字段拦
+    $('edit-occasion').value = (sticker.occasion || []).join(', ');
     openModal('editor-modal');
   }
 
@@ -1983,12 +2024,22 @@
           emotion: $('edit-emotion').value,
           scene: $('edit-scene').value,
           keywords: $('edit-keywords').value,
+          // v0.8.3 - 空串就是「取消限制」，后端收到 occasion 字段会按词表清洗后再存
+          occasion: $('edit-occasion').value,
         }),
       });
       var data = await resp.json();
       if (data.ok) {
+        // v0.8.3 - 用户手填的场合词可能不在词表里（比如写「工作日」）。
+        // 后端会默默丢掉不认识的词，不提醒的话用户会以为已经锁上了。
+        var wanted = $('edit-occasion').value.trim();
+        var savedOccasion = (data.data && data.data.occasion) || [];
         closeEditor();
-        toast('已保存');
+        if (wanted && savedOccasion.length === 0) {
+          toast('已保存，但「' + wanted + '」没认出来。场合只能填：早安、晚安、生日、节日、恭喜', true);
+        } else {
+          toast('已保存');
+        }
         await loadStickers();
         await refreshPreferences();
       } else {
@@ -3813,6 +3864,8 @@
     renderTagList('chat-tag-emotion', tags.emotion || []);
     renderTagList('chat-tag-scene', tags.scene || []);
     renderTagList('chat-tag-keywords', tags.keywords || []);
+    // v0.8.4 - 场合锁：空着就写「不限」，否则用户分不清「没锁」和「还没加载」
+    renderTagList('chat-tag-occasion', (sticker.occasion && sticker.occasion.length) ? sticker.occasion : ['不限']);
 
     $('chat-messages').innerHTML = '<div class="chat-empty">告诉我哪里不对、该怎么调。<br>比如：这张图表达的是撒娇不是开心</div>';
     $('chat-preview').hidden = true;
@@ -3913,6 +3966,9 @@
     diffHtml += '<div class="diff-row"><b>情绪：</b>' + (oldTags.emotion || []).map(escHtml).join('、') + '</div>';
     diffHtml += '<div class="diff-row"><b>场景：</b>' + (oldTags.scene || []).map(escHtml).join('、') + '</div>';
     diffHtml += '<div class="diff-row"><b>关键词：</b>' + (oldTags.keywords || []).map(escHtml).join('、') + '</div>';
+    // v0.8.4 - 场合锁在顶层，不写出来的话用户看不出这张被限在哪
+    var oldOccasion = (sticker.occasion && sticker.occasion.length) ? sticker.occasion.join('、') : '不限';
+    diffHtml += '<div class="diff-row"><b>场合：</b>' + escHtml(oldOccasion) + '</div>';
     diffHtml += '</div>';
 
     diffHtml += '<div class="chat-preview-col modified">';
@@ -3921,6 +3977,10 @@
     diffHtml += '<div class="diff-row"><b>情绪：</b>' + (suggestion.emotion || []).map(escHtml).join('、') + '</div>';
     diffHtml += '<div class="diff-row"><b>场景：</b>' + (suggestion.scene || []).map(escHtml).join('、') + '</div>';
     diffHtml += '<div class="diff-row"><b>关键词：</b>' + (suggestion.keywords || []).map(escHtml).join('、') + '</div>';
+    var newOccasion = Array.isArray(suggestion.occasion)
+      ? (suggestion.occasion.length ? suggestion.occasion.join('、') : '不限')
+      : oldOccasion;
+    diffHtml += '<div class="diff-row"><b>场合：</b>' + escHtml(newOccasion) + '</div>';
     diffHtml += '</div>';
 
     $('chat-preview-diff').innerHTML = diffHtml;
@@ -5820,6 +5880,9 @@
   // ═══════════════════════════════════
   //  后台任务角标
   // ═══════════════════════════════════
+  // v0.8.6 - 只播最近 24 小时的任务。以前页面一刷就把几个月前的失败重播一遍，
+  // 实测：10-04 那次「2 张全失败」在 11-28 还在弹，看着像刚刚又挂了。
+  var BATCH_NOTIFY_WINDOW_MS = 24 * 60 * 60 * 1000;
   async function checkBatchTasks() {
     var requestGeneration = ++batchTasksRequestGeneration;
     try {
@@ -5836,6 +5899,11 @@
 
       for (var i = 0; i < data.data.length; i++) {
         var t = data.data[i];
+        var createdTs = Date.parse(t.created_at || '') || 0;
+        if (createdTs && Date.now() - createdTs > BATCH_NOTIFY_WINDOW_MS) {
+          batchTaskNotified[t.id] = true;
+          continue;
+        }
         if (t.status !== 'running' && t.status !== 'cancelled' && t.status !== 'paused' && !batchTaskNotified[t.id]) {
           batchTaskNotified[t.id] = true;
           if (t.status === 'completed') {
@@ -6337,6 +6405,8 @@
     // 编辑弹窗
     $('editor-save').addEventListener('click', saveEdit);
     $('editor-autotag-btn').addEventListener('click', handleAutoTagEditor);
+    var occasionInferBtn = $('editor-occasion-infer-btn');
+    if (occasionInferBtn) occasionInferBtn.addEventListener('click', inferOccasionFromTags);
 
     // 批量识图弹窗关闭按钮
     var batchCloseBtn = $('batch-modal-close');
