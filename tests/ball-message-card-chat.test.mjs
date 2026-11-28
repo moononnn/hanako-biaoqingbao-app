@@ -177,6 +177,9 @@ test('入口行出现后要重报尺寸，把它算进卡片高度', async () =>
   const m = machine();
   const state = mount({ fetch: m.fetch });
   await settle();
+  // v0.7.9：图片没就绪前不上报尺寸（避免空壳高度先开一次），先让图片就绪再验行变化。
+  state.elements.image.dispatch('load');
+  await settle();
   assert.equal(state.elements['fb-chat-row'].hidden, true, '没表态时入口是隐藏的');
   const before = state.resizeRequests[state.resizeRequests.length - 1].height;
   state.elements['fb-neg'].dispatch('click');
@@ -387,6 +390,9 @@ test('模型没配：给一句人话指路，不是甩内部报错', async () =>
 test('收起聊天：图片和三键回来，账还留着以便接着聊', async () => {
   const m = machine({ recordExtra: { feedback: 'negative' } });
   const state = mount({ fetch: m.fetch });
+  await settle();
+  // v0.7.9：图片没就绪前不上报尺寸，先让它就绪（收起后要重报回图片那一版高度）。
+  state.elements.image.dispatch('load');
   await settle();
   state.elements['fb-chat-btn'].dispatch('click');
   state.elements['chat-input'].value = '聊一句';

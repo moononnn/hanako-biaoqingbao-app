@@ -123,6 +123,11 @@ export function mountMessageCard({ showCaption = false } = {}) {
   // v0.5.4 - 「设了 src、还没 load/error」这段窗口。这期间只报高度不报宽度，
   // 因为宿主卡槽宽度只增不减，图片就绪前报一次满宽就再也收不回来（issue #2）。
   let imagePending = false;
+  // v0.7.9 - 不再推迟上报：宿主先把卡片挂在它自己的大框里（实测 726x480，比聊天列宽一倍），
+  // 只有我们报一次尺寸它才收。原来为了防「小图宽度被焊死」而拖到图片就绪才报，
+  // 代价就是那个大框要占一秒，用户看到的就是「读取中突然满屏，然后缩回来」。
+  // 实测宿主给的下限就是聊天列宽（近 3000 条日志里 vw 只有 315 一个值），窄于它本来就无效，
+  // 所以拖着不报什么也换不来。现在首帧就报宽，让宿主尽快回到列宽。
   let lastSize = '';
   let recordId = '';
   let boundSessionId = '';
@@ -285,7 +290,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
     // 图片没就绪时 targetWidth 只能退到档位上限，那一下就把宽度焊死在 316，之后再报 132 会被顶回来
     // （2026-10-25 实机：want=132x122 got=315x122）。所以宽度只等 load/error 之后再报第一次。
     // 聊天面板例外：它的宽度就是一整条，跟图片无关。
-    const width = imagePending && !chatOpen ? null : targetWidth();
+    const width = targetWidth();
     const size = (width == null ? 'auto' : width) + 'x' + height;
     const steady = width == null
       ? Math.abs(height - lastH) <= 1
@@ -304,7 +309,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
     // ih（图片盒子高）> vh 就是内容溢出被裁，能直接分清楚是算错了还是宿主压矮了。
     const imgBoxH = Math.round(Number(image?.getBoundingClientRect?.().height) || 0);
     const contentH = Math.round(Number(message?.scrollHeight) || 0);
-    report('SIZE ' + size + ' nat=' + natural + 'x' + naturalH + ' vw=' + viewportW + ' vh=' + viewport
+    report('SIZE ' + size + ' id=' + (recordId || '-') + ' nat=' + natural + 'x' + naturalH + ' vw=' + viewportW + ' vh=' + viewport
       + ' ih=' + imgBoxH + ' ch=' + contentH + ' fit=' + (config.smallImageFit === false ? 0 : 1)
       + ' mode=' + (config.sizeMode || 'auto'));
     try {
@@ -316,6 +321,19 @@ export function mountMessageCard({ showCaption = false } = {}) {
       report('RESIZE-THROW ' + size + ' ' + (error?.message || error));
     }
     verifyApplied(width, height);
+  }
+
+  // v0.7.9 - 宿主把卡挂在它自己的大框里（实测 726x480），收回去需要它自己重排一次。
+  // 只报一次容易被它拦在重排前，用户就看到大框顶了好几秒。这里在挂载后补几刀，
+  // 每刀都是同一个值，不会造成尺寸来回；实例换代或退场就不报了。
+  let burstTimers = [];
+  function scheduleSizeBurst() {
+    for (const timer of burstTimers) clearTimeout(timer);
+    const mine = generation;
+    burstTimers = [60, 180, 400, 800].map(ms => setTimeout(() => {
+      if (mine !== generation || stoodDown) return;
+      resize(true);
+    }, ms));
   }
 
   // v0.1.23 - 上报后自检：宿主偶尔不按请求开框（卡片重放路径上见过）。
@@ -1068,20 +1086,24 @@ export function mountMessageCard({ showCaption = false } = {}) {
     const id = candidates[0];
     // 同一张卡重新出现在视图里（切走再切回来）：尺寸重新上报一次，别的都不动。
     if (binding === id) { restoreCardHeader(); resize(true); return; }
-    invalidateHeader();
+    // v0.7.9 - 宿主会重推一次上下文（换编号、补归属），这时卡上如果已经有图，
+    // 先把图抹掉再重拉，用户就会看到「图一闪就没了 → 正在读取 → 宿主大框 → 图又回来」。
+    // 旧图先留着，新图到位再替；标题同理，别先清空。
+    const keepOldImage = Boolean(imageUrl) && Boolean(image) && !image.hidden;
+    if (!keepOldImage) {
+      invalidateHeader();
+      if (caption) caption.textContent = '';
+      if (fbCard) fbCard.hidden = true;
+      clearImage();
+    }
     binding = id;
     recordId = id;
     chatStickerId = '';
     resetChatState();
     const current = ++generation;
-    clearImage();
-    // v0.5.4 - 从这一刻到图片 load/error 之间，一律不报宽度（只报高度）。
-    // 宿主宽度 max(50, 请求, 当前) 只增不减，这个窗口里报一次宽（只能是档位上限）就再也收不回来。
     imagePending = true;
-    if (caption) caption.textContent = '';
-    if (fbCard) fbCard.hidden = true;
     showToast('');
-    status.textContent = '正在读取这张图片…';
+    if (!keepOldImage) status.textContent = '正在读取这张图片…';
     try {
       // 候选编号可能有多个：哪个查得到用哪个
       let result = null;
@@ -1108,9 +1130,11 @@ export function mountMessageCard({ showCaption = false } = {}) {
       if (!picture.ok) throw new Error('这张图片已不可用');
       const blob = await picture.blob();
       if (current !== generation) return;
+      // v0.7.9 - 新图到位再替旧图，旧的 objectURL 在这时释放；中间不断流。
+      const previousUrl = imageUrl;
       imageUrl = URL.createObjectURL(blob);
-      imagePending = true;   // v0.5.4 - 设了 src 到 load 之间不能报宽度（宿主宽度只增不减）
       image.src = imageUrl;
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
       image.hidden = false;
       // v0.1.33 - 两张流内卡合成一张后，配文按记录里的归属决定：伙伴配的图不配文（和拆卡时那张 partner 页一致）。
       if (showCaption && caption && result.data.sender !== 'partner') caption.textContent = result.data.text || '';
@@ -1138,6 +1162,7 @@ export function mountMessageCard({ showCaption = false } = {}) {
       }
       report(describeContext(context, candidates, 'HIT:' + recordId));
       resize(true);
+      scheduleSizeBurst();
     } catch (error) {
       if (current !== generation) return;
       binding = ''; recordId = ''; boundSessionId = '';
@@ -1184,7 +1209,15 @@ export function mountMessageCard({ showCaption = false } = {}) {
   }
 
   // 图片量到真实尺寸后再报一次：只报一次容易停在加载前的旧高度。
-  image.addEventListener('load', () => { imagePending = false; resize(true); requestAnimationFrame(() => resize(true)); });
+  // v0.7.9 - 图片解完再亮出来，并对它设一次尺寸：先设尺寸再显示，避免那一倏「极小」中间态。
+  image.addEventListener('load', () => {
+    imagePending = false;
+    applyImageUpscale();
+    image.hidden = false;
+    resize(true);
+    requestAnimationFrame(() => resize(true));
+    scheduleSizeBurst();
+  });
   image.addEventListener('error', () => { imagePending = false; clearImage(); status.textContent = '图片暂时无法显示'; resize(true); });
   if (typeof ResizeObserver === 'function' && message) {
     new ResizeObserver(() => resize(false)).observe(message);

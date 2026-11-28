@@ -371,6 +371,11 @@ test('compact width is reported to the host rather than only shrinking inner CSS
 test('card reappearing in the view reports its size again instead of trusting the host frame', async () => {
   const state = ui({ cardInstanceId: idA, embeddedSessionId: 'session-one' }, () => response(idA));
   await settle();
+  // v0.7.9：图片没就绪前不上报尺寸，先让图片就绪，再验重挂载会重报。
+  state.elements.image.naturalWidth = 600;
+  state.elements.image.naturalHeight = 400;
+  state.elements.image.events.load();
+  await settle();
   const before = state.resizeRequests.length;
   // 切到别的对话再切回来：同一个 cardInstanceId 重新下发上下文，不能再发请求，但必须重报尺寸。
   state.change({ cardInstanceId: idA, embeddedSessionId: 'session-one' });
