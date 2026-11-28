@@ -3871,7 +3871,8 @@ const GALLERY_SORT_MODES = ['added_desc', 'added_asc', 'tagged_desc', 'descripti
 // 卡片反馈的失败原因翻成人话；不认识的错误原样带出，方便报障。
 function friendlyCardFeedbackError(raw) {
   const text = String(raw || '');
-  if (text.includes('缺少场景情绪')) return '这张图没记下当时配它的场景情绪，「应景」和「不应景」都记不了，喜欢和不喜欢可以用';
+  // v0.7.9 - 0.7.8 起「不应景」缺情绪不再报错（落未分场景桶），这句只对应应景了。
+  if (text.includes('缺少场景情绪')) return '这张图没记下当时配它的场景情绪，「应景」记不了；喜欢、不喜欢和「不应景」可以用';
   if (text.includes('无法安全撤销')) return '这张图的反馈状态已经变了，再点一次就好';
   return text || '反馈没记上';
 }

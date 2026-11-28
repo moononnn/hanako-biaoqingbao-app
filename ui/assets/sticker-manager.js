@@ -3499,6 +3499,38 @@
       html += '</div>';
     }
 
+    // v0.7.9 - 「未分场景」桶不属于任何情绪映射，跟着映射渲染永远显示不出来，单独开一块。
+    // 这些条目是 0.7.8 开始产生的（卡片没记下情绪时落的桶），不给入口就只能靠删图顺带清掉。
+    var unscopedHtml = '';
+    var mfAll = (window.__CONTEXT_FEEDBACK__ || {}).misfits || {};
+    Object.keys(mfAll).forEach(function (mfAgent) {
+      var mfBucket = mfAll[mfAgent] && mfAll[mfAgent]['未分场景'];
+      if (!mfBucket || typeof mfBucket !== 'object') return;
+      var mfIds = Object.keys(mfBucket).filter(function (sid) {
+        return mfBucket[sid] && Number(mfBucket[sid].count) > 0;
+      });
+      if (mfIds.length === 0) return;
+      var mfName = (window.__AGENT_NAMES__ || {})[mfAgent] || mfAgent;
+      unscopedHtml += '<div class="pref-mapping" data-agent="' + escHtml(mfAgent) + '">';
+      unscopedHtml += '<div style="display:flex;align-items:center;gap:4px;margin-top:3px;flex-wrap:wrap">';
+      unscopedHtml += '<span style="color:#b0546e;font-size:11px;font-weight:600;flex-shrink:0">未分场景 · ' + escHtml(mfName) + ' ' + mfIds.length + ' 张</span>';
+      mfIds.forEach(function (sid) {
+        var entry = mfBucket[sid] || {};
+        var count = Number(entry.count) || 0;
+        unscopedHtml += '<span class="pref-chip">'
+          + '<img class="pref-thumb" src="' + withAuth(API + '/api/image?id=' + encodeURIComponent(sid)) + '" onerror="this.style.display=\'none\'" alt="">'
+          + '<span style="font-size:10px;color:#b0546e;font-weight:600" title="没记下情绪时点的不应景，对所有情绪都轻度生效">×' + count + '</span>'
+          + '<button class="pref-x" data-act="remove-context-misfit" data-sticker="' + escHtml(sid) + '" data-emotion="未分场景" title="移除这条不应景记录">×</button>'
+          + '</span>';
+      });
+      unscopedHtml += '</div></div>';
+    });
+    if (unscopedHtml) {
+      html += '<div style="margin-top:12px">'
+        + '<div style="font-size:11px;color:var(--text-light);margin-bottom:4px">没有记下情绪的「不应景」</div>'
+        + unscopedHtml + '</div>';
+    }
+
     $('pref-log').innerHTML = html;
     bindPreferenceActions();
     
